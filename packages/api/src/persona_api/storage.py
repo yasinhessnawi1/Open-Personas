@@ -44,6 +44,7 @@ from persona.tools._sandbox import (
     make_dirs_nofollow,
     open_nofollow,
     read_nofollow_bytes,
+    require_path_segment,
     resolve_sandbox_path,
     write_nofollow_bytes,
 )
@@ -85,6 +86,20 @@ class StorageObject:
     size: int
 
 
+def _persona_folder(prefix: str) -> str:
+    """``prefix`` without its one trailing slash, if it names a persona's folder or deeper.
+
+    Only one slash comes off: ``rstrip`` would turn ``u1//`` into the owner's whole folder.
+    """
+    stem = require_relative_path(prefix.removesuffix("/"))
+    if "/" not in stem:
+        raise SandboxViolationError(
+            "folder to delete is wider than one persona",
+            context={"reason": "wider_than_a_persona", "preview": stem[:80]},
+        )
+    return stem
+
+
 @runtime_checkable
 class FileStorage(Protocol):
     """A content store keyed by a logical key (R5-D-4).
@@ -124,13 +139,23 @@ class FileStorage(Protocol):
         ...
 
     def delete_prefix(self, prefix: str) -> int:
-        """Delete everything under the folder ``prefix`` and return how many objects went.
+        """Delete everything under one persona's folder and return how many objects went.
 
-        Sidecars included, and a key that merely starts with the same characters is not
-        under it. Idempotent: a prefix with nothing under it is 0. Anything but a plain
-        folder (empty, ``..``, a backslash) is refused with ``SandboxViolationError``,
-        because on S3 an empty prefix is the whole bucket. If an object cannot be removed
-        this raises ``OSError`` and a re-run finishes the job.
+        ``prefix`` is ``{owner}/{persona}`` or deeper. Sidecars included, and a key that
+        merely starts with the same characters is not under it. Idempotent: a prefix with
+        nothing under it is 0. Anything else is refused with ``SandboxViolationError``: on
+        S3 an empty prefix is the whole bucket, and a single segment is the whole account,
+        which is what a persona id that came out empty would produce. Erasing an account is
+        :meth:`delete_account_folder`, so it can only happen by asking for it. If an object
+        cannot be removed this raises ``OSError`` and a re-run finishes the job.
+        """
+        ...
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        """Delete everything an owner has stored and return how many objects went.
+
+        The account-erasure door, separate from :meth:`delete_prefix` so a persona delete can
+        never widen into it. ``owner_id`` must be exactly one name. Idempotent.
         """
         ...
 
@@ -185,7 +210,12 @@ class LocalFileStorage:
             yield StorageObject(key=key, size=size)
 
     def delete_prefix(self, prefix: str) -> int:
-        stem = require_relative_path(prefix.rstrip("/"))
+        return self._remove_folder(_persona_folder(prefix))
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        return self._remove_folder(require_path_segment(owner_id, what="owner id"))
+
+    def _remove_folder(self, stem: str) -> int:
         base = self._resolve(stem)
         # A folder that is itself a link would be the target's contents counted and, on some
         # hosts, removed. The resolved path must be the path that was named.
@@ -287,7 +317,12 @@ class S3FileStorage:
                 yield StorageObject(key=obj["Key"], size=int(obj["Size"]))
 
     def delete_prefix(self, prefix: str) -> int:
-        stem = require_relative_path(prefix.rstrip("/"))
+        return self._remove_folder(_persona_folder(prefix))
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        return self._remove_folder(require_path_segment(owner_id, what="owner id"))
+
+    def _remove_folder(self, stem: str) -> int:
         keys = [obj.key for obj in self.list(stem)]
         for start in range(0, len(keys), _S3_DELETE_BATCH):
             batch = keys[start : start + _S3_DELETE_BATCH]

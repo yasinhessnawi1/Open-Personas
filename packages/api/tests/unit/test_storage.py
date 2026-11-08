@@ -241,7 +241,21 @@ def test_s3_list_uses_the_paginator_and_returns_objects() -> None:
 # --------------------------------------------------------------------------- #
 # delete_prefix: everything a persona or an account stored (R9-284)            #
 # --------------------------------------------------------------------------- #
-_REFUSED_PREFIXES = ["", "/", ".", "..", "u1/..", "a/../b", "../u2", "/u1", "u1\\p1"]
+_REFUSED_PREFIXES = [
+    "",
+    "/",
+    ".",
+    "..",
+    "u1/..",
+    "a/../b",
+    "../u2",
+    "/u1",
+    "u1",
+    "u1/",
+    "u1//",
+    "u1/p1//",
+    "u1\\p1",
+]
 
 
 def _seed_two_tenants(storage: FileStorage) -> None:
@@ -347,6 +361,68 @@ def test_local_delete_prefix_refuses_a_prefix_that_is_itself_a_link(tmp_path: Pa
         storage.delete_prefix("u1/alias")
 
     assert (root / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+_REFUSED_OWNERS = ["", ".", "..", "u1/", "u1/p1", "../u2", "/u1", "u1\\p1"]
+
+
+def test_an_empty_persona_cannot_widen_a_prefix_to_the_whole_account(tmp_path: Path) -> None:
+    """The review's HIGH: ``f"{owner}/{persona}/"`` with no persona is the owner's folder."""
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    for prefix in ("u1", "u1/", "u1//"):
+        with pytest.raises(SandboxViolationError):
+            storage.delete_prefix(prefix)
+    assert (tmp_path / "u1" / "p1" / "uploads" / "a.png").exists()
+    assert (tmp_path / "u1" / "p10" / "uploads" / "sibling.png").exists()
+
+
+def test_local_account_door_removes_exactly_that_owner(tmp_path: Path) -> None:
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+
+    assert storage.delete_account_folder("u1") == 4
+
+    assert not (tmp_path / "u1").exists()
+    assert (tmp_path / "u2" / "p9" / "uploads" / "c.png").exists()
+    assert storage.delete_account_folder("u1") == 0
+
+
+@pytest.mark.parametrize("owner", _REFUSED_OWNERS)
+def test_local_account_door_takes_one_owner_name_and_nothing_else(
+    tmp_path: Path, owner: str
+) -> None:
+    storage = LocalFileStorage(tmp_path)
+    _seed_two_tenants(storage)
+    with pytest.raises(SandboxViolationError):
+        storage.delete_account_folder(owner)
+    assert (tmp_path / "u1" / "p1" / "uploads" / "a.png").exists()
+    assert (tmp_path / "u2" / "p9" / "uploads" / "c.png").exists()
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+def test_s3_account_door_removes_exactly_that_owner() -> None:
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    client.store[("bkt", "u10/p1/uploads/similar.png")] = b"x"
+
+    assert storage.delete_account_folder("u1") == 4
+
+    assert {key for _, key in client.store} == {
+        "u2/p9/uploads/c.png",
+        "u10/p1/uploads/similar.png",
+    }
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+@pytest.mark.parametrize("owner", _REFUSED_OWNERS)
+def test_s3_account_door_takes_one_owner_name_and_nothing_else(owner: str) -> None:
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    before = dict(client.store)
+    with pytest.raises(SandboxViolationError):
+        storage.delete_account_folder(owner)
+    assert client.store == before
 
 
 @pytest.mark.usefixtures("_fake_botocore")
