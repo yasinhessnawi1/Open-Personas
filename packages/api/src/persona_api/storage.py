@@ -323,17 +323,23 @@ class S3FileStorage:
         return self._remove_folder(require_path_segment(owner_id, what="owner id"))
 
     def _remove_folder(self, stem: str) -> int:
-        keys = [obj.key for obj in self.list(stem)]
-        for start in range(0, len(keys), _S3_DELETE_BATCH):
-            batch = keys[start : start + _S3_DELETE_BATCH]
-            response = self._client.delete_objects(
-                Bucket=self._bucket,
-                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
-            )
-            refused = response.get("Errors") or []
-            if refused:
-                # A count: the keys carry file names.
-                raise OSError(f"{len(refused)} objects could not be deleted from the bucket")
+        from botocore.exceptions import ClientError  # noqa: PLC0415 - optional dep, guarded
+
+        try:
+            keys = [obj.key for obj in self.list(stem)]
+            for start in range(0, len(keys), _S3_DELETE_BATCH):
+                batch = keys[start : start + _S3_DELETE_BATCH]
+                response = self._client.delete_objects(
+                    Bucket=self._bucket,
+                    Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+                )
+                refused = response.get("Errors") or []
+                if refused:
+                    # A count: the keys carry file names.
+                    raise OSError(f"{len(refused)} objects could not be deleted from the bucket")
+        except ClientError:
+            # The protocol's OSError, and from None: the store's message can name a key.
+            raise OSError("the object store refused to list or delete a folder") from None
         return len(keys)
 
 

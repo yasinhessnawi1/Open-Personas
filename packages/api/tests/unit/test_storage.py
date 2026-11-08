@@ -127,6 +127,8 @@ class _FakeS3Client:
         self.store: dict[tuple[str, str], bytes] = {}
         self.delete_batches: list[int] = []
         self.refuse_deletes = False
+        self.delete_error: Exception | None = None
+        self.list_error: Exception | None = None
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> None:  # noqa: N803 — boto3 kwarg names
         _ = ContentType
@@ -146,6 +148,8 @@ class _FakeS3Client:
     def delete_objects(self, *, Bucket: str, Delete: dict[str, Any]) -> dict[str, object]:  # noqa: N803
         objects = Delete["Objects"]
         self.delete_batches.append(len(objects))
+        if self.delete_error is not None:
+            raise self.delete_error
         if self.refuse_deletes:
             return {"Errors": [{"Key": o["Key"], "Code": "AccessDenied"} for o in objects]}
         for obj in objects:
@@ -161,13 +165,19 @@ class _FakePaginator:
         self._client = client
 
     def paginate(self, *, Bucket: str, Prefix: str) -> object:  # noqa: N803
-        # One page is enough for the shape test; mirror list_objects_v2's contract.
+        # Several pages, smaller than a delete batch, as list_objects_v2 really answers: a caller
+        # that read only the first page would leave objects behind.
+        if self._client.list_error is not None:
+            raise self._client.list_error
         contents = [
             {"Key": key, "Size": len(body)}
             for (bkt, key), body in self._client.store.items()
             if bkt == Bucket and key.startswith(Prefix)
         ]
-        yield {"Contents": contents}
+        for start in range(0, len(contents), 400):
+            yield {"Contents": contents[start : start + 400]}
+        if not contents:
+            yield {}
 
 
 @pytest.fixture
@@ -457,6 +467,23 @@ def test_s3_delete_prefix_says_so_when_the_store_refused() -> None:
 
     with pytest.raises(OSError, match="3"):
         storage.delete_prefix("u1/p1")
+
+
+@pytest.mark.usefixtures("_fake_botocore")
+@pytest.mark.parametrize("failing", ["delete_error", "list_error"])
+def test_s3_delete_prefix_reports_a_store_failure_as_oserror_without_its_message(
+    failing: str,
+) -> None:
+    """The documented contract, so a caller handles one error type on both backends."""
+    storage, client = _s3_with_fake_client()
+    _seed_two_tenants(storage)
+    setattr(client, failing, _FakeClientError("u1/p1/uploads/a-private-file-name.png"))
+
+    with pytest.raises(OSError, match="object store") as caught:
+        storage.delete_prefix("u1/p1")
+
+    assert "private-file-name" not in str(caught.value)
+    assert caught.value.__suppress_context__ is True, "a traceback would print the store's message"
 
 
 @pytest.mark.usefixtures("_fake_botocore")
