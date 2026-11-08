@@ -44,6 +44,7 @@ __all__ = [
     "AuthenticationError",
     "BillingProviderUnavailableError",
     "CloudConfigRefusedError",
+    "ErasureRecordError",
     "CommunityDbError",
     "ChainHeadIndexInvalidError",
     "ChainHeadsConflictError",
@@ -185,6 +186,15 @@ class ChainHeadIndexInvalidError(PersonaError):
     A failed ``CREATE INDEX CONCURRENTLY`` leaves one. It enforces nothing, and
     ``IF NOT EXISTS`` would take it for the finished index, so the upgrade refuses instead and
     says to drop it. ``context`` carries the ``index`` name.
+    """
+
+
+class ErasureRecordError(PersonaError):
+    """The erasure ledger refused a write (R9-284).
+
+    It holds ids, step names and counts and nothing else, and a finished erasure is final, so
+    this is a bug in the caller rather than something a user did. ``context`` carries a
+    ``reason`` and never the refused value, which may be the very content being kept out.
     """
 
 
