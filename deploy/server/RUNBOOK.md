@@ -346,7 +346,14 @@ volume archive scan passed: regular files and directories only
 volume entries: 214 (the backup listed 214)
 ```
 
-Anything else stops the script. `pg_restore` runs in one transaction, so a failed restore
+One fact was added after that rehearsal, so it is not in the output above:
+`personas_unexpected_ids|0`, the count of personas whose id is not in the minted format
+(R9-285). It must be 0: the api refuses any other id in a URL, so such a persona could never
+be opened or deleted. A higher count prints a warning and the restore carries on; stop there
+and bring the count to the owner before deploying.
+
+Apart from that warning and the memory chains one below, anything else stops the script.
+`pg_restore` runs in one transaction, so a failed restore
 leaves no tables behind, and the role and extension steps are idempotent: fix the cause and
 run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification check),
 the tables are there and the script refuses to restore over them; start clean with
@@ -415,7 +422,8 @@ bin/deploy.sh
 
 The first build runs on the host's 2 cores: expect 10 to 20 minutes (the image carries CPU
 torch, no CUDA). It competes with nothing yet; later deploys run off-hours. The migrate step
-takes the restored dump from `058` to head. The first boot downloads the HF models (the bge
+takes the restored dump from `058` to head (`060` today: `059` the memory chain index, `060`
+the channel's persona pointer). The first boot downloads the HF models (the bge
 embedder, the reranker and the crisis encoder, about 1 to 2 GB) into the data volume and
 loads them in 1 to 2 minutes on Ampere, hence the long health timeouts. `deploy.sh` ends with
 `api /livez: ok` and `api /healthz (database): ok`. The Caddy smoke test warns until DNS

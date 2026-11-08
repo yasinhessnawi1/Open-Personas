@@ -127,3 +127,10 @@ def test_the_uid_separation_is_described_honestly() -> None:
     who = RUNBOOK.split("## Who can do what", 1)[1].split("\n## ", 1)[0]
     assert "guards against accidents" in who
     assert "root-equivalent" in who.split("uid 2001", 1)[1]
+
+
+def test_the_persona_id_check_reaches_the_operator() -> None:
+    """R9-285: a persona id outside the minted format can never be opened or deleted."""
+    assert "personas_unexpected_ids" in (KIT / "sql" / "verify.sql").read_text(encoding="utf-8")
+    assert "personas_unexpected_ids" in (KIT / "bin" / "restore.sh").read_text(encoding="utf-8")
+    assert "personas_unexpected_ids|0" in RUNBOOK
