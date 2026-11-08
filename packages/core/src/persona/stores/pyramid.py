@@ -227,8 +227,8 @@ class EpisodicPyramid:
         )
         return len(doomed)
 
-    def delete_all(self, persona_id: str) -> None:
-        """Drop every gist for the persona (the store-wide delete's cascade)."""
+    def delete_all(self, persona_id: str) -> int:
+        """Drop every gist for the persona (the store-wide delete's cascade); return how many."""
         existing = self.gists(persona_id)
         self._backend.delete_persona(persona_id, GIST_KIND)
         if existing:
@@ -238,6 +238,7 @@ class EpisodicPyramid:
                 chunk_ids=[g.id for g in existing],
                 written_by="episodic.privacy_cascade",
             )
+        return len(existing)
 
     # ----- audit -------------------------------------------------------------
 

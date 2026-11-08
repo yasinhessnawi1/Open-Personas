@@ -22,7 +22,7 @@ from persona.stores.policy import PolicyDecision, PolicyRule, PolicyTable
 from persona.stores.versioning import plan_excision
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
 __all__ = ["CORE_MEMORY_KIND", "CORE_SOURCE_IDS_KEY", "CoreMemoryStore", "core_logical_id"]
 
@@ -134,13 +134,39 @@ class CoreMemoryStore(TypedStore):
         (documented in ``backend.py``).
         """
         forgotten = set(forgotten_ids)
+        return self._excise_bounded(
+            persona_id,
+            lambda chain: [c.id for c in chain if forgotten.intersection(cited_sources(c))],
+            written_by=written_by,
+            cited=len(forgotten),
+        )
+
+    def retire(self, persona_id: str, *, written_by: str = "stores.forget") -> int:
+        """Delete the whole chain, because the evidence behind it is gone, and return the count.
+
+        Bounded the same way as :meth:`forget_cited`: a refresh that commits between the read
+        and the rewrite makes the plan stale, and a re-read takes its version too.
+        """
+        return self._excise_bounded(
+            persona_id, lambda chain: [c.id for c in chain], written_by=written_by, cited=0
+        )
+
+    def _excise_bounded(
+        self,
+        persona_id: str,
+        pick_doomed: Callable[[list[PersonaChunk]], list[str]],
+        *,
+        written_by: str,
+        cited: int,
+    ) -> int:
+        """Plan from a fresh read and rewrite, re-reading if another writer got there first."""
         for attempt in range(1, _EXCISE_ATTEMPTS + 1):
             chain = self._chain(persona_id)
-            doomed = [c.id for c in chain if forgotten.intersection(cited_sources(c))]
+            doomed = pick_doomed(chain)
             if not doomed:
                 return 0
             try:
-                self._excise(persona_id, chain, doomed, written_by=written_by, cited=len(forgotten))
+                self._excise(persona_id, chain, doomed, written_by=written_by, cited=cited)
             except ChainConflictError:
                 if attempt == _EXCISE_ATTEMPTS:
                     raise
@@ -152,15 +178,6 @@ class CoreMemoryStore(TypedStore):
                 continue
             return len(doomed)
         return 0  # pragma: no cover - the loop returns or raises on its last attempt
-
-    def retire(self, persona_id: str, *, written_by: str = "stores.forget") -> int:
-        """Delete the whole chain, because the evidence behind it is gone, and return the count."""
-        chain = self._chain(persona_id)
-        if not chain:
-            return 0
-        doomed = [c.id for c in chain]
-        self._excise(persona_id, chain, doomed, written_by=written_by, cited=0)
-        return len(doomed)
 
     def _excise(
         self,

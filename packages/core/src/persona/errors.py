@@ -42,6 +42,7 @@ __all__ = [
     "MCPConnectionError",
     "MCPServerUnavailableError",
     "MessageDeliveryError",
+    "MemoryOwnerMissingError",
     "OriginationForbiddenError",
     "PermanentJobError",
     "PersonaError",
@@ -582,6 +583,16 @@ class PermanentJobError(PersonaError):
     A handler raises this when the failure will never succeed on retry (malformed
     input, a permanent provider rejection) — the executor moves the job straight
     to the terminal ``failed`` state, no retries. ``context`` carries the cause.
+    """
+
+
+class MemoryOwnerMissingError(PermanentJobError):
+    """A memory row was refused because its persona or conversation no longer exists (R9-284).
+
+    Migration 062's guard refuses the write, and the database's error carries the row, so this
+    replaces it ``from None``: a job stores ``str(exc)`` in ``jobs.last_error``, and that row
+    must not be written back after the erasure that caused the refusal. Permanent, because the
+    owner is gone and retrying cannot bring it back. ``context`` carries the store kind only.
     """
 
 

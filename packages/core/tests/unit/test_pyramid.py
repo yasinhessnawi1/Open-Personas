@@ -308,6 +308,34 @@ def test_store_delete_wipes_the_gist_layer_too() -> None:
 # --- band-resolved display (K8-D-11) --------------------------------------------
 
 
+def test_store_delete_says_how_many_rows_of_each_kind_went() -> None:
+    """The erase door records counts, and only the store knows what was on disk (R9-284)."""
+    backend = _SpyBackend()
+    store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())  # type: ignore[arg-type]
+    pyramid = store.pyramid
+    raws = [_raw(minutes=i) for i in range(3)]
+    for raw in raws:
+        backend.write_raw("p1", raw)
+    pyramid.write_gist("p1", text="gist", member_ids=[raws[0].id, raws[1].id], created_at=_NOW)
+
+    counts = store.delete_by_kind("p1")
+
+    assert counts == {"episodic": 3, "episodic_gist": 1, "core_memory": 0}
+    assert store.delete_by_kind("p1") == {"episodic": 0, "episodic_gist": 0, "core_memory": 0}
+
+
+def test_store_delete_returns_the_total() -> None:
+    backend = _SpyBackend()
+    store = EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger())  # type: ignore[arg-type]
+    raws = [_raw(minutes=i) for i in range(2)]
+    for raw in raws:
+        backend.write_raw("p1", raw)
+    store.pyramid.write_gist("p1", text="gist", member_ids=[raws[0].id], created_at=_NOW)
+
+    assert store.delete("p1") == 3
+    assert store.delete("p1") == 0
+
+
 def _gist_row(member_ids: tuple[str, ...], text: str = "the gist") -> PersonaChunk:
     return PersonaChunk(
         id=make_gist_id("p1", list(member_ids)),

@@ -10,8 +10,11 @@ engine + metering the report, the turn-tail trigger's kill-switch gating
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from persona.stores.engine import EpisodicConsolidationReport
@@ -32,6 +35,12 @@ class _RecordingQueue:
 
     def enqueue(self, **kwargs: object) -> None:
         self.calls.append(kwargs)
+
+
+@contextmanager
+def _persona_found() -> Iterator[MagicMock]:
+    """A connection on which the persona-exists check finds the persona."""
+    yield MagicMock()
 
 
 def _report(**overrides: object) -> EpisodicConsolidationReport:
@@ -94,6 +103,7 @@ def test_handler_runs_the_engine_owner_scoped_and_meters() -> None:
     context = SimpleNamespace(
         owner_id="u1",
         meter=lambda **kwargs: metered.append(kwargs),
+        connection=_persona_found,
     )
     handler = EpisodicConsolidationHandler(engine=_Engine())
     payload = EpisodicConsolidationJobPayload(persona_id="p1", watermark_bucket="1")

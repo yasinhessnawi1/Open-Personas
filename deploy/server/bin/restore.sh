@@ -305,6 +305,11 @@ unexpected_ids="$(fact personas_unexpected_ids)"
 if [ "${unexpected_ids}" != "0" ]; then
   say "WARNING: ${unexpected_ids} personas have an id the api will not accept in a URL; they cannot be opened or deleted until that is settled"
 fi
+orphan_owners="$(fact memory_orphan_owners)"
+[ -n "${orphan_owners}" ] || die "sql/verify.sql did not report memory_orphan_owners"
+if [ "${orphan_owners}" != "0" ]; then
+  say "WARNING: ${orphan_owners} groups of memory rows belong to a persona or conversation that no longer exists; see RUNBOOK.md step 5"
+fi
 if [ -f "${FACTS_FILE}" ]; then
   # facts.txt is taken moments before the dump while the box keeps writing, so small
   # drift is normal and only warned about; read the diff, an emptied table is not drift.

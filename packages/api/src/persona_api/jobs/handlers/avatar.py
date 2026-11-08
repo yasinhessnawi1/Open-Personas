@@ -34,8 +34,10 @@ that seam.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from persona.errors import PersonaError
 from persona.jobs import SHORT_LEASE, JobPayload, JobState, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from pydantic import BaseModel, ConfigDict
@@ -185,6 +187,10 @@ class AvatarGenerator(Protocol):
         self, *, persona_id: str, owner_id: str, yaml_str: str, billing_key: str
     ) -> AvatarResult | None: ...
 
+    def discard(self, *, persona_id: str, owner_id: str) -> None:
+        """Remove what a generation stored for a persona that was deleted while it ran."""
+        ...
+
 
 class AvatarGenerationHandler:
     """Idempotent avatar generation. Skip-if-set + compare-and-set on create; replace on regen."""
@@ -247,6 +253,32 @@ class AvatarGenerationHandler:
                     pid=persona_id,
                     err=str(exc),
                 )
+        else:
+            await self._discard_if_deleted(persona_id, context)
+
+    async def _discard_if_deleted(self, persona_id: str, context: JobContext) -> None:
+        """Remove the new bytes if the persona went while they were being generated (R9-284).
+
+        Nothing was updated either because another delivery won, when the files are in use, or
+        because the persona is gone and the bytes landed in a folder its delete had already
+        removed. Only the second is cleaned up. A failure here is logged and the job still
+        succeeds, because a retry would find no persona and do nothing. The folder then stays on
+        disk: the orphan sweep covers database rows only.
+        """
+        with context.connection() as conn:
+            row = conn.execute(select(personas.c.id).where(personas.c.id == persona_id)).first()
+        if row is not None:
+            return
+        try:
+            await asyncio.to_thread(
+                self._generator.discard, persona_id=persona_id, owner_id=context.owner_id
+            )
+        except (OSError, PersonaError) as exc:
+            _log.warning(
+                "could not remove the avatar of a deleted persona persona={pid}: {err}",
+                pid=persona_id,
+                err=type(exc).__name__,
+            )
 
 
 def register_avatar_handler(registry: JobRegistry, generator: AvatarGenerator) -> None:

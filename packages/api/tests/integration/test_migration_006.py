@@ -98,10 +98,23 @@ def test_006_accepts_document_kind_at_head(clean_db: str) -> None:
     cfg = _alembic_config(clean_db)
     command.upgrade(cfg, "head")
     _seed_owner_and_persona(clean_db, owner="u_006", persona_id="p_006")
+    # A document row is keyed by its conversation, and that owner has to exist (062).
+    engine = create_engine(clean_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (id, owner_id, persona_id) "
+                    "VALUES ('conv_006', 'u_006', 'p_006')"
+                )
+            )
+    finally:
+        engine.dispose()
 
     # All five kinds satisfy the new CHECK.
     for idx, kind in enumerate(("identity", "self_facts", "worldview", "episodic", "document")):
-        _insert_chunk(clean_db, persona_id="p_006", kind=kind, chunk_id=f"c_006_{idx}")
+        owner = "conv_006" if kind == "document" else "p_006"
+        _insert_chunk(clean_db, persona_id=owner, kind=kind, chunk_id=f"c_006_{idx}")
 
 
 def test_006_downgrade_restores_old_check(clean_db: str) -> None:

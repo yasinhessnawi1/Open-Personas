@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from persona.errors import MemoryOwnerMissingError
 from persona.imagegen import ImageProviderError
 from persona.jobs import JobRegistry, JobState
 from persona_api.imagegen.service import ImagegenAvatarGenerator
@@ -384,6 +385,25 @@ async def test_success_through_the_executor_persists_and_reads_as_settled(
     assert outcome is JobState.SUCCEEDED
     assert _avatar_row(engine) == ("uploads/new.png", "generated")
     assert avatar_status_from_job(queue.record) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sqlite_owner_scope")
+async def test_a_write_for_a_missing_owner_fails_for_good_and_stores_no_memory(
+    engine: Engine,
+) -> None:
+    """The review's MEDIUM: ``last_error`` is written after the erasure it was refused by."""
+    queue = _LifecycleQueue(_record(attempt=1))
+    refused = MemoryOwnerMissingError(
+        "the persona or conversation this memory belongs to no longer exists",
+        context={"store_kind": "episodic"},
+    )
+
+    state = await _executor(queue, _Generator(None, raises=refused), engine).execute(queue.record)
+
+    assert state is JobState.FAILED
+    assert queue.record.state is JobState.FAILED
+    assert "no longer exists" in (queue.record.last_error or "")
 
 
 def test_no_job_reads_as_no_status() -> None:

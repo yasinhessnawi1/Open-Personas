@@ -16,7 +16,6 @@ process and looks at what it imported.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -31,8 +30,9 @@ from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.chroma import ChromaBackend
 from persona.stores.core_memory import CoreMemoryStore
 from persona.stores.self_facts import SelfFactsStore
-from typer.testing import CliRunner, Result
+from typer.testing import CliRunner
 
+from tests._cli_output import plain
 from tests._embedder import HashEmbedder
 
 pytestmark = pytest.mark.integration
@@ -44,22 +44,6 @@ _LOGICAL = "repair-demo::self_facts::0000"
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
-
-
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_PANEL = re.compile(r"[\u2500-\u257f]")
-
-
-def _plain(result: Result) -> str:
-    """What the command said, without how the terminal was asked to draw it.
-
-    A usage error goes through Typer's rich panel, which colours option names when the run looks
-    like a terminal that wants colour (CI does: FORCE_COLOR, GITHUB_ACTIONS), puts box drawing
-    around the text and wraps it at the console width. Any of the three splits ``--database-url``
-    out of a plain substring check. These tests are about the words, so they read the words.
-    """
-    text = _PANEL.sub(" ", _ANSI.sub("", result.output))
-    return " ".join(text.split())
 
 
 @pytest.fixture
@@ -242,7 +226,7 @@ def test_a_raced_chain_is_reported_and_a_plain_apply_leaves_it(
     result = runner.invoke(app, ["repair", str(persona_file), "--apply"])
 
     assert result.exit_code == 1
-    assert "--resolve-raced" in _plain(result), "the output has to say what the way out is"
+    assert "--resolve-raced" in plain(result), "the output has to say what the way out is"
     assert _versions(chroma_home) == {_LOGICAL: 1, "a": 2, "b": 2}
 
 
@@ -266,7 +250,7 @@ def test_the_flag_with_apply_settles_the_chain_on_the_real_transport(
     result = runner.invoke(app, ["repair", str(persona_file), "--apply", "--resolve-raced"])
 
     assert result.exit_code == 0, result.output
-    assert "now intact" in _plain(result)
+    assert "now intact" in plain(result)
     assert _versions(chroma_home) == {_LOGICAL: 1, "a": 2, "b": 3}
     store = SelfFactsStore(backend=_backend(chroma_home), audit_logger=MemoryAuditLogger())
     assert [c.id for c in store.history(_PERSONA_ID, _LOGICAL)] == [_LOGICAL, "a", "b"]
@@ -292,7 +276,7 @@ def test_all_personas_needs_a_database(runner: CliRunner, chroma_home: Path) -> 
     """A Chroma folder has no list of personas to sweep, and it must say so rather than guess."""
     result = runner.invoke(app, ["repair", "--all-personas"])
     assert result.exit_code != 0
-    assert "--database-url" in _plain(result)
+    assert "--database-url" in plain(result)
     assert not chroma_home.exists()
 
 
@@ -319,11 +303,9 @@ def test_the_sweep_is_a_dry_run_by_default(
     result = runner.invoke(app, ["repair", str(persona_file), "--forgotten-evidence"])
 
     assert result.exit_code == 1
-    assert "--apply" in _plain(result)
-    assert (
-        "forgotten" not in _plain(result).split("Nothing has been changed")[1].split("--apply")[0]
-    )
-    assert "a summary of" not in _plain(result), "ids and counts, never a word of the text"
+    assert "--apply" in plain(result)
+    assert "forgotten" not in plain(result).split("Nothing has been changed")[1].split("--apply")[0]
+    assert "a summary of" not in plain(result), "ids and counts, never a word of the text"
     assert _block_rows(chroma_home) == 1
 
 
@@ -338,7 +320,7 @@ def test_the_sweep_with_apply_deletes_it_and_then_finds_nothing(
     assert _block_rows(chroma_home) == 0
     again = runner.invoke(app, ["repair", str(persona_file), "--forgotten-evidence"])
     assert again.exit_code == 0
-    assert "cites anything forgotten" in _plain(again)
+    assert "cites anything forgotten" in plain(again)
 
 
 def test_the_sweep_runs_on_its_own(

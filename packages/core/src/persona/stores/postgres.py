@@ -47,7 +47,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
 from sqlalchemy.exc import IntegrityError
 
-from persona.errors import ChainConflictError
+from persona.errors import ChainConflictError, MemoryOwnerMissingError
 from persona.logging import get_logger
 from persona.schema.chunks import (
     ChunkProvenance,
@@ -55,6 +55,7 @@ from persona.schema.chunks import (
     WriteSource,
     verify_content_hash,
 )
+from persona.stores.orphans import OrphanSweep, role_sees_every_tenant
 
 if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
@@ -104,6 +105,11 @@ _memory_chunks = Table(
     Column("pinned", Boolean, nullable=False, server_default=text("false")),
     Column("member_ids", ARRAY(Text)),
 )
+
+
+#: How the guard in migration 062 identifies itself.
+_FOREIGN_KEY_VIOLATION = "23503"
+_OWNER_GUARD_PREFIX = "memory_chunks_owner_guard:"
 
 
 class PostgresBackend:
@@ -167,6 +173,11 @@ class PostgresBackend:
             with self._engine.begin() as conn:
                 conn.execute(stmt, rows)
         except IntegrityError as exc:
+            if _is_owner_guard_refusal(exc):
+                raise MemoryOwnerMissingError(
+                    "the persona or conversation this memory belongs to no longer exists",
+                    context={"store_kind": store_kind},
+                ) from None
             if not _is_chain_head_conflict(exc):
                 raise
             # The whole statement list rolled back, so nothing landed.
@@ -367,15 +378,17 @@ class PostgresBackend:
         with self._engine.connect() as conn:
             return [str(row) for row in conn.execute(stmt).scalars().all()]
 
+    def orphan_sweep(self) -> OrphanSweep:
+        """The sweep for rows whose owner is gone, on this database (R9-284)."""
+        return OrphanSweep(self._engine)
+
     def sees_every_tenant(self) -> bool:
         """Whether this connection's role can read past row level security.
 
         A sweep as ``persona_app`` reads zero rows and would report a healthy database, which
         is the worst possible answer from a check run during a restore.
         """
-        stmt = text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
-        with self._engine.connect() as conn:
-            return bool(conn.execute(stmt).scalar())
+        return role_sees_every_tenant(self._engine)
 
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
         stmt = delete(_memory_chunks).where(
@@ -624,6 +637,15 @@ def _chain_conflict(persona_id: str, store_kind: str) -> ChainConflictError:
         msg,
         context={"persona_id": persona_id, "store": store_kind, "constraint": CHAIN_HEAD_INDEX},
     )
+
+
+def _is_owner_guard_refusal(exc: IntegrityError) -> bool:
+    """Whether migration 062's trigger refused this write: its error code and its own words."""
+    orig = exc.orig
+    if getattr(orig, "sqlstate", None) != _FOREIGN_KEY_VIOLATION:
+        return False
+    message = getattr(getattr(orig, "diag", None), "message_primary", None)
+    return isinstance(message, str) and message.startswith(_OWNER_GUARD_PREFIX)
 
 
 def _is_chain_head_conflict(exc: IntegrityError) -> bool:

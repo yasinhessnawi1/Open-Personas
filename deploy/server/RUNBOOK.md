@@ -352,7 +352,12 @@ One fact was added after that rehearsal, so it is not in the output above:
 be opened or deleted. A higher count prints a warning and the restore carries on; stop there
 and bring the count to the owner before deploying.
 
-Apart from that warning and the memory chains one below, anything else stops the script.
+`memory_orphan_owners` is also newer than that rehearsal: how many groups of memory rows belong
+to a persona or conversation that no longer exists (R9-284). A count above 0 prints a warning and
+the restore carries on. It is expected on any dump older than migration 062, and step 5 settles
+it.
+
+Apart from those warnings and the memory chains one below, anything else stops the script.
 `pg_restore` runs in one transaction, so a failed restore
 leaves no tables behind, and the role and extension steps are idempotent: fix the cause and
 run `bin/restore.sh` again. If the failure came AFTER `pg_restore` (a verification check),
@@ -413,6 +418,26 @@ bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-
   audited with ids and counts only), then run it again to confirm. Those personas may
   briefly know less until the next consolidation pass. That is expected.
 
+### Sweep what deleted personas left behind
+
+Deleting a persona used to delete only its row, so a dump can still hold the memory of personas
+the person had deleted, and of the conversations that went with them (R9-284). This is the
+`memory_orphan_owners` count above. The same command also finds their initiative notices and the
+daily scan schedules still firing for them. It uses no model and costs nothing:
+
+```bash
+# on the host, as deploy, in /opt/open-persona/repo/deploy/server
+bin/compose.sh run --rm migrate sh -c 'persona repair --all-personas --database-url "$DATABASE_URL" --orphaned'
+```
+
+It changes nothing without `--apply`, and prints ids and counts, never content.
+
+- **"Nothing here was left behind"**, exit 0: nothing to do.
+- **A count per persona or conversation**, exit 1: show the owner the list. These rows cannot be
+  put back, so `--apply` waits for the owner's yes. Then add `--apply` (each removal is audited
+  in `audit_log` with ids and counts only) and run it once more without `--apply` to confirm it
+  says nothing is left.
+
 ## Step 6: deploy
 
 ```bash
@@ -422,8 +447,9 @@ bin/deploy.sh
 
 The first build runs on the host's 2 cores: expect 10 to 20 minutes (the image carries CPU
 torch, no CUDA). It competes with nothing yet; later deploys run off-hours. The migrate step
-takes the restored dump from `058` to head (`060` today: `059` the memory chain index, `060`
-the channel's persona pointer). The first boot downloads the HF models (the bge
+takes the restored dump from `058` to head (`062` today: `059` the memory chain index, `060`
+the channel's persona pointer, `061` the erasure ledger, `062` the memory owner guard). The first
+boot downloads the HF models (the bge
 embedder, the reranker and the crisis encoder, about 1 to 2 GB) into the data volume and
 loads them in 1 to 2 minutes on Ampere, hence the long health timeouts. `deploy.sh` ends with
 `api /livez: ok` and `api /healthz (database): ok`. The Caddy smoke test warns until DNS

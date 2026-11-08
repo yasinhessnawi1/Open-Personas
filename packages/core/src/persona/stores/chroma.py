@@ -21,6 +21,7 @@ needs two processes on one folder. See :mod:`persona.stores.backend` for the ful
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import datetime  # noqa: TC003 — reinforce() takes a runtime datetime
 from pathlib import Path  # noqa: TC003 — used at runtime by ChromaBackend.__init__
@@ -187,11 +188,12 @@ class ChromaBackend:
         return histogram
 
     def delete_persona(self, persona_id: str, store_kind: str) -> None:
-        try:
+        # Only "no such collection" is success (a delete is idempotent). Anything else, a locked
+        # file on Windows or a broken store, has left the memory on disk and has to say so.
+        from chromadb.errors import NotFoundError  # noqa: PLC0415 - optional dependency
+
+        with contextlib.suppress(NotFoundError):
             self._client.delete_collection(collection_name_for(persona_id, store_kind))
-        except Exception:  # noqa: BLE001 — Chroma raises a generic NotFoundError-ish thing
-            # Treat "collection didn't exist" as success; delete is idempotent.
-            return
 
     def relink(
         self,

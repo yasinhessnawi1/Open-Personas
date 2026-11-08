@@ -443,7 +443,8 @@ class TypedStore:
 
     # ----- delete ----------------------------------------------------------
 
-    def delete(self, persona_id: str) -> None:
+    def delete(self, persona_id: str) -> int:
+        """Remove every row of this store for the persona, and return how many there were."""
         existing = self._backend.get_all(persona_id=persona_id, store_kind=self.STORE_KIND)
         self._backend.delete_persona(persona_id, self.STORE_KIND)
         if existing:
@@ -454,6 +455,7 @@ class TypedStore:
                 chunk_ids=[c.id for c in existing],
                 logical_ids=[c.provenance.logical_id for c in existing if c.provenance is not None],
             )
+        return len(existing)
 
     def chain_ids(self, persona_id: str, doc_ids: list[str]) -> list[str]:
         """Every version of every chain the given PHYSICAL ids belong to (Spec K13, T1).

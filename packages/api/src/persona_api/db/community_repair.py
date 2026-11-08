@@ -21,6 +21,7 @@ from persona.cli.repair_cmd import (
     VERSIONED_KINDS,
     NoEmbedder,
     run_forgotten_sweep,
+    run_orphan_sweep,
     run_repair,
 )
 from persona.stores.core_memory import CORE_MEMORY_KIND
@@ -74,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Instead, find memory summaries citing something forgotten. Uses no model.",
     )
+    parser.add_argument(
+        "--orphaned",
+        action="store_true",
+        help="Instead, find rows whose persona or conversation has been deleted. Uses no model.",
+    )
     args = parser.parse_args(argv)
 
     config = APIConfig()
@@ -90,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     engine = create_engine(url)
     try:
         backend = PostgresBackend(engine=engine, embedder=NoEmbedder())
+        if args.orphaned:
+            return run_orphan_sweep(
+                backend.orphan_sweep(), apply=args.apply, written_by="community.repair"
+            )
         if args.forgotten_evidence:
             return run_forgotten_sweep(
                 backend=backend,

@@ -30,9 +30,11 @@ artifacts / uploads / images.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from persona.errors import SandboxViolationError
 from persona.logging import get_logger
 from persona.media_types import media_type_for
 from persona.tools._sandbox import (
@@ -42,9 +44,12 @@ from persona.tools._sandbox import (
     make_dirs_nofollow,
     open_nofollow,
     read_nofollow_bytes,
+    require_path_segment,
     resolve_sandbox_path,
     write_nofollow_bytes,
 )
+
+from persona_api.workspace_paths import require_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -63,6 +68,8 @@ __all__ = [
 ]
 
 _STREAM_CHUNK = 1 << 20  # 1 MiB — matches read_nofollow_bytes' read granularity.
+#: The most keys one S3 ``DeleteObjects`` request accepts.
+_S3_DELETE_BATCH = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +84,20 @@ class StorageObject:
 
     key: str
     size: int
+
+
+def _persona_folder(prefix: str) -> str:
+    """``prefix`` without its one trailing slash, if it names a persona's folder or deeper.
+
+    Only one slash comes off: ``rstrip`` would turn ``u1//`` into the owner's whole folder.
+    """
+    stem = require_relative_path(prefix.removesuffix("/"))
+    if "/" not in stem:
+        raise SandboxViolationError(
+            "folder to delete is wider than one persona",
+            context={"reason": "wider_than_a_persona", "preview": stem[:80]},
+        )
+    return stem
 
 
 @runtime_checkable
@@ -114,6 +135,27 @@ class FileStorage(Protocol):
 
         Includes sidecars — the caller filters them (``is_any_sidecar``), exactly
         as the pre-R5 walk did. Keys are store-relative + forward-slashed.
+        """
+        ...
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete everything under one persona's folder and return how many objects went.
+
+        ``prefix`` is ``{owner}/{persona}`` or deeper. Sidecars included, and a key that
+        merely starts with the same characters is not under it. Idempotent: a prefix with
+        nothing under it is 0. Anything else is refused with ``SandboxViolationError``: on
+        S3 an empty prefix is the whole bucket, and a single segment is the whole account,
+        which is what a persona id that came out empty would produce. Erasing an account is
+        :meth:`delete_account_folder`, so it can only happen by asking for it. If an object
+        cannot be removed this raises ``OSError`` and a re-run finishes the job.
+        """
+        ...
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        """Delete everything an owner has stored and return how many objects went.
+
+        The account-erasure door, separate from :meth:`delete_prefix` so a persona delete can
+        never widen into it. ``owner_id`` must be exactly one name. Idempotent.
         """
         ...
 
@@ -166,6 +208,30 @@ class LocalFileStorage:
             # (/tmp → /private/tmp) never breaks ``relative_to``.
             key = f"{stem}/{path.relative_to(base).as_posix()}"
             yield StorageObject(key=key, size=size)
+
+    def delete_prefix(self, prefix: str) -> int:
+        return self._remove_folder(_persona_folder(prefix))
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        return self._remove_folder(require_path_segment(owner_id, what="owner id"))
+
+    def _remove_folder(self, stem: str) -> int:
+        base = self._resolve(stem)
+        # A folder that is itself a link would be the target's contents counted and, on some
+        # hosts, removed. The resolved path must be the path that was named.
+        if base != self._root.resolve(strict=False) / stem:
+            raise SandboxViolationError(
+                "folder to delete goes through a link",
+                context={"reason": "link", "preview": stem[:80]},
+            )
+        count = sum(1 for _ in iter_regular_files_nofollow(base))
+        try:
+            # Python 3.12's rmtree removes links inside without following them.
+            shutil.rmtree(base)
+        except FileNotFoundError:
+            if os.path.lexists(base):
+                raise
+        return count
 
 
 def _iter_file_nofollow(path: Path, root: Path) -> Iterator[bytes]:
@@ -249,6 +315,35 @@ class S3FileStorage:
         for page in paginator.paginate(Bucket=self._bucket, Prefix=normalized):
             for obj in page.get("Contents", []):
                 yield StorageObject(key=obj["Key"], size=int(obj["Size"]))
+
+    def delete_prefix(self, prefix: str) -> int:
+        return self._remove_folder(_persona_folder(prefix))
+
+    def delete_account_folder(self, owner_id: str) -> int:
+        return self._remove_folder(require_path_segment(owner_id, what="owner id"))
+
+    def _remove_folder(self, stem: str) -> int:
+        from botocore.exceptions import (  # noqa: PLC0415 - optional dep, guarded
+            BotoCoreError,
+            ClientError,
+        )
+
+        try:
+            keys = [obj.key for obj in self.list(stem)]
+            for start in range(0, len(keys), _S3_DELETE_BATCH):
+                batch = keys[start : start + _S3_DELETE_BATCH]
+                response = self._client.delete_objects(
+                    Bucket=self._bucket,
+                    Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+                )
+                refused = response.get("Errors") or []
+                if refused:
+                    # A count: the keys carry file names.
+                    raise OSError(f"{len(refused)} objects could not be deleted from the bucket")
+        except (ClientError, BotoCoreError):
+            # The protocol's OSError, and from None: the store's message can name a key or host.
+            raise OSError("the object store refused to list or delete a folder") from None
+        return len(keys)
 
 
 def build_file_storage(config: APIConfig, workspace_root: Path) -> FileStorage:

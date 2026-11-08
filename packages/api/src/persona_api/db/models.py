@@ -90,6 +90,7 @@ __all__ = [
     "subscription",
     "request_telemetry",
     "runs",
+    "erasures",
     "schedules",
     "store_audit_events",
     "tool_audit_events",
@@ -2167,5 +2168,58 @@ schedule_tombstones = Table(
         "target_job_type",
         "title_key",
         "created_at",
+    ),
+)
+
+# R9-284: the erasure ledger. One row per subject (a persona or an account) being erased,
+# written before anything is removed: the ids a later step will need once their rows are gone,
+# each step's counts, and how it ended. Deliberately NO foreign key to users or personas, because
+# the row has to outlive the deletion it records. ``persona_app`` holds blanket DML on every
+# table, so RLS is what limits it: a SELECT-only policy on its own rows, so a request can read
+# an erasure and cannot rewrite the record of one (ENABLE + FORCE + the policy live entirely in
+# migration 061, the 048 split-home template). The erase job writes on the BYPASSRLS platform
+# engine. Ids, step names and counts only, never content: the door that
+# writes it refuses anything else (persona_api.services.erasure_ledger).
+erasures = Table(
+    "erasures",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("owner_id", Text, nullable=False),
+    Column("subject_kind", Text, nullable=False),
+    Column("subject_id", Text, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'pending'")),
+    # {name: [ids]}: read while the rows exist, for the steps that run after they are gone.
+    Column("captured", _json(), nullable=False, server_default=text("'{}'")),
+    # {step: {name: count}}: rows really removed, added across runs of a step, so a resumed
+    # erasure that finds them already gone adds 0 instead of erasing the first run's count.
+    Column("counts", _json(), nullable=False, server_default=text("'{}'")),
+    # A short code when the erasure failed, never an exception message (those carry paths).
+    Column("error_code", Text),
+    Column("requested_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint("subject_kind IN ('persona', 'account')", name="erasures_subject_kind_check"),
+    CheckConstraint(
+        "state IN ('pending', 'running', 'failed', 'complete')", name="erasures_state_check"
+    ),
+    # One OPEN erasure per subject: a repeated request is the same erasure, and that row holds
+    # what was captured first. Partial, because a finished erasure must not stop a second one:
+    # the community owner is always ``local-owner``, and a hosted identity can be provisioned
+    # again, so the same subject can have more to erase later.
+    Index(
+        "uq_erasures_open_subject",
+        "subject_kind",
+        "subject_id",
+        unique=True,
+        postgresql_where=text("state <> 'complete'"),
+        sqlite_where=text("state <> 'complete'"),
+    ),
+    Index("idx_erasures_owner", "owner_id"),
+    # The sweep's read: what never finished. Partial, so finished history costs it nothing.
+    Index(
+        "idx_erasures_unfinished",
+        "state",
+        postgresql_where=text("state <> 'complete'"),
+        sqlite_where=text("state <> 'complete'"),
     ),
 )

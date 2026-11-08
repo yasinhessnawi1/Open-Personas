@@ -134,3 +134,14 @@ def test_the_persona_id_check_reaches_the_operator() -> None:
     assert "personas_unexpected_ids" in (KIT / "sql" / "verify.sql").read_text(encoding="utf-8")
     assert "personas_unexpected_ids" in (KIT / "bin" / "restore.sh").read_text(encoding="utf-8")
     assert "personas_unexpected_ids|0" in RUNBOOK
+
+
+def test_the_orphan_count_reaches_the_operator_with_a_way_to_settle_it() -> None:
+    """R9-284: a restored database can hold memory of personas already deleted."""
+    assert "memory_orphan_owners" in (KIT / "sql" / "verify.sql").read_text(encoding="utf-8")
+    assert "memory_orphan_owners" in (KIT / "bin" / "restore.sh").read_text(encoding="utf-8")
+    step = RUNBOOK.split("### Sweep what deleted personas left behind", 1)[1].split("\n## ", 1)[0]
+    assert "memory_orphan_owners" in step
+    assert "--orphaned" in step
+    assert "--apply" in step
+    assert "persona repair --all-personas" in step
