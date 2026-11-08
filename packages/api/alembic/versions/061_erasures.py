@@ -1,6 +1,7 @@
 """The erasure ledger: what is being erased and how far it got (R9-284).
 
-One row per subject (a persona or an account) being erased, written before anything is removed.
+One open row per subject (a persona or an account) being erased, written before anything is
+removed. Only one can be open at a time, and a finished one does not stop a later erasure.
 It holds the ids later steps need once their rows are gone, each step's counts, and how it ended:
 ids and counts, never content. It has no foreign key to ``users`` or ``personas``, because it has
 to outlive the deletion it records.

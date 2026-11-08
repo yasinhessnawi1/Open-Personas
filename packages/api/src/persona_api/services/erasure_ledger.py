@@ -2,7 +2,9 @@
 
 Erasing a persona or an account takes many steps across the database, stored files and other
 stores, and any of them can fail. This is the record that makes that resumable and provable: one
-row per subject, written before anything is removed, outliving the persona and the user it names.
+open row per subject, written before anything is removed, outliving the persona and the user it
+names. A finished row does not stop a later erasure of the same subject, because the community
+owner is always ``local-owner`` and a hosted identity can be provisioned again.
 
 It holds ids, step names and counts, and this door refuses anything else, because a row that
 outlives the deletion must not become the place the deleted content survives. The checks are
@@ -25,7 +27,7 @@ from datetime import datetime  # noqa: TC003 - a dataclass field, read at runtim
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import case, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.models import erasures as erasures_t
@@ -133,13 +135,16 @@ class ErasureLedger:
         self._engine = engine
 
     def get(self, subject_kind: SubjectKind, subject_id: str) -> Erasure | None:
-        """The erasure of this subject, or ``None`` if there has never been one."""
+        """This subject's open erasure, else its latest finished one, else ``None``."""
+        finished_last = case((erasures_t.c.state == ErasureState.COMPLETE.value, 1), else_=0)
         with self._engine.connect() as conn:
             row = conn.execute(
-                select(erasures_t).where(
+                select(erasures_t)
+                .where(
                     erasures_t.c.subject_kind == subject_kind.value,
                     erasures_t.c.subject_id == subject_id,
                 )
+                .order_by(finished_last, erasures_t.c.requested_at.desc(), erasures_t.c.id.desc())
             ).first()
         return None if row is None else _to_erasure(row)
 
@@ -161,14 +166,15 @@ class ErasureLedger:
         subject_id: str,
         captured: Mapping[str, Sequence[str]],
     ) -> Erasure:
-        """Open the erasure of this subject, or return the one already open.
+        """Open an erasure of this subject, or return the one already open.
 
         A repeat keeps what the first call captured: those ids were read while their rows
-        existed, and a retry after the rows have gone would capture nothing.
+        existed, and a retry after the rows have gone would capture nothing. A finished erasure
+        is not open, so claiming after one starts a new row.
         """
         clean = _require_captured(captured)
         existing = self.get(subject_kind, subject_id)
-        if existing is not None:
+        if existing is not None and existing.state is not ErasureState.COMPLETE:
             return existing
         try:
             with self._engine.begin() as conn:

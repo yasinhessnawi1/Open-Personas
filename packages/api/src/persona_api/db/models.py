@@ -2200,8 +2200,18 @@ erasures = Table(
     CheckConstraint(
         "state IN ('pending', 'running', 'failed', 'complete')", name="erasures_state_check"
     ),
-    # A repeated request is the same erasure, and that row holds what was captured first.
-    UniqueConstraint("subject_kind", "subject_id", name="uq_erasures_subject"),
+    # One OPEN erasure per subject: a repeated request is the same erasure, and that row holds
+    # what was captured first. Partial, because a finished erasure must not stop a second one:
+    # the community owner is always ``local-owner``, and a hosted identity can be provisioned
+    # again, so the same subject can have more to erase later.
+    Index(
+        "uq_erasures_open_subject",
+        "subject_kind",
+        "subject_id",
+        unique=True,
+        postgresql_where=text("state <> 'complete'"),
+        sqlite_where=text("state <> 'complete'"),
+    ),
     Index("idx_erasures_owner", "owner_id"),
     # The sweep's read: what never finished. Partial, so finished history costs it nothing.
     Index(

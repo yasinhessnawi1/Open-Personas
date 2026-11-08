@@ -106,7 +106,7 @@ def test_one_tenant_cannot_see_anothers_erasures(clean_db: str) -> None:
         admin.dispose()
 
 
-def test_a_subject_has_one_row(clean_db: str) -> None:
+def test_a_subject_has_one_open_row_and_may_be_erased_again_once_finished(clean_db: str) -> None:
     engine = create_engine(clean_db)
     insert = text(
         "INSERT INTO erasures (id, owner_id, subject_kind, subject_id) "
@@ -117,6 +117,9 @@ def test_a_subject_has_one_row(clean_db: str) -> None:
             conn.execute(insert, {"i": "e1"})
         with pytest.raises(IntegrityError), engine.begin() as conn:
             conn.execute(insert, {"i": "e2"})
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE erasures SET state = 'complete' WHERE id = 'e1'"))
+            conn.execute(insert, {"i": "e3"})
     finally:
         engine.dispose()
 

@@ -20,8 +20,9 @@ from persona_api.db.community import create_community_schema, make_community_eng
 from persona_api.db.models import erasures as erasures_t
 from persona_api.errors import ErasureRecordError
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
-from sqlalchemy import update
+from sqlalchemy import insert, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 _OWNER = "user_alice"
 _PERSONA = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -223,6 +224,64 @@ def test_completing_twice_keeps_when_it_finished(ledger: ErasureLedger, engine: 
     assert row is not None
     assert row.completed_at is not None
     assert row.completed_at.replace(tzinfo=UTC) == long_ago
+
+
+def test_a_finished_erasure_does_not_stop_the_subject_being_erased_again(
+    ledger: ErasureLedger,
+) -> None:
+    """Community is always ``local-owner``, and a hosted identity can be provisioned again."""
+    first = _claim(ledger)
+    ledger.record_step(first, "memory", {"episodic": 3})
+    ledger.complete(first)
+
+    second = ledger.claim(
+        owner_id=_OWNER,
+        subject_kind=SubjectKind.PERSONA,
+        subject_id=_PERSONA,
+        captured={"conversations": ["c9"]},
+    )
+
+    assert second.id != first
+    assert second.state is ErasureState.PENDING
+    assert second.captured == {"conversations": ["c9"]}
+    assert second.counts == {}
+
+
+def test_get_prefers_the_erasure_still_open(ledger: ErasureLedger) -> None:
+    first = _claim(ledger)
+    ledger.complete(first)
+    second = _claim(ledger)
+
+    row = ledger.get(SubjectKind.PERSONA, _PERSONA)
+
+    assert row is not None
+    assert row.id == second != first
+
+
+def test_get_finds_a_finished_erasure_when_none_is_open(ledger: ErasureLedger) -> None:
+    first = _claim(ledger)
+    ledger.complete(first)
+
+    row = ledger.get(SubjectKind.PERSONA, _PERSONA)
+
+    assert row is not None
+    assert row.id == first
+    assert row.state is ErasureState.COMPLETE
+
+
+def test_only_one_erasure_of_a_subject_can_be_open(ledger: ErasureLedger, engine: Engine) -> None:
+    """The database holds this, so two racing requests cannot both open one."""
+    first = _claim(ledger)
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(
+            insert(erasures_t).values(
+                id="erasure_racing",
+                owner_id=_OWNER,
+                subject_kind=SubjectKind.PERSONA.value,
+                subject_id=_PERSONA,
+            )
+        )
+    assert _claim(ledger) == first
 
 
 def test_an_unknown_erasure_is_refused(ledger: ErasureLedger) -> None:
