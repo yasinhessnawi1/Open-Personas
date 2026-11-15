@@ -10,6 +10,7 @@ the same counts.
 from __future__ import annotations
 
 import json
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -332,3 +333,60 @@ def test_the_seed_reaches_every_table_that_names_a_persona() -> None:
         "turn_logs",
     }
     assert naming - erased_or_kept - cascaded == set()
+
+
+def _race(seeded: Seeded, monkeypatch: pytest.MonkeyPatch) -> list[BaseException]:
+    """Run the same erasure twice at once: the second starts while the first is in its fence."""
+    erasure = _claim(seeded)
+    first_inside, second_done = threading.Event(), threading.Event()
+    steps = dict(erasure_service.STEPS)
+    fence = steps["fence"]
+
+    def held_open(deps: PersonaEraseDeps, e: Erasure) -> dict[str, int]:
+        if not first_inside.is_set():
+            first_inside.set()
+            second_done.wait(timeout=60)
+        return fence(deps, e)
+
+    steps["fence"] = held_open
+    monkeypatch.setattr(erasure_service, "STEPS", tuple(steps.items()))
+    errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            erase_persona(_deps(seeded), erasure)
+        except BaseException as exc:  # noqa: BLE001 - reported to the test
+            errors.append(exc)
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert first_inside.wait(timeout=60)
+    try:
+        erase_persona(_deps(seeded), erasure)
+    except BaseException as exc:  # noqa: BLE001 - reported to the test
+        errors.append(exc)
+    finally:
+        second_done.set()
+        thread.join(timeout=120)
+    return errors
+
+
+def test_two_runs_of_one_erasure_count_it_once_and_audit_it_once(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M1: the second run finds the first holding the lock and does nothing."""
+    errors = _race(seeded, monkeypatch)
+
+    assert errors == []
+    done = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
+    assert done is not None
+    assert done.state is ErasureState.COMPLETE
+    assert done.counts["memory"] == dict.fromkeys((*PERSONA_KINDS, "document"), 1)
+    assert done.counts["row"] == {"personas": 1}
+    with seeded.engine.connect() as conn:
+        audited = conn.execute(
+            select(audit_log.c.id).where(
+                audit_log.c.action == "persona.erase", audit_log.c.target == PERSONA
+            )
+        ).all()
+    assert len(audited) == 1

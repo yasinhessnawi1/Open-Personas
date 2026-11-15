@@ -51,6 +51,7 @@ from persona_api.errors import ErasureRecordError
 from persona_api.services import audit_service
 from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
+from persona_api.services.erasure_lock import erasure_lock
 from persona_api.services.persona_service import delete_persona_row, remove_persona_folder
 
 if TYPE_CHECKING:
@@ -394,11 +395,21 @@ def _run_steps(
 def erase_persona(deps: PersonaEraseDeps, erasure: Erasure) -> None:
     """Run every step for this erasure, record its counts, complete it and audit it.
 
-    A no-op for an erasure that has finished. Raises what a step raised, after marking the
-    erasure failed, so the caller (the queue, or the inline runner) can retry it.
+    A no-op for an erasure that has finished, and for one another run holds the lock on
+    (:mod:`persona_api.services.erasure_lock`): that run is doing the work. Raises what a step
+    raised, after marking the erasure failed, so the caller (the queue, or the inline runner)
+    can retry it.
     """
     if erasure.subject_kind is not SubjectKind.PERSONA:
         raise _refuse("not_a_persona_erasure")
+    with erasure_lock(deps.engine, erasure.id) as held:
+        if not held:
+            _log.info("persona erasure already running elsewhere erasure={eid}", eid=erasure.id)
+            return
+        _erase_holding_the_lock(deps, erasure)
+
+
+def _erase_holding_the_lock(deps: PersonaEraseDeps, erasure: Erasure) -> None:
     ledger = ErasureLedger(deps.engine)
     current = ledger.get(SubjectKind.PERSONA, erasure.subject_id)
     if current is None or current.id != erasure.id or current.state is ErasureState.COMPLETE:

@@ -22,8 +22,10 @@ from persona.errors import PermanentJobError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.stores.postgres import PostgresBackend
 from pydantic import field_validator
+from sqlalchemy import or_, select
 
 from persona_api.db.audit_factory import build_audit_logger
+from persona_api.db.models import jobs as jobs_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -39,7 +41,7 @@ if TYPE_CHECKING:
 
     from persona.jobs import JobContext, JobRegistry
     from persona.stores.embedder import Embedder
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import Connection, Engine
 
     from persona_api.config import APIConfig
     from persona_api.jobs.queue import JobQueue, JobRecord
@@ -214,15 +216,39 @@ def persona_erase_queue_available(
     return PERSONA_ERASE_JOB_TYPE in in_process_worker.job_types
 
 
+_LIVE_STATES = ("queued", "claimed", "running")
+
+
+def _has_live_job(conn: Connection, erasure_id: str) -> bool:
+    """Whether a job for this erasure (the route's, or any resume's) is still to run."""
+    key = f"erase:{erasure_id}"
+    found = conn.execute(
+        select(jobs_t.c.id)
+        .where(
+            jobs_t.c.type == PERSONA_ERASE_JOB_TYPE,
+            jobs_t.c.state.in_(_LIVE_STATES),
+            or_(
+                jobs_t.c.idempotency_key == key,
+                jobs_t.c.idempotency_key.startswith(f"{key}:", autoescape=True),
+            ),
+        )
+        .limit(1)
+    ).first()
+    return found is not None
+
+
 def resume_persona_erasures(*, engine: Engine, run: Callable[[Erasure, str], object]) -> int:
     """Hand every unfinished persona erasure to ``run`` with its resume token; return how many.
 
-    Called at startup on an engine that sees every tenant. ``run`` enqueues the job, or runs
-    the erasure inline where no worker consumes it.
+    Called at startup and from the periodic sweep, on an engine that sees every tenant. ``run``
+    enqueues the job, or runs the erasure inline where no worker consumes it. An erasure that
+    already has a job waiting or running is left to it.
     """
     pending = [
         e for e in ErasureLedger(engine).unfinished() if e.subject_kind is SubjectKind.PERSONA
     ]
-    for erasure in pending:
+    with engine.connect() as conn:
+        orphaned = [e for e in pending if not _has_live_job(conn, e.id)]
+    for erasure in orphaned:
         run(erasure, resume_token(erasure))
-    return len(pending)
+    return len(orphaned)

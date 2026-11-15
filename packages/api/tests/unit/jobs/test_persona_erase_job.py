@@ -205,3 +205,40 @@ def test_every_unfinished_persona_erasure_is_resumed_and_nothing_else(seeded: Se
     assert sorted(resumed) == sorted(
         (eid, resume_token(latest[eid])) for eid in (pending.id, failed.id)
     )
+
+
+@pytest.mark.parametrize(
+    ("key_suffix", "state", "resumed"),
+    [
+        ("", "queued", 0),
+        (":123", "running", 0),
+        (":123", "claimed", 0),
+        ("", "dead", 1),
+        ("", "failed", 1),
+        ("x", "queued", 1),  # another erasure's key that merely starts the same way
+    ],
+)
+def test_an_erasure_with_a_live_job_is_left_to_it(
+    seeded: Seeded, key_suffix: str, state: str, resumed: int
+) -> None:
+    """Review M1: the sweep does not start a second run beside a job that will run it."""
+    from _erase_seed import row  # noqa: PLC0415 - one helper, one test
+
+    erasure = _claim(seeded)
+    with seeded.engine.begin() as conn:
+        row(
+            conn,
+            "jobs",
+            id="erase_job",
+            type=PERSONA_ERASE_JOB_TYPE,
+            owner_id=OWNER,
+            payload={"erasure_id": erasure.id, "persona_id": PERSONA},
+            idempotency_key=f"erase:{erasure.id}{key_suffix}",
+            state=state,
+        )
+    ran: list[str] = []
+
+    count = resume_persona_erasures(engine=seeded.engine, run=lambda e, _t: ran.append(e.id))
+
+    assert count == resumed
+    assert ran == [erasure.id] * resumed
