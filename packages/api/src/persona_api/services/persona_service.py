@@ -53,12 +53,14 @@ __all__ = [
     "create_persona",
     "default_embedder",
     "delete_persona",
+    "delete_persona_row",
     "get_persona",
     "list_personas",
     "load_persona_from_yaml",
     "notify_persona_ready",
     "persona_display_name",
     "persona_name_from_yaml",
+    "remove_persona_folder",
     "set_avatar_url",
     "summary_of",
     "update_persona",
@@ -654,25 +656,50 @@ def delete_persona(
         ).first()
         if owned is None:
             raise not_found
-        conn.execute(
-            update(connector_channels_t)
-            .where(
-                connector_channels_t.c.active_persona_id == persona_id,
-                connector_channels_t.c.owner_id == owner_id,
-            )
-            .values(active_persona_id=None)
-        )
-        result = conn.execute(
-            delete(personas_t)
-            .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
-            .returning(personas_t.c.id)
-        )
-        if result.first() is None:
+        if delete_persona_row(conn, owner_id=owner_id, persona_id=persona_id) == 0:
             raise not_found
         if workspace_root is not None:
-            folder = persona_root(workspace_root, owner_id, persona_id)
-            if folder.exists():
-                shutil.rmtree(folder)
+            remove_persona_folder(workspace_root, owner_id=owner_id, persona_id=persona_id)
+
+
+def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> int:
+    """Delete the persona's row, scoped to its owner, and return how many rows went (0 or 1).
+
+    Channels that have this persona foregrounded forget it first. The channel's foreign key is
+    composite, ``(active_persona_id, owner_id)``, and its plain ``ON DELETE SET NULL`` nulls
+    the NOT NULL ``owner_id`` too (migration 060 narrows that on Postgres 15 and later; SQLite
+    cannot). The foreign key cascade then takes conversations, messages, tasks, runs and the
+    rest. Runs inside the caller's transaction; 0 when the row is already gone, which is what
+    a resumed erasure finds.
+    """
+    conn.execute(
+        update(connector_channels_t)
+        .where(
+            connector_channels_t.c.active_persona_id == persona_id,
+            connector_channels_t.c.owner_id == owner_id,
+        )
+        .values(active_persona_id=None)
+    )
+    result = conn.execute(
+        delete(personas_t)
+        .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
+        .returning(personas_t.c.id)
+    )
+    return 0 if result.first() is None else 1
+
+
+def remove_persona_folder(workspace_root: Path, *, owner_id: str, persona_id: str) -> bool:
+    """Remove the persona's local folder and say whether there was one.
+
+    Resolved through :func:`persona_api.workspace_paths.persona_root`, which refuses anything
+    but exactly one persona folder below the owner's. Errors propagate: a folder that could
+    not be removed is not reported gone. Removing a partly removed folder again is harmless.
+    """
+    folder = persona_root(workspace_root, owner_id, persona_id)
+    if not folder.exists():
+        return False
+    shutil.rmtree(folder)
+    return True
 
 
 def default_embedder(model_name: str) -> SentenceTransformerEmbedder:

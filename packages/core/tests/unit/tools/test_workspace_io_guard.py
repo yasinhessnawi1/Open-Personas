@@ -92,13 +92,13 @@ FOLLOWING_MODULE_FUNCTIONS = frozenset(
 ALLOWLIST: dict[tuple[str, str, str], str] = {
     (
         "packages/api/src/persona_api/services/persona_service.py",
-        "delete_persona",
+        "remove_persona_folder",
         "exists",
     ): "probes the persona's own folder before removing it; a link there is removed, "
     "not followed, by rmtree (next entry)",
     (
         "packages/api/src/persona_api/services/persona_service.py",
-        "delete_persona",
+        "remove_persona_folder",
         "rmtree",
     ): "shutil.rmtree on Python 3.12 removes symlinks and junctions without following "
     "them (verified on Windows with a junction, a nested junction, a directory symlink "
@@ -108,7 +108,7 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
         "_remove_folder",
         "rmtree",
     ): "shutil.rmtree on Python 3.12 removes links inside without following them (same "
-    "verification as delete_persona); the folder itself is refused first if it is a link",
+    "verification as remove_persona_folder); the folder itself is refused first if it is a link",
     (
         "packages/api/src/persona_api/app.py",
         "_lifespan",

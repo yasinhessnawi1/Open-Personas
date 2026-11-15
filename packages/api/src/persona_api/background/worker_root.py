@@ -121,6 +121,7 @@ from persona_api.jobs.handlers.file_extract import (
     file_extract_queue_ready,
     register_file_extract_handler,
 )
+from persona_api.jobs.handlers.persona_erase import register_persona_erase_tenant
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.handlers.title_refresh import (
     build_title_refresh_generator,
@@ -206,6 +207,7 @@ def build_worker_registry(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    platform_engine: Engine | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -255,6 +257,8 @@ def build_worker_registry(
         workspace_root: The app's workspace root (the ``file_extract``
             renderer's persist target — the SAME root the code_execution
             produced-file persister writes under).
+        platform_engine: An engine that sees every tenant's rows, for the persona erase
+            tenant (R9-284). ``None`` leaves that tenant unregistered.
     """
     # R9-096: plan-scoped, resolved per job inside the owner scope — never once here on
     # the paid registry. Metered (Spec M3, T5): the handler now has its owner-billing seam.
@@ -787,6 +791,18 @@ def build_worker_registry(
             "persona avatars stay on the in-request path",
             image_backend_present=image_backend is not None,
             file_storage_present=file_storage is not None,
+        )
+    # R9-284: the persona erase tenant, on the engine that sees every tenant's rows (the api's
+    # persona_platform engine on hosted, the community engine there). Without one it is not
+    # registered and the route runs the erasure inline instead (persona_erase_queue_available).
+    if platform_engine is not None:
+        register_persona_erase_tenant(
+            registry,
+            platform_engine=platform_engine,
+            embedder=embedder,
+            config=config,
+            file_storage=file_storage,
+            workspace_root=workspace_root,
         )
     _log.info(
         "worker registry composed",
@@ -1533,6 +1549,7 @@ def start_in_process_worker(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    platform_engine: Engine | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -1591,6 +1608,7 @@ def start_in_process_worker(
         # producer gate (file_extract_queue_ready), so enqueue implies handler.
         sandbox_pool=sandbox_pool,
         workspace_root=workspace_root,
+        platform_engine=platform_engine,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines

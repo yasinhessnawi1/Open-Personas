@@ -1,0 +1,289 @@
+"""A persona with something in every place an erasure has to reach, and a sibling beside it.
+
+Shared by the erase tests. Runs on the community engine (SQLite) with a Chroma memory store and
+local file storage: the legacy community edition exactly, and the same SQL the Postgres editions
+run for every table here. ``memory_chunks``, the guard trigger and the graph are Postgres only and
+are pinned in the integration tests.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from persona.audit import MemoryAuditLogger
+from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.stores.chroma import ChromaBackend
+from persona_api.db.community import create_community_schema, make_community_engine
+from persona_api.db.models import metadata
+from persona_api.storage import LocalFileStorage
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, select
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from persona.stores.backend import Backend
+    from persona.stores.embedder import Embedder
+    from sqlalchemy.engine import Connection, Engine
+
+OWNER = "user_alice"
+OTHER_OWNER = "user_bob"
+PERSONA = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SIBLING = "persona_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+STRANGER = "persona_cccccccccccccccccccccccccccccccc"
+SECRET = "the words the user said"
+
+# Memory kinds keyed by the persona; documents are keyed by the conversation.
+PERSONA_KINDS = ("identity", "self_facts", "worldview", "episodic", "episodic_gist", "core_memory")
+_NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class Seeded:
+    engine: Engine
+    memory: Backend
+    audit: MemoryAuditLogger
+    storage: LocalFileStorage
+    workspace_root: Path
+    audit_root: Path
+
+
+def _filler(column: Any) -> Any:  # noqa: ANN401 - a SQLAlchemy column
+    kind = column.type
+    if isinstance(kind, Boolean):
+        return False
+    if isinstance(kind, (Integer, Float)):
+        return 0
+    if isinstance(kind, DateTime):
+        return _NOW
+    if isinstance(kind, JSON) or column.name in {"payload", "params", "metadata", "candidate"}:
+        return {}
+    return "x"
+
+
+def row(conn: Connection, table: str, **values: Any) -> None:  # noqa: ANN401
+    """Insert one row, filling every other required column with a harmless value."""
+    t = metadata.tables[table]
+    full = dict(values)
+    for column in t.columns:
+        needs = not column.nullable and column.server_default is None and column.default is None
+        if column.name not in full and needs and column.autoincrement is not True:
+            full[column.name] = _filler(column)
+    conn.execute(insert(t).values(**full))
+
+
+def chunk(chunk_id: str) -> PersonaChunk:
+    return PersonaChunk(
+        id=chunk_id,
+        text=f"{SECRET} {chunk_id}",
+        created_at=_NOW,
+        provenance=ChunkProvenance(
+            source=WriteSource.USER, logical_id=f"logical-{chunk_id}", version=1, written_at=_NOW
+        ),
+    )
+
+
+def conversation_of(persona_id: str) -> str:
+    return f"conv{persona_id[-12:]}"
+
+
+def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
+    conv = conversation_of(pid)
+    task = f"task_{pid[-6:]}"
+    run = f"run_{pid[-6:]}"
+    schedule = f"sched_{pid[-6:]}"
+    row(conn, "personas", id=pid, owner_id=owner, yaml="x: 1")
+    row(conn, "conversations", id=conv, owner_id=owner, persona_id=pid, title="t", origin="chat")
+    row(conn, "messages", id=f"msg_{pid[-6:]}", conversation_id=conv, role="user", content=SECRET)
+    row(
+        conn,
+        "schedules",
+        id=schedule,
+        owner_id=owner,
+        target_job_type="task_leg",
+        one_time_at=_NOW,
+        missed_fire_policy="fire-late-once",
+        payload_template={"task_id": task, "subject": SECRET},
+    )
+    row(
+        conn,
+        "schedules",
+        id=f"initsched:{pid}",
+        owner_id=owner,
+        target_job_type="initiative",
+        one_time_at=_NOW,
+        missed_fire_policy="fire-late-once",
+    )
+    row(
+        conn,
+        "tasks",
+        id=task,
+        owner_id=owner,
+        persona_id=pid,
+        contract_json={"subject": SECRET},
+        kind="standing",
+        state="active",
+        conversation_id=conv,
+        run_ids=[run],
+        schedule_id=schedule,
+    )
+    row(
+        conn, "runs", id=run, owner_id=owner, persona_id=pid, task="t", status="completed", steps=[]
+    )
+    for job_id, table, state in (
+        (f"job_{pid[-6:]}", "jobs", "queued"),
+        (f"arch_{pid[-6:]}", "jobs_archive", "succeeded"),
+    ):
+        row(
+            conn,
+            table,
+            id=job_id,
+            type="delegated_turn",
+            owner_id=owner,
+            payload={"conversation_id": conv, "verbatim_ask": SECRET},
+            idempotency_key=job_id,
+            state=state,
+        )
+    row(
+        conn,
+        "notifications",
+        id=f"note_{pid[-6:]}",
+        owner_id=owner,
+        kind="persona_ready",
+        ref_id=pid,
+        level="info",
+        message_key="k",
+        params={},
+    )
+    row(
+        conn,
+        "initiative_notices",
+        id=f"notice_{pid[-6:]}",
+        owner_id=owner,
+        persona_id=pid,
+        opportunity_key=f"o_{pid[-6:]}",
+        trigger="t",
+        source="s",
+        disposition="d",
+        candidate={"text": SECRET},
+    )
+    row(
+        conn,
+        "initiative_declines",
+        id=f"decl_{pid[-6:]}",
+        owner_id=owner,
+        persona_id=pid,
+        opportunity_key=f"o_{pid[-6:]}",
+        trigger="t",
+        source="s",
+    )
+    row(
+        conn,
+        "schedule_tombstones",
+        id=f"tomb_{pid[-6:]}",
+        owner_id=owner,
+        schedule_id="s",
+        persona_id=pid,
+        target_job_type="t",
+        action="deleted",
+        reason="r",
+    )
+    row(
+        conn,
+        "tool_audit_events",
+        id=f"tool_{pid[-6:]}",
+        persona_id=pid,
+        tool_name="code",
+        action="run",
+        resource="/x",
+        is_error=False,
+        metadata={"code": SECRET},
+    )
+    row(
+        conn,
+        "store_audit_events",
+        id=f"store_{pid[-6:]}",
+        persona_id=pid,
+        action="write",
+        store="episodic",
+        source="user",
+        chunk_ids=["c"],
+        logical_ids=["l"],
+        metadata={},
+    )
+    row(
+        conn,
+        "audit_log",
+        id=f"audit_{pid[-6:]}",
+        user_id=owner,
+        action="delegated_turn.execute",
+        target=conv,
+        metadata={"persona_id": pid, "verbatim_ask": SECRET, "outcome": "done"},
+    )
+
+
+def _persona_memory(memory: Backend, pid: str) -> None:
+    for kind in PERSONA_KINDS:
+        memory.upsert(persona_id=pid, store_kind=kind, chunks=[chunk(f"{pid[-6:]}-{kind}")])
+    memory.upsert(
+        persona_id=conversation_of(pid), store_kind="document", chunks=[chunk(f"{pid[-6:]}-doc")]
+    )
+
+
+def _persona_files(seeded: Seeded, owner: str, pid: str) -> None:
+    seeded.storage.put(f"{owner}/{pid}/uploads/a.png", SECRET.encode())
+    local_only = seeded.workspace_root / owner / pid / "sandbox"
+    local_only.mkdir(parents=True, exist_ok=True)
+    (local_only / "out.txt").write_text(SECRET, encoding="utf-8")
+    (seeded.audit_root / f"{pid}.jsonl").write_text(json.dumps({"ids": ["c"]}), encoding="utf-8")
+    (seeded.audit_root / f"{pid}.tools.jsonl").write_text(json.dumps({"code": SECRET}), "utf-8")
+
+
+def seed_into(engine: Engine, memory: Backend, tmp_path: Path) -> Seeded:
+    """Seed the three personas into ``engine`` and ``memory``, with files under ``tmp_path``."""
+    workspace_root = tmp_path / "workspace"
+    audit_root = tmp_path / "audit"
+    workspace_root.mkdir()
+    audit_root.mkdir()
+    seeded = Seeded(
+        engine=engine,
+        memory=memory,
+        audit=MemoryAuditLogger(),
+        storage=LocalFileStorage(workspace_root),
+        workspace_root=workspace_root,
+        audit_root=audit_root,
+    )
+    with engine.begin() as conn:
+        row(conn, "users", id=OWNER, email="alice@x.test")
+        row(conn, "users", id=OTHER_OWNER, email="bob@x.test")
+        _persona_rows(conn, OWNER, PERSONA)
+        _persona_rows(conn, OWNER, SIBLING)
+        _persona_rows(conn, OTHER_OWNER, STRANGER)
+    for owner, pid in ((OWNER, PERSONA), (OWNER, SIBLING), (OTHER_OWNER, STRANGER)):
+        _persona_memory(seeded.memory, pid)
+        _persona_files(seeded, owner, pid)
+    return seeded
+
+
+def seed(tmp_path: Path, embedder: Embedder) -> Seeded:
+    """The legacy community edition: SQLite and Chroma."""
+    engine = make_community_engine(tmp_path / "community.db")
+    create_community_schema(engine)
+    memory = ChromaBackend(persist_path=tmp_path / "chroma", embedder=embedder)
+    return seed_into(engine, memory, tmp_path)
+
+
+def ids_naming(engine: Engine, table: str, value: str) -> list[str]:
+    """Rows of ``table`` where any column holds ``value`` or JSON that contains it."""
+    t = metadata.tables[table]
+    with engine.connect() as conn:
+        rows = conn.execute(select(t)).mappings().all()
+    return sorted(
+        str(r["id"]) if "id" in r else str(r)
+        for r in rows
+        if any(
+            value in (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for v in r.values()
+        )
+    )
