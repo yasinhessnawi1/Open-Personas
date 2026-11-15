@@ -256,7 +256,11 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
             nodes_t.c.concept_name,
             nodes_t.c.content,
             nodes_t.c.metadata,
-        ).where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, persona_id))
+        )
+        .where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, persona_id))
+        # Locked until the rewrite commits: a concurrent extend (synthesis, consolidation)
+        # waits, instead of appending to a trail this is about to overwrite (review L1).
+        .with_for_update()
     ).all()
     plan = plan_trails(
         ((r.id, r.id, list(r.provenance)) for r in rows),
@@ -287,9 +291,9 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
 
 def _versions(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
     rows = conn.execute(
-        select(versions_t.c.version_key, versions_t.c.node_id, versions_t.c.provenance).where(
-            versions_t.c.owner_id == owner_id, _naming(versions_t.c.provenance, persona_id)
-        )
+        select(versions_t.c.version_key, versions_t.c.node_id, versions_t.c.provenance)
+        .where(versions_t.c.owner_id == owner_id, _naming(versions_t.c.provenance, persona_id))
+        .with_for_update()
     ).all()
     plan = plan_trails(
         ((str(r.version_key), r.node_id, list(r.provenance)) for r in rows),
