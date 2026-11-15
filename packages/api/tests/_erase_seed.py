@@ -230,6 +230,16 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
         logical_ids=[],
         metadata={"action": "created"},
     )
+    # Another owner's row naming this persona's conversation: never theirs to scrub.
+    row(
+        conn,
+        "audit_log",
+        id=f"foreign_{pid[-6:]}",
+        user_id=OTHER_OWNER if owner != OTHER_OWNER else OWNER,
+        action="upload.create",
+        target=f"{conv}/doc_x",
+        metadata={"workspace_path": f"x/{SECRET}.pdf", "verbatim_ask": SECRET},
+    )
     row(
         conn,
         "audit_log",

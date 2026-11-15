@@ -445,3 +445,17 @@ def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -
     assert json.loads(own)["chunk_ids"] == ["c"]
     lines = [json.loads(line) for line in graph.splitlines()]
     assert {e["written_by"]: e["reason"] for e in lines} == {PERSONA: None, SIBLING: SECRET}
+
+
+def test_another_owners_audit_rows_are_never_scrubbed(seeded: Seeded) -> None:
+    """The owner predicate: another owner's row naming this persona's conversation stays."""
+    erase_persona(_deps(seeded), _claim(seeded))
+
+    with seeded.engine.connect() as conn:
+        foreign = conn.execute(
+            select(audit_log.c.target, audit_log.c.metadata).where(
+                audit_log.c.id == "foreign_aaaaaa"
+            )
+        ).one()
+    assert foreign.target == f"{conversation_of(PERSONA)}/doc_x"
+    assert foreign.metadata == {"workspace_path": f"x/{SECRET}.pdf", "verbatim_ask": SECRET}
