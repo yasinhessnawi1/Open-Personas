@@ -28,8 +28,9 @@ from _erase_seed import (
     ids_naming,
     row,
     seed,
+    uncovered,
 )
-from persona_api.db.models import audit_log, metadata
+from persona_api.db.models import audit_log
 from persona_api.errors import ErasureRecordError
 from persona_api.services import erasure_service
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -39,7 +40,7 @@ from persona_api.services.erasure_service import (
     erase_persona,
     fence_persona,
 )
-from sqlalchemy import select
+from sqlalchemy import JSON, inspect, select
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -138,6 +139,7 @@ def test_what_the_ruling_keeps_is_kept(seeded: Seeded) -> None:
     assert ids_naming(seeded.engine, "store_audit_events", PERSONA) != []
     assert ids_naming(seeded.engine, "initiative_declines", PERSONA) == []
     assert len(ids_naming(seeded.engine, "initiative_declines", "decl_aaaaaa")) == 1
+    assert ids_naming(seeded.engine, "schedule_tombstones", PERSONA) == []
     assert len(ids_naming(seeded.engine, "schedule_tombstones", "tomb_aaaaaa")) == 1
     with seeded.engine.connect() as conn:
         kept = conn.execute(
@@ -344,39 +346,19 @@ def test_a_finished_erasure_is_not_run_again(seeded: Seeded) -> None:
     assert ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA) == finished
 
 
-def test_the_seed_reaches_every_table_that_names_a_persona() -> None:
-    """A new table with a persona column must be added to the erasure, or this fails."""
-    erased_or_kept = {
-        *_TABLES,
-        "initiative_declines",  # nulled: the owner's intent, kept
-        "schedule_tombstones",  # nulled: the owner's intent, kept
-        "store_audit_events",  # kept by the ruling: ids and labels
-        "erasures",  # the ledger itself
-        "memory_chunks",  # through the store doors, read back above as "memory"
-    }
-    naming = {
-        t.name
-        for t in metadata.sorted_tables
-        if "persona_id" in t.columns or "active_persona_id" in t.columns
-    }
-    # Gone by the personas foreign key cascade, which the anchor test reads back for the
-    # tables that matter; the rest are listed so a new one is a decision, not an accident.
-    cascaded = {
-        "approval_proposals",
-        "approval_decisions",
-        "cadence_counters",
-        "calls",
-        "connector_channels",
-        "connector_conversations",
-        "deferred_digest",
-        "event_triggers",
-        "persona_mcp_assignments",
-        "skill_consents",
-        "suspended_personas",
-        "task_checkpoints",
-        "turn_logs",
-    }
-    assert naming - erased_or_kept - cascaded == set()
+def test_every_place_the_schema_can_name_a_persona_has_a_decision(seeded: Seeded) -> None:
+    """Review L5: derived from the live schema, so a new table or JSON column fails here."""
+    inspector = inspect(seeded.engine)
+    persona_tables, json_columns = [], []
+    for table in inspector.get_table_names():
+        columns = inspector.get_columns(table)
+        if any(c["name"] in {"persona_id", "active_persona_id"} for c in columns):
+            persona_tables.append(table)
+        json_columns += [f"{table}.{c['name']}" for c in columns if isinstance(c["type"], JSON)]
+
+    assert len(persona_tables) >= 10
+    assert len(json_columns) >= 20
+    assert uncovered(persona_tables, json_columns) == []
 
 
 def _race(seeded: Seeded, monkeypatch: pytest.MonkeyPatch) -> list[BaseException]:

@@ -22,6 +22,7 @@ from persona_api.storage import LocalFileStorage
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, select
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
     from persona.stores.backend import Backend
@@ -332,4 +333,85 @@ def ids_naming(engine: Engine, table: str, value: str) -> list[str]:
         if any(
             value in (json.dumps(v) if isinstance(v, (dict, list)) else str(v)) for v in r.values()
         )
+    )
+
+
+# --- what the erasure does with every place a persona can be named (review L5) ---------------
+#
+# Derived from the live schema by the tests (the SQLite inspector here, information_schema on
+# Postgres), so a new table with a persona column, or a new JSON column, fails until it is
+# given a line below: a decision, not an accident.
+
+PERSONA_TABLES: dict[str, str] = {
+    "personas": "the row step",
+    "memory_chunks": "the memory step, through the store doors",
+    "initiative_notices": "the rows step",
+    "tool_audit_events": "the rows step (the tool audit goes, by the ruling)",
+    "initiative_declines": "kept, persona nulled: the owner's intent",
+    "schedule_tombstones": "kept, persona nulled: the owner's intent",
+    "store_audit_events": "kept by the ruling: ids and labels",
+    "erasures": "the ledger itself",
+    # Gone by the personas foreign key cascade at the row step.
+    "approval_proposals": "cascade",
+    "cadence_counters": "cascade",
+    "calls": "cascade",
+    "connector_channels": "pointer cleared by delete_persona_row",
+    "connector_conversations": "cascade",
+    "conversations": "cascade",
+    "deferred_digest": "cascade",
+    "event_triggers": "cascade, ids captured for their notifications",
+    "persona_mcp_assignments": "cascade",
+    "runs": "cascade",
+    "skill_consents": "cascade",
+    "suspended_personas": "cascade",
+    "tasks": "cascade",
+}
+
+JSON_COLUMNS: dict[str, str] = {
+    # Searched for the persona's ids.
+    "jobs.payload": "fence and rows steps: jobs naming the persona go",
+    "jobs_archive.payload": "rows step: archived jobs naming the persona go",
+    "schedules.payload_template": "fence step: schedules naming the persona go",
+    "audit_log.metadata": "rows step: content keys removed, rows kept",
+    "graph_nodes.provenance": "graph step",
+    "graph_node_versions.provenance": "graph step",
+    "graph_edges.provenance": "graph step",
+    "graph_entities.provenance": "graph step",
+    # The row goes, with whatever its JSON holds.
+    "graph_nodes.metadata": "graph step deletes the row, or keeps the user's node",
+    "graph_node_versions.metadata": "graph step deletes the row, or keeps the user's node",
+    "graph_entities.aliases": "graph step deletes the entity, or keeps a shared one",
+    "memory_chunks.metadata": "memory step",
+    "initiative_notices.candidate": "rows step",
+    "notifications.params": "rows step, by ref_id",
+    "tool_audit_events.metadata": "rows step",
+    "messages.tool_calls": "cascade",
+    "messages.channel": "cascade",
+    "messages.images": "cascade",
+    "messages.stream_events": "cascade",
+    "tasks.contract_json": "cascade",
+    "tasks.run_ids": "cascade",
+    "runs.steps": "cascade",
+    "task_checkpoints.checkpoint_json": "cascade",
+    "approval_proposals.arguments_json": "cascade",
+    "approval_proposals.categories_json": "cascade",
+    "approval_decisions.edited_arguments_json": "cascade",
+    "event_triggers.filter": "cascade",
+    "event_triggers.action": "cascade",
+    # Kept: ids, labels and counts, or not about a persona.
+    "store_audit_events.chunk_ids": "kept by the ruling",
+    "store_audit_events.logical_ids": "kept by the ruling",
+    "store_audit_events.metadata": "kept by the ruling",
+    "schedule_tombstones.reason": "kept: the owner's intent",
+    "erasures.captured": "the ledger itself",
+    "erasures.counts": "the ledger itself",
+    "user_mcp_servers.discovered_tools": "the user's, not a persona's",
+}
+
+
+def uncovered(persona_tables: Iterable[str], json_columns: Iterable[str]) -> list[str]:
+    """Every table with a persona column and every JSON column the erasure has no line for."""
+    return sorted(
+        {*(t for t in persona_tables if t not in PERSONA_TABLES)}
+        | {c for c in json_columns if c not in JSON_COLUMNS}
     )
