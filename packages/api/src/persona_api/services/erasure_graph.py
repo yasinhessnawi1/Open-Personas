@@ -17,9 +17,15 @@ graph. It deletes what only that persona contributed and removes that persona fr
 - an edge the persona asserted goes; an entity it established loses that provenance, and goes
   if no node links to it any more.
 
-A member being deleted that was merged into a node that stays takes back what it gave: the
-edges mirrored onto the canonical, the entity links copied to it, and its name in the
-canonical's aliases (on SELF too, review H3).
+Consolidation also moves things between nodes, and that is undone where it would strand them:
+
+- a member merged INTO a node being deleted (another persona's or the user's own) is unmerged
+  first, as ``ConsolidationPass.unmerge`` does: its closed edges reopen, ``merged_into`` and its
+  merge record are cleared (review M1). Otherwise it would point at nothing and vanish from
+  retrieval;
+- a member being deleted that was merged into a node that stays takes back what it gave: the
+  edges mirrored onto the canonical, the entity links copied to it, and its name in the
+  canonical's aliases (on SELF too, review H3).
 
 Postgres only: the legacy community edition has no graph. The planning is pure and unit tested;
 the SQL runs in CI (tests/integration/test_erase_persona_graph_postgres.py).
@@ -33,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from persona.graph.models import _compute_node_hash, make_self_node_id
-from sqlalchemy import cast, delete, exists, select, update
+from sqlalchemy import cast, delete, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 
 from persona_api.db.models import graph_edges, graph_entities, graph_node_entities
@@ -48,6 +54,7 @@ __all__ = [
     "erase_persona_graph",
     "merge_record",
     "plan_trails",
+    "unmerged",
     "without_aliases",
 ]
 
@@ -137,6 +144,17 @@ def without_aliases(metadata: Mapping[str, Any], names: Iterable[str]) -> dict[s
     return clean
 
 
+def unmerged(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, Any]]:
+    """How to unmerge a member: the edge tag to reopen (``None`` if no record) and its metadata.
+
+    The inverse ``ConsolidationPass.unmerge`` applies: the merge act closed the member's edges
+    under ``consolidation:{run_id}``, and the record lives under its reserved key.
+    """
+    record = merge_record(metadata)
+    tag = f"consolidation:{record['run_id']}" if record and record.get("run_id") else None
+    return tag, {k: v for k, v in (metadata or {}).items() if k != _MERGE_KEY}
+
+
 def _naming(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressions
     """A JSONB trail (a list of entries) with an entry from this persona."""
     return cast(column, JSONB).contains([{"persona_id": persona_id}])
@@ -152,6 +170,41 @@ def _set_metadata(conn: Connection, owner_id: str, node: Any, metadata: dict[str
             content_hash=_compute_node_hash(node.concept_name, node.content, metadata),
         )
     )
+
+
+def _unmerge_members_of(conn: Connection, owner_id: str, doomed: list[str]) -> int:
+    """Unmerge every member of a doomed node that is not doomed itself (review M1)."""
+    members = conn.execute(
+        select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
+        .where(
+            nodes_t.c.owner_id == owner_id,
+            nodes_t.c.merged_into.in_(doomed),
+            nodes_t.c.id.not_in(doomed),
+        )
+        .with_for_update()
+    ).all()
+    for member in members:
+        tag, metadata = unmerged(member.metadata)
+        if tag is not None:
+            conn.execute(
+                update(graph_edges)
+                .where(
+                    graph_edges.c.owner_id == owner_id,
+                    graph_edges.c.invalidated_by == tag,
+                    or_(
+                        graph_edges.c.src_node_id == member.id,
+                        graph_edges.c.dst_node_id == member.id,
+                    ),
+                )
+                .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+            )
+        _set_metadata(conn, owner_id, member, metadata)
+        conn.execute(
+            update(nodes_t)
+            .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == member.id)
+            .values(merged_into=None)
+        )
+    return len(members)
 
 
 def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: set[str]) -> int:
@@ -211,8 +264,9 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         self_node_id=make_self_node_id(owner_id),
     )
     doomed = set(plan.doomed)
-    cleaned = 0
+    cleaned = unmerged_members = 0
     if doomed:
+        unmerged_members = _unmerge_members_of(conn, owner_id, sorted(doomed))
         cleaned = _give_back(conn, owner_id, [r for r in rows if r.id in doomed], doomed)
         conn.execute(
             delete(nodes_t).where(nodes_t.c.owner_id == owner_id, nodes_t.c.id.in_(sorted(doomed)))
@@ -227,6 +281,7 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         "nodes_deleted": len(doomed),
         "nodes_stripped": len(plan.rewrites),
         "canonicals_cleaned": cleaned,
+        "members_unmerged": unmerged_members,
     }
 
 
@@ -292,7 +347,9 @@ def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> di
     """Take the persona out of its owner's graph, in one transaction; return the counts.
 
     Nodes first, so the edges and entity links of deleted nodes go by cascade before the
-    entities are judged by what still links to them. A no-op on an engine with no graph.
+    entities are judged by what still links to them. A no-op on an engine with no graph. An
+    in-RAM turbovec index (opt-in) does not regain an unmerged member until it is rebuilt; the
+    pgvector default reads ``merged_into`` from the table.
     """
     if engine.dialect.name != "postgresql":
         return {}

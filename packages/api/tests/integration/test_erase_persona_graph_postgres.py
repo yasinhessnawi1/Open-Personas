@@ -158,6 +158,7 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
         "nodes_deleted": 1,
         "nodes_stripped": 3,
         "canonicals_cleaned": 0,
+        "members_unmerged": 0,
         "versions_deleted": 1,
         "versions_stripped": 2,
         "edges_deleted": 1,
@@ -294,3 +295,30 @@ def test_a_canonical_that_stays_takes_back_what_the_personas_member_gave(
     assert "p_into_q" not in canonical.metadata.get("_k7_aliases", "")
     assert _open_edges(engine, "q_canon") == set()
     assert [p.persona_id for p in canonical.provenance if p.persona_id] == [_OTHER]
+
+
+def test_a_member_merged_into_an_erased_node_is_unmerged_not_stranded(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    """Review M1: another persona's member must not point at a node that no longer exists."""
+    engine, backend = consolidated
+    before = backend.get_node(_OWNER, "q_member")
+    assert before is not None
+    assert "_k7_merge" in before.metadata
+    assert _open_edges(engine, "q_member") == set(), "the merge closed the member's edge"
+
+    counts = erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert backend.get_node(_OWNER, "p_canon2") is None
+    member = backend.get_node(_OWNER, "q_member")  # parses: the hash matches the metadata
+    assert member is not None
+    assert "_k7_merge" not in member.metadata
+    assert member.content == before.content
+    with engine.connect() as conn:
+        merged_into = conn.execute(
+            text("SELECT merged_into FROM graph_nodes WHERE owner_id = :o AND id = 'q_member'"),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert merged_into is None
+    assert _open_edges(engine, "q_member") == {"e_qm"}
+    assert counts["members_unmerged"] == 1

@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 
-from persona_api.services.erasure_graph import merge_record, plan_trails, without_aliases
+from persona_api.services.erasure_graph import (
+    merge_record,
+    plan_trails,
+    unmerged,
+    without_aliases,
+)
 
 _PERSONA = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _OTHER = "persona_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -172,3 +177,17 @@ def test_only_an_entry_with_no_persona_is_bookkeeping() -> None:
     plan = _plan(("n1", [_entry(_PERSONA), theirs]))
 
     assert plan.rewrites == {"n1": [theirs]}
+
+
+def test_unmerging_reopens_the_runs_edges_and_drops_only_the_record() -> None:
+    """Review M1: the inverse ConsolidationPass.unmerge applies to a member of a doomed node."""
+    record = {"run_id": "r7", "canonical": "c", "mirrored_edges": [], "added_entities": []}
+    metadata = {"_k7_merge": json.dumps(record), "kept": "yes"}
+
+    assert unmerged(metadata) == ("consolidation:r7", {"kept": "yes"})
+
+
+def test_a_member_without_a_usable_record_is_still_freed() -> None:
+    assert unmerged({"kept": "yes"}) == (None, {"kept": "yes"})
+    assert unmerged({"_k7_merge": json.dumps({"canonical": "c"})}) == (None, {})
+    assert unmerged(None) == (None, {})
