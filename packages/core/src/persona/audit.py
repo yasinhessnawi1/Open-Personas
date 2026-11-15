@@ -14,7 +14,9 @@ The Postgres-backed audit log in spec 07 swaps in behind this protocol.
 from __future__ import annotations
 
 import json
+import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime  # noqa: TC003 — Pydantic needs runtime access
 from enum import StrEnum
 from pathlib import Path  # noqa: TC003 — used at runtime by JSONLAuditLogger
@@ -26,7 +28,7 @@ from persona.errors import AuditWriteError
 from persona.schema.chunks import WriteSource  # noqa: TC001 — Pydantic needs runtime access
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 __all__ = [
     "AuditAction",
@@ -35,6 +37,7 @@ __all__ = [
     "JSONLAuditLogger",
     "MemoryAuditLogger",
     "StoreKind",
+    "jsonl_file_lock",
 ]
 
 # The four original typed stores (Spec 01) + episodic_gist (K8's pyramid
@@ -181,6 +184,24 @@ class AuditLogger(Protocol):
         ...
 
 
+_FILE_LOCKS: dict[str, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def jsonl_file_lock(path: Path) -> Iterator[None]:
+    """Hold one audit log file against every writer in this process (R9-284 review M-2).
+
+    The appends of every :class:`JSONLAuditLogger` and an erasure's rewrite of the same file
+    take the same lock, so a rewrite (read, compare, replace) can never lose an append.
+    """
+    key = os.path.normcase(str(path.absolute()))
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
 class JSONLAuditLogger:
     """Default audit logger: one JSONL file per persona.
 
@@ -197,7 +218,6 @@ class JSONLAuditLogger:
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._lock = threading.Lock()
 
     def _path(self, persona_id: str) -> Path:
         # The id becomes a file name, so it must be one name: ``../x`` would write and read
@@ -218,7 +238,8 @@ class JSONLAuditLogger:
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             payload = event.model_dump_json()
-            with self._lock, self._path(event.persona_id).open("a", encoding="utf-8") as f:
+            path = self._path(event.persona_id)
+            with jsonl_file_lock(path), path.open("a", encoding="utf-8") as f:
                 f.write(payload)
                 f.write("\n")
         except OSError as exc:

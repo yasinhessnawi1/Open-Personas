@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from persona.audit import jsonl_file_lock
 from persona.tools._sandbox import require_path_segment
 from sqlalchemy import and_, or_, update
 
@@ -56,18 +57,30 @@ def _scrubbed_line(line: str, *, owner_id: str, persona_id: str) -> str:
     )
     if not ours or all(event.get(f) is None for f in FREE_TEXT_FIELDS):
         return line
-    return json.dumps({**event, **dict.fromkeys(FREE_TEXT_FIELDS)}, separators=(",", ":"))
+    return json.dumps(
+        {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}, separators=(",", ":"), ensure_ascii=False
+    )
 
 
 def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
-    """Rewrite one log without the persona's free text. Retried if it grew meanwhile."""
+    """Rewrite one log without the persona's free text, holding the loggers' lock (review M-2).
+
+    The lock keeps this process's appends out until the replace; the size check behind it is
+    for a writer in another process. Bytes that are not UTF-8 are carried through unchanged
+    (surrogateescape), so one bad byte cannot make the step fail forever.
+    """
+    with jsonl_file_lock(path):
+        return _scrub_held_file(path, owner_id=owner_id, persona_id=persona_id)
+
+
+def _scrub_held_file(path: Path, *, owner_id: str, persona_id: str) -> int:
     for _ in range(_FILE_ATTEMPTS):
         if not path.exists():
             return 0
         before = path.read_bytes()
         # By newline only: str.splitlines also splits on U+2028 and the like, which JSON leaves
         # raw inside a string, and would cut an event apart (review M-1).
-        text = before.decode("utf-8")
+        text = before.decode("utf-8", errors="surrogateescape")
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
@@ -76,7 +89,7 @@ def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
         if not changed:
             return 0
         temporary = path.with_name(path.name + ".erasing")
-        temporary.write_bytes(("\n".join(clean) + "\n").encode("utf-8"))
+        temporary.write_bytes(("\n".join(clean) + "\n").encode("utf-8", errors="surrogateescape"))
         if path.read_bytes() != before:  # an event was appended meanwhile: start again
             temporary.unlink()
             continue
