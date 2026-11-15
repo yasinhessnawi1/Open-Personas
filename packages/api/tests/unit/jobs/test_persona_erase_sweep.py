@@ -7,6 +7,7 @@ the operator once.
 
 from __future__ import annotations
 
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from typing import Any
@@ -27,10 +28,11 @@ _NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Engine:
+def engine(tmp_path: Path) -> Iterator[Engine]:
     eng = make_community_engine(tmp_path / "community.db")
     create_community_schema(eng)
-    return eng
+    yield eng
+    eng.dispose()
 
 
 def _claim(engine: Engine, persona: str, *, age: timedelta = timedelta(0)) -> str:

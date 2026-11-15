@@ -12,6 +12,7 @@ test_migration_061_erasures.py.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,10 +31,11 @@ _CAPTURED = {"conversations": ["c1", "c2"], "tasks": ["t1"]}
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Engine:
+def engine(tmp_path: Path) -> Iterator[Engine]:
     eng = make_community_engine(tmp_path / "community.db")
     create_community_schema(eng)
-    return eng
+    yield eng
+    eng.dispose()
 
 
 @pytest.fixture

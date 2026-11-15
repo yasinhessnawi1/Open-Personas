@@ -9,10 +9,12 @@ are pinned in the integration tests.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import psutil
 from persona.audit import MemoryAuditLogger
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.chroma import ChromaBackend
@@ -22,7 +24,7 @@ from persona_api.storage import LocalFileStorage
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, select
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from pathlib import Path
 
     from persona.stores.backend import Backend
@@ -350,8 +352,36 @@ def seed_into(engine: Engine, memory: Backend, tmp_path: Path) -> Seeded:
     return seeded
 
 
+def open_files_under(root: Path) -> list[str]:
+    """Files under ``root`` this process still holds open (a leak on Windows, R9-284)."""
+    prefix = str(root.resolve()).lower()
+    return sorted(
+        f.path for f in psutil.Process().open_files() if f.path.lower().startswith(prefix)
+    )
+
+
+@contextmanager
+def legacy_edition(tmp_path: Path, embedder: Embedder) -> Iterator[Seeded]:
+    """A seeded legacy edition that gives back every file it opened.
+
+    Chroma's persistent client keeps each collection's segment files open until it is closed,
+    and a SQLite engine keeps its pooled connection. Never closed, a few dozen tests of them
+    reached Windows' 512 open-file limit and failed unrelated tests that ran later. The exit
+    asserts nothing under ``tmp_path`` is still open.
+    """
+    seeded = seed(tmp_path, embedder)
+    try:
+        yield seeded
+    finally:
+        assert isinstance(seeded.memory, ChromaBackend)
+        seeded.memory.close()
+        seeded.engine.dispose()
+        leaked = open_files_under(tmp_path)
+        assert leaked == [], f"the erase seed left files open: {leaked[:5]}"
+
+
 def seed(tmp_path: Path, embedder: Embedder) -> Seeded:
-    """The legacy community edition: SQLite and Chroma."""
+    """The legacy community edition: SQLite and Chroma. Prefer :func:`legacy_edition`."""
     engine = make_community_engine(tmp_path / "community.db")
     create_community_schema(engine)
     memory = ChromaBackend(persist_path=tmp_path / "chroma", embedder=embedder)

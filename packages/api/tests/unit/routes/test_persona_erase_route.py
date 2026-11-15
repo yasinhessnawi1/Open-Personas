@@ -10,6 +10,7 @@ never claimed, and a process that could not erase the memory refuses before touc
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from datetime import timedelta
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from types import SimpleNamespace
@@ -25,7 +26,7 @@ from _erase_seed import (
     Seeded,
     conversation_of,
     ids_naming,
-    seed,
+    legacy_edition,
 )
 from fastapi.testclient import TestClient
 from persona_api.app import create_app
@@ -39,8 +40,9 @@ from persona_api.services.erasure_service import PERSONA_ERASE_JOB_TYPE, capture
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Seeded:
-    return seed(tmp_path, embedder)  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+        yield legacy
 
 
 def _client(seeded: Seeded, **state: Any) -> TestClient:  # noqa: ANN401

@@ -8,12 +8,13 @@ refusal is permanent, and an erasure whose job died is resumed under a key of it
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from datetime import timedelta
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from _erase_seed import OTHER_OWNER, OWNER, PERSONA, SIBLING, STRANGER, Seeded, seed
+from _erase_seed import OTHER_OWNER, OWNER, PERSONA, SIBLING, STRANGER, Seeded, legacy_edition
 from persona.errors import PermanentJobError
 from persona_api.jobs.handlers.persona_erase import (
     PERSONA_ERASE_JOB_TYPE,
@@ -42,8 +43,9 @@ class _Context:
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Seeded:
-    return seed(tmp_path, embedder)  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+        yield legacy
 
 
 def _handler(seeded: Seeded) -> PersonaEraseHandler:

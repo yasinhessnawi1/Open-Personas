@@ -8,6 +8,7 @@ security refusal, no ledger table) counts as "unwritable".
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from types import SimpleNamespace
 
@@ -49,17 +50,19 @@ def _app(platform: object, *, writable: bool | None, probed_ago: float) -> FastA
 
 
 @pytest.fixture
-def ready(tmp_path: Path) -> object:
+def ready(tmp_path: Path) -> Iterator[object]:
     engine = make_community_engine(tmp_path / "ready.db")
     create_community_schema(engine)
-    return engine
+    yield engine
+    engine.dispose()
 
 
 @pytest.mark.parametrize("was", [False, None])
 def test_a_ledger_that_works_now_makes_the_api_ready_again(ready: object, was: bool | None) -> None:
     app = _app(ready, writable=was, probed_ago=3600)
 
-    resp = TestClient(app).get("/healthz")
+    with TestClient(app) as client:
+        resp = client.get("/healthz")
 
     assert resp.status_code == 200
     assert app.state.erasure_ledger_writable is True
@@ -68,7 +71,8 @@ def test_a_ledger_that_works_now_makes_the_api_ready_again(ready: object, was: b
 def test_the_probe_is_not_repeated_on_every_request(ready: object) -> None:
     app = _app(ready, writable=False, probed_ago=1)
 
-    resp = TestClient(app).get("/healthz")
+    with TestClient(app) as client:
+        resp = client.get("/healthz")
 
     assert resp.status_code == 503
     assert app.state.erasure_ledger_writable is False
@@ -87,7 +91,8 @@ def test_an_unreachable_database_is_not_unwritable_for_good() -> None:
     assert ErasureLedger(_Unreachable()).can_write() is None  # type: ignore[arg-type]
 
     app = _app(_Unreachable(), writable=None, probed_ago=3600)
-    resp = TestClient(app).get("/healthz")
+    with TestClient(app) as client:
+        resp = client.get("/healthz")
 
     assert resp.status_code == 200
     assert app.state.erasure_ledger_writable is None
@@ -97,6 +102,7 @@ def test_a_missing_ledger_table_is_unwritable_for_good(tmp_path: Path) -> None:
     bare = make_community_engine(tmp_path / "bare.db")
 
     assert ErasureLedger(bare).can_write() is False
+    bare.dispose()
 
 
 def test_a_permission_refusal_is_unwritable_for_good() -> None:

@@ -6,6 +6,7 @@ tests/integration/test_erase_persona_postgres.py.
 
 from __future__ import annotations
 
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 
 import pytest
@@ -17,8 +18,10 @@ _ID = "erasure_" + "a" * 32
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Engine:
-    return make_community_engine(tmp_path / "community.db")
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    eng = make_community_engine(tmp_path / "community.db")
+    yield eng
+    eng.dispose()
 
 
 def test_a_second_run_does_not_get_the_lock_while_the_first_holds_it(engine: Engine) -> None:

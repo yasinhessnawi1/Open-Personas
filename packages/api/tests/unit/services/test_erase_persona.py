@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,8 +27,8 @@ from _erase_seed import (
     chunk,
     conversation_of,
     ids_naming,
+    legacy_edition,
     row,
-    seed,
     uncovered,
 )
 from persona_api.db.models import audit_log, store_audit_events
@@ -65,8 +66,9 @@ _TABLES = (
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Seeded:
-    return seed(tmp_path, embedder)  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+        yield legacy
 
 
 def _deps(seeded: Seeded) -> PersonaEraseDeps:
