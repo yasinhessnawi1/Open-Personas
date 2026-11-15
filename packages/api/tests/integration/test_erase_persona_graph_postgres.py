@@ -107,19 +107,12 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
             ),
             vector,
         )
-    with migrated_engine.begin() as conn:
-        for node_id, entity_id in (
-            ("only", "ent_gone"),
-            ("theirs", "ent_kept"),
-            ("theirs", "ent_theirs"),
-        ):
-            conn.execute(
-                text(
-                    "INSERT INTO graph_node_entities (owner_id, node_id, entity_id) "
-                    "VALUES (:o, :n, :e)"
-                ),
-                {"o": _OWNER, "n": node_id, "e": entity_id},
-            )
+    for node_id, entity_id in (
+        ("only", "ent_gone"),
+        ("theirs", "ent_kept"),
+        ("theirs", "ent_theirs"),
+    ):
+        backend.associate_entities(_OWNER, node_id, [entity_id])
     return migrated_engine
 
 
