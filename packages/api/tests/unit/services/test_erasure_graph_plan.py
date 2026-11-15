@@ -7,7 +7,9 @@ Postgres only and runs in CI (tests/integration/test_erase_persona_graph_postgre
 
 from __future__ import annotations
 
-from persona_api.services.erasure_graph import plan_trails
+import json
+
+from persona_api.services.erasure_graph import merge_record, plan_trails, without_aliases
 
 _PERSONA = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _OTHER = "persona_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -98,3 +100,75 @@ def test_a_malformed_entry_is_never_taken_for_the_persona() -> None:
     plan = _plan(("n1", ["not an entry", _entry(_PERSONA)]))  # type: ignore[list-item]
 
     assert plan.rewrites == {"n1": ["not an entry"]}
+
+
+def _consolidation(run: str = "r1") -> dict[str, object]:
+    """What ConsolidationPass appends when near-duplicates merge (_accrete_aliases)."""
+    return {
+        "source": "system",
+        "persona_id": None,
+        "written_at": _AT,
+        "reason": f"consolidation:{run} aliases:a name",
+    }
+
+
+def test_consolidation_bookkeeping_does_not_make_a_node_shared() -> None:
+    """Review H3: a node only the persona fed is deleted however often it merged."""
+    plan = _plan(("n1", [_entry(_PERSONA), _consolidation(), _consolidation("r2")]))
+
+    assert plan.doomed == ["n1"]
+
+
+def test_a_real_contribution_beside_consolidation_keeps_the_node() -> None:
+    other, user = _entry(_OTHER), _entry(None, source="user")
+    plan = _plan(
+        ("n1", [_entry(_PERSONA), _consolidation(), other]),
+        ("n2", [_entry(_PERSONA), _consolidation(), user]),
+    )
+
+    assert plan.doomed == []
+    assert plan.rewrites == {"n1": [_consolidation(), other], "n2": [_consolidation(), user]}
+
+
+def test_a_system_entry_that_is_not_consolidation_is_independent() -> None:
+    synthesis = {"source": "system", "persona_id": None, "written_at": _AT, "reason": "k2"}
+    plan = _plan(("n1", [_entry(_PERSONA), synthesis]))
+
+    assert plan.rewrites == {"n1": [synthesis]}
+
+
+def test_the_self_node_loses_consolidations_entries_with_the_personas() -> None:
+    plan = _plan((_SELF, [_entry(_PERSONA), _consolidation()]))
+
+    assert plan.doomed == []
+    assert plan.rewrites == {_SELF: [{"source": "system", "written_at": _AT}]}
+
+
+def test_a_merge_record_is_read_only_when_it_is_one() -> None:
+    record = {"run_id": "r1", "canonical": "c", "mirrored_edges": ["e1"], "added_entities": []}
+
+    assert merge_record({"_k7_merge": json.dumps(record)}) == record
+    assert merge_record({"_k7_merge": "not json"}) is None
+    assert merge_record({"_k7_merge": "[1]"}) is None
+    assert merge_record({}) is None
+    assert merge_record(None) is None
+
+
+def test_a_name_leaves_the_alias_list_and_the_rest_stays() -> None:
+    metadata = {"_k7_aliases": json.dumps(["mine", "theirs"]), "other": "x"}
+
+    assert without_aliases(metadata, ["mine"]) == {
+        "_k7_aliases": json.dumps(["theirs"]),
+        "other": "x",
+    }
+    assert without_aliases(metadata, ["mine", "theirs"]) == {"other": "x"}
+    assert without_aliases(metadata, ["nobody"]) is None
+    assert without_aliases({"other": "x"}, ["mine"]) is None
+
+
+def test_only_an_entry_with_no_persona_is_bookkeeping() -> None:
+    """An entry naming another persona is that persona's, whatever its reason says."""
+    theirs = {**_consolidation(), "persona_id": _OTHER}
+    plan = _plan(("n1", [_entry(_PERSONA), theirs]))
+
+    assert plan.rewrites == {"n1": [theirs]}

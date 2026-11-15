@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from persona.audit import MemoryAuditLogger
+from persona.graph.config import GraphSettings
+from persona.graph.consolidation import ConsolidationPass
+from persona.graph.index import make_graph_index
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -153,6 +157,7 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
     assert counts == {
         "nodes_deleted": 1,
         "nodes_stripped": 3,
+        "canonicals_cleaned": 0,
         "versions_deleted": 1,
         "versions_stripped": 2,
         "edges_deleted": 1,
@@ -175,3 +180,117 @@ def test_another_owners_graph_is_not_reached(graph: Engine) -> None:
 
     assert set(counts.values()) == {0}
     assert len(_column(graph, "SELECT id, 1 FROM graph_nodes WHERE owner_id = :o")) == 5
+
+
+# --- consolidation (review H3 and M1): built with the real ConsolidationPass merge act ------
+
+
+@pytest.fixture
+def consolidated(migrated_engine: Engine, embedder: Any) -> tuple[Engine, PostgresGraphBackend]:  # noqa: ANN401
+    """Nodes, then the merges ConsolidationPass makes, with its real bookkeeping."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine)
+    vector = embedder.encode(["x"])[0]
+    for node in (
+        _node("p_canon", _PERSONA),
+        _node("p_member", _PERSONA),
+        _node(_SELF, _PERSONA, kind=NodeKind.SELF),
+        _node("p_self_member", _PERSONA),
+        _node("q_canon", _OTHER),
+        _node("p_into_q", _PERSONA),
+        _node("q_other", _OTHER),
+        _node("p_canon2", _PERSONA),
+        _node("q_member", _OTHER),
+    ):
+        backend.insert_node(_OWNER, node, vector)
+    # Open assertion edges the merge act mirrors onto the canonical and closes on the member.
+    backend.upsert_edge(_OWNER, _edge("e_pq", "p_into_q", "q_other", _OTHER))
+    backend.upsert_edge(_OWNER, _edge("e_qm", "q_member", "q_other", _OTHER))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+    for run, canonical, member in (
+        ("r1", "p_canon", "p_member"),
+        ("r2", _SELF, "p_self_member"),
+        ("r3", "q_canon", "p_into_q"),
+        ("r4", "p_canon2", "q_member"),
+    ):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself, as a run does it
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, member)],
+            run_id=run,
+            now=_NOW,
+            epoch=1,
+        )
+    return migrated_engine, backend
+
+
+def _open_edges(engine: Engine, node_id: str) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id FROM graph_edges WHERE owner_id = :o AND invalid_at IS NULL "
+                "AND (src_node_id = :n OR dst_node_id = :n)"
+            ),
+            {"o": _OWNER, "n": node_id},
+        )
+        return {str(r[0]) for r in rows}
+
+
+def test_consolidation_does_not_keep_a_node_only_the_persona_fed(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    """Review H3: merging added a SYSTEM consolidation entry; it is not provenance."""
+    engine, backend = consolidated
+    assert backend.get_node(_OWNER, "p_canon") is not None
+
+    erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    for gone in ("p_canon", "p_member", "p_self_member", "p_into_q"):
+        assert backend.get_node(_OWNER, gone) is None, gone
+
+
+def test_the_self_node_keeps_nothing_the_persona_gave_it(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    engine, backend = consolidated
+
+    erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    me = backend.get_node(_OWNER, _SELF)  # parses: the content hash matches the metadata
+    assert me is not None
+    assert [(p.source, p.persona_id, p.reason) for p in me.provenance] == [
+        (WriteSource.SYSTEM, None, None)
+    ]
+    assert "p_self_member" not in me.metadata.get("_k7_aliases", "")
+
+
+def test_a_canonical_that_stays_takes_back_what_the_personas_member_gave(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    engine, backend = consolidated
+    assert _open_edges(engine, "q_canon"), "the merge mirrored the member's edge"
+
+    erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    canonical = backend.get_node(_OWNER, "q_canon")
+    assert canonical is not None
+    assert "p_into_q" not in canonical.metadata.get("_k7_aliases", "")
+    assert _open_edges(engine, "q_canon") == set()
+    assert [p.persona_id for p in canonical.provenance if p.persona_id] == [_OTHER]
