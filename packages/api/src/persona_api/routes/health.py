@@ -21,6 +21,7 @@ without taking the API down.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, status
@@ -28,6 +29,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from persona_api.config import Edition
+from persona_api.services.erasure_ledger import ErasureLedger
 
 router = APIRouter(tags=["health"])
 
@@ -59,11 +61,31 @@ def _worker_health(request: Request) -> tuple[str, float | None]:
     return ("stale" if age > _WORKER_BEAT_STALE_AFTER_SECONDS else "ok"), age
 
 
+#: How often readiness probes the erasure ledger again while the last probe did not pass.
+_LEDGER_REPROBE_SECONDS = 30.0
+
+
+def _ledger_writable(state: object) -> bool | None:
+    """The last probe's answer, probed again (rate limited) until it passes (review L3)."""
+    writable = getattr(state, "erasure_ledger_writable", None)
+    engine = getattr(state, "platform_engine", None)
+    if writable is True or engine is None:
+        return writable
+    last = getattr(state, "erasure_ledger_probed_at", None)
+    if last is not None and time.monotonic() - last < _LEDGER_REPROBE_SECONDS:
+        return writable
+    writable = ErasureLedger(engine).can_write()
+    state.erasure_ledger_writable = writable  # type: ignore[attr-defined]
+    state.erasure_ledger_probed_at = time.monotonic()  # type: ignore[attr-defined]
+    return writable
+
+
 def _erasures_blocked(request: Request) -> bool:
-    """Hosted, and the boot probe found the erasure ledger unwritable."""
+    """Hosted, and the erasure ledger is unwritable for good (not merely unreachable once)."""
     config = getattr(request.app.state, "config", None)
-    hosted = config is not None and config.edition is Edition.cloud
-    return hosted and getattr(request.app.state, "erasure_ledger_writable", None) is False
+    if config is None or config.edition is not Edition.cloud:
+        return False
+    return _ledger_writable(request.app.state) is False
 
 
 @router.get("/healthz")

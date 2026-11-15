@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -315,6 +316,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if app.state.platform_engine is not None
         else None
     )
+    app.state.erasure_ledger_probed_at = time.monotonic()
     if app.state.erasure_ledger_writable is False:
         _LOG.error(
             "OPERATOR ALERT: the platform engine cannot write the erasure ledger; persona and "
