@@ -275,8 +275,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -326,8 +329,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -365,8 +371,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -414,8 +423,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -455,8 +467,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -496,8 +511,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -537,8 +555,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -588,8 +609,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -633,8 +657,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "skill_name",
@@ -693,8 +720,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -1281,8 +1311,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -2426,8 +2459,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -2479,8 +2515,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "ref",
@@ -2527,8 +2566,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -2580,8 +2622,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "limit",
@@ -2712,8 +2757,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "ref",
@@ -3071,8 +3119,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -3116,8 +3167,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -3161,8 +3215,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "server_id",
@@ -3202,8 +3259,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           },
           {
             "name": "server_id",
@@ -3245,8 +3305,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -4137,8 +4200,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -4178,8 +4244,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -4219,8 +4288,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -4260,8 +4332,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "responses": {
@@ -4299,8 +4374,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -4748,7 +4826,7 @@
       "post": {
         "tags": ["tasks"],
         "summary": "Extend Budget",
-        "description": "Raise a budget-paused task's cap (bounded, at-most-once). Reports the old \u2192 new cap.",
+        "description": "Raise the cap of a task at its cap (bounded, at-most-once). Reports the old \u2192 new cap.",
         "operationId": "extend_budget_v1_tasks__task_id__budget_extend_post",
         "parameters": [
           {
@@ -4851,8 +4929,11 @@
             "required": true,
             "schema": {
               "type": "string",
+              "pattern": "^persona_[0-9a-f]{32}$",
+              "description": "A persona id: persona_ followed by 32 lower-case hex digits.",
               "title": "Persona Id"
-            }
+            },
+            "description": "A persona id: persona_ followed by 32 lower-case hex digits."
           }
         ],
         "requestBody": {
@@ -8352,6 +8433,19 @@
         "title": "PersonaDetail",
         "description": "A persona's full detail (YAML + metadata).\n\nThe optional :attr:`capabilities` field (D-F3-X-capability-endpoint) is\nadditive on top of the Spec 08 / Spec 09 surface: tests + composition\nroots that do not wire a :class:`TierRegistry` (e.g. unit fixtures\nwithout the runtime) omit the field and the API returns ``None`` so the\npersona-detail surface stays usable without runtime composition."
       },
+      "PersonaErasureAccepted": {
+        "properties": {
+          "erasure_id": {
+            "type": "string",
+            "title": "Erasure Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["erasure_id"],
+        "title": "PersonaErasureAccepted",
+        "description": "A persona delete was accepted (R9-284): the persona is gone, its erasure is running.\n\nThe row is deleted before this answers, so the persona no longer lists or opens. Its memory,\nfiles and the rest are erased by a resumable job, recorded under ``erasure_id``."
+      },
       "PersonaMemoriesResponse": {
         "properties": {
           "available": {
@@ -8532,19 +8626,6 @@
         ],
         "title": "PersonaSpecialitySummary",
         "description": "A speciality plus THIS persona's consent state (Spec S3, S3-D-3).\n\nThe persona-scoped surface adds the server-computed ``consent_state`` \u2014 the one\nsecurity-authoritative bit the client cannot derive (it needs the consent store +\nthe current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the\ncurrent hash), ``stale`` (consented at an old body hash \u2192 re-gate, S1-D-5), or\n``none`` (never/revoked \u2192 default-deny). Enablement (the ``skills:`` declaration)\nand ``unavailable`` stay client-derived from the edited persona draft."
-      },
-      "PersonaErasureAccepted": {
-        "properties": {
-          "erasure_id": {
-            "type": "string",
-            "title": "Erasure Id"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": ["erasure_id"],
-        "title": "PersonaErasureAccepted",
-        "description": "A persona delete was accepted (R9-284): the persona is gone, its erasure is running.\n\nThe row is deleted before this answers, so the persona no longer lists or opens. Its memory,\nfiles and the rest are erased by a resumable job, recorded under ``erasure_id``."
       },
       "PersonaSummary": {
         "properties": {

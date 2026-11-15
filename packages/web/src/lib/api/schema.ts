@@ -2534,7 +2534,7 @@ export interface paths {
     put?: never;
     /**
      * Extend Budget
-     * @description Raise a budget-paused task's cap (bounded, at-most-once). Reports the old → new cap.
+     * @description Raise the cap of a task at its cap (bounded, at-most-once). Reports the old → new cap.
      */
     post: operations["extend_budget_v1_tasks__task_id__budget_extend_post"];
     delete?: never;
@@ -4942,6 +4942,17 @@ export interface components {
       memory_count: number;
     };
     /**
+     * PersonaErasureAccepted
+     * @description A persona delete was accepted (R9-284): the persona is gone, its erasure is running.
+     *
+     *     The row is deleted before this answers, so the persona no longer lists or opens. Its memory,
+     *     files and the rest are erased by a resumable job, recorded under ``erasure_id``.
+     */
+    PersonaErasureAccepted: {
+      /** Erasure Id */
+      erasure_id: string;
+    };
+    /**
      * PersonaMemoriesResponse
      * @description R11-B6 — a persona's graph memories, newest first (capped; honest total).
      */
@@ -5033,17 +5044,6 @@ export interface components {
       presents: "feminine" | "masculine" | "neutral" | "unspecified";
       /** Appearance */
       appearance?: string | null;
-    };
-    /**
-     * PersonaErasureAccepted
-     * @description A persona delete was accepted (R9-284): the persona is gone, its erasure is running.
-     *
-     *     The row is deleted before this answers, so the persona no longer lists or opens. Its memory,
-     *     files and the rest are erased by a resumable job, recorded under ``erasure_id``.
-     */
-    PersonaErasureAccepted: {
-      /** Erasure Id */
-      erasure_id: string;
     };
     /**
      * PersonaSpecialitySummary
@@ -6349,6 +6349,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6384,6 +6385,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6415,6 +6417,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6446,6 +6449,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6481,6 +6485,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6512,6 +6517,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6543,6 +6549,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6578,6 +6585,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -6609,6 +6617,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
         skill_name: string;
       };
@@ -6645,6 +6654,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -7041,6 +7051,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -7916,6 +7927,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -7953,6 +7965,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
         ref: string;
       };
@@ -7985,6 +7998,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -8029,6 +8043,7 @@ export interface operations {
       };
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -8060,6 +8075,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
         ref: string;
       };
@@ -8337,6 +8353,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -8368,6 +8385,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -8399,6 +8417,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
         server_id: string;
       };
@@ -8429,6 +8448,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
         server_id: string;
       };
@@ -8459,6 +8479,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9097,6 +9118,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9128,6 +9150,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9159,6 +9182,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9190,6 +9214,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9221,6 +9246,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
@@ -9625,6 +9651,7 @@ export interface operations {
       query?: never;
       header?: never;
       path: {
+        /** @description A persona id: persona_ followed by 32 lower-case hex digits. */
         persona_id: string;
       };
       cookie?: never;
