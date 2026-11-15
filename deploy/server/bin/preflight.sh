@@ -84,6 +84,16 @@ else
   ok "no unacknowledged alerts"
 fi
 
+# --- the kit's timers: each enabled and active, or its job (and its alert) never runs -------
+for timer in "${KIT_DIR}"/systemd/*.timer; do
+  name="$(basename "${timer}")"
+  if systemctl is-enabled --quiet "${name}" 2>/dev/null && systemctl is-active --quiet "${name}"; then
+    ok "${name} enabled and active"
+  else
+    bad "${name} is not enabled and active (sudo systemctl enable --now ${name})"
+  fi
+done
+
 # --- the host, as provision.sh left it (the host profile) ---------------------------------
 [ "$(uname -m)" = "${OP_EXPECT_ARCH:-$(uname -m)}" ] \
   && ok "architecture $(uname -m) (profile ${OP_HOST_PROFILE})" \

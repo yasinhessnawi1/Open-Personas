@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -975,3 +976,33 @@ def test_the_erasure_check_reports_failed_and_long_unfinished_erasures() -> None
     assert "OnCalendar=hourly" in timer
     provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
     assert "open-persona-erasurecheck.timer" in provision.split("systemctl enable --now", 1)[1]
+
+
+def _systemctl_enables(script: str) -> list[list[str]]:
+    """Every ``systemctl enable`` command in a script, continuation lines joined, split by shlex."""
+    joined = script.replace("\\\n", " ")
+    return [
+        shlex.split(line.strip())
+        for line in joined.splitlines()
+        if line.strip().startswith("systemctl enable")
+    ]
+
+
+def test_every_systemctl_enable_names_only_units() -> None:
+    """R9-284 review H1: a stray escape became an argument, and set -e aborted provision."""
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    commands = _systemctl_enables(provision)
+    assert commands, "provision.sh enables nothing"
+    for command in commands:
+        for argument in command[2:]:
+            assert argument == "--now" or argument.endswith((".timer", ".service")), command
+
+
+def test_every_kit_timer_is_installed_enabled_and_checked() -> None:
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    enabled = {a for command in _systemctl_enables(provision) for a in command[2:]}
+    preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
+    assert '"${KIT_DIR}"/systemd/*.timer' in preflight
+    assert "systemctl is-active --quiet" in preflight
+    for timer in (KIT / "systemd").glob("*.timer"):
+        assert timer.name in enabled, f"provision.sh never enables {timer.name}"
