@@ -65,7 +65,12 @@ def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
         if not path.exists():
             return 0
         before = path.read_bytes()
-        lines = before.decode("utf-8").splitlines()
+        # By newline only: str.splitlines also splits on U+2028 and the like, which JSON leaves
+        # raw inside a string, and would cut an event apart (review M-1).
+        text = before.decode("utf-8")
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
         clean = [_scrubbed_line(line, owner_id=owner_id, persona_id=persona_id) for line in lines]
         changed = sum(a != b for a, b in zip(lines, clean, strict=True))
         if not changed:
