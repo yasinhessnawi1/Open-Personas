@@ -208,19 +208,11 @@ async def delete_conversation(
             memory_service.match_episodic_by_text, memory_backend, audit_logger
         )
 
-    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
-    chat_service.delete_conversation(
-        rls_engine=request.app.state.rls_engine,
-        conversation_id=conversation_id,
-        forget_memory=forget_memory,
-        persona_id=persona_id,
-        episodic_store=episodic_store,
-        match_texts=match_texts,
-        match_floor=memory_service.ForgetSettings().similarity_floor,
-    )
-
-    # T19 — document workspace + DocumentStore chunks cascade (R5-D-4: via the
-    # storage backend so uploads on S3 cascade-delete too).
+    # T19: document workspace + DocumentStore chunks (R5-D-4: via the storage backend so
+    # uploads on S3 go too). BEFORE the row (R9-284): on hosted, document chunks are visible to
+    # persona_app only through their conversation, so after the row delete this removed
+    # nothing; and a store failure there answered 500 for a conversation already gone. Now a
+    # failure leaves the conversation in place and the delete can be retried.
     file_storage = getattr(request.app.state, "file_storage", None)
     build_document_store = getattr(request.app.state, "build_document_store", None)
     if file_storage is not None and build_document_store is not None:
@@ -231,6 +223,17 @@ async def delete_conversation(
             conversation_id=conversation_id,
             document_store=build_document_store(),
         )
+
+    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
+    chat_service.delete_conversation(
+        rls_engine=request.app.state.rls_engine,
+        conversation_id=conversation_id,
+        forget_memory=forget_memory,
+        persona_id=persona_id,
+        episodic_store=episodic_store,
+        match_texts=match_texts,
+        match_floor=memory_service.ForgetSettings().similarity_floor,
+    )
 
     # (Spec 13 T12 inserts its image-workspace-cascade here when it lands.)
 

@@ -59,6 +59,7 @@ __all__ = [
     "NavCountsResponse",
     "PersonaCapabilities",
     "PersonaDetail",
+    "PersonaErasureAccepted",
     "PersonaSummary",
     "RunStatusResponse",
     "ToolCallEvent",
@@ -78,6 +79,16 @@ class _Output(BaseModel):
 
 
 # -- personas ---------------------------------------------------------------
+
+
+class PersonaErasureAccepted(_Output):
+    """A persona delete was accepted (R9-284): the persona is gone, its erasure is running.
+
+    The row is deleted before this answers, so the persona no longer lists or opens. Its memory,
+    files and the rest are erased by a resumable job, recorded under ``erasure_id``.
+    """
+
+    erasure_id: str
 
 
 class PersonaSummary(_Output):

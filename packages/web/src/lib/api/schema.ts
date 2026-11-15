@@ -186,7 +186,12 @@ export interface paths {
     post?: never;
     /**
      * Delete Persona
-     * @description Delete a persona + all its conversations and memory (cascade).
+     * @description Erase a persona (R9-284, D-R9-284-erase): gone at once, erased by a resumable job.
+     *
+     *     Claimed in the ledger, fenced and its row deleted before this answers (see
+     *     :mod:`persona_api.services.erasure_start`); its live turns and runs are cancelled; then its
+     *     memory, files and remaining rows are erased by the ``persona_erase`` job, or in the
+     *     background where this process runs no worker for it.
      */
     delete: operations["delete_persona_v1_personas__persona_id__delete"];
     options?: never;
@@ -5030,6 +5035,17 @@ export interface components {
       appearance?: string | null;
     };
     /**
+     * PersonaErasureAccepted
+     * @description A persona delete was accepted (R9-284): the persona is gone, its erasure is running.
+     *
+     *     The row is deleted before this answers, so the persona no longer lists or opens. Its memory,
+     *     files and the rest are erased by a resumable job, recorded under ``erasure_id``.
+     */
+    PersonaErasureAccepted: {
+      /** Erasure Id */
+      erasure_id: string;
+    };
+    /**
      * PersonaSpecialitySummary
      * @description A speciality plus THIS persona's consent state (Spec S3, S3-D-3).
      *
@@ -6406,11 +6422,13 @@ export interface operations {
     requestBody?: never;
     responses: {
       /** @description Successful Response */
-      204: {
+      202: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          "application/json": components["schemas"]["PersonaErasureAccepted"];
+        };
       };
       /** @description Validation Error */
       422: {

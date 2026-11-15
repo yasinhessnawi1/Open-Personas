@@ -336,3 +336,55 @@ class TestCrossTenantStillReturns404:
     def test_cross_tenant_delete_404s(self, client: TestClient) -> None:
         resp = client.delete("/v1/conversations/conv_OTHER", headers=_auth())
         assert resp.status_code == 404
+
+
+class TestDocumentsGoWhileTheConversationExists:
+    """R9-284: on hosted, document chunks are visible to ``persona_app`` only through their
+    conversation, so removing them after the row has gone removed nothing and said nothing. And a
+    store failure after the row delete answered 500 for a conversation that was already gone."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch, document_store: DocumentStore) -> list[str]:
+        events: list[str] = []
+        real_delete = document_store.delete
+
+        def _delete(conversation_id: str) -> int:
+            events.append("documents")
+            return real_delete(conversation_id)
+
+        def _delete_row(**_kw: Any) -> None:  # noqa: ANN401
+            events.append("row")
+
+        monkeypatch.setattr(document_store, "delete", _delete)
+        monkeypatch.setattr(chat_service, "delete_conversation", _delete_row)
+        return events
+
+    def test_documents_are_removed_before_the_row(
+        self,
+        client: TestClient,
+        document_store: DocumentStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events = self._record(monkeypatch, document_store)
+
+        resp = client.delete("/v1/conversations/conv_u1", headers=_auth())
+
+        assert resp.status_code == 204
+        assert events == ["documents", "row"]
+
+    def test_a_document_store_failure_leaves_the_conversation_in_place(
+        self,
+        client: TestClient,
+        document_store: DocumentStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events = self._record(monkeypatch, document_store)
+
+        def _broken(_conversation_id: str) -> int:
+            raise OSError("the store is unavailable")
+
+        monkeypatch.setattr(document_store, "delete", _broken)
+
+        with pytest.raises(OSError, match="unavailable"):
+            client.delete("/v1/conversations/conv_u1", headers=_auth())
+
+        assert "row" not in events

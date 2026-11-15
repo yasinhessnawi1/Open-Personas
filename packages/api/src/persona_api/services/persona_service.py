@@ -613,10 +613,13 @@ def conversation_count_for(*, rls_engine: Engine, persona_id: str) -> int:
 def delete_persona(
     *, rls_engine: Engine, persona_id: str, workspace_root: Path | None = None, owner_id: str
 ) -> None:
-    """Delete a persona: its row (which cascades conversations) and its workspace folder.
+    """Delete a persona's row (which cascades conversations), and its folder if asked.
 
-    The persona's memory rows are NOT removed by this (``memory_chunks`` has had no foreign
-    key since migration 007); that is R9-284, still open.
+    Memory rows are not reached by this (``memory_chunks`` has had no foreign key since
+    migration 007). The route no longer calls it alone: a persona delete is an erasure
+    (R9-284, :mod:`persona_api.services.erasure_start`), which calls this for the row and
+    leaves the folder, memory and the rest to the erase job. ``workspace_root`` stays for
+    callers that delete a row and its folder together.
 
     Order, and why (R9-284 audit and its review, 2026-11-07). Everything runs in ONE
     transaction, and the files go last inside it:

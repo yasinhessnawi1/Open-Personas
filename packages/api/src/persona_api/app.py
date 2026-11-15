@@ -107,7 +107,7 @@ from persona_api.sandbox import (
     SandboxPoolConfig,
     SandboxTemplateConfig,
 )
-from persona_api.services import persona_service
+from persona_api.services import erasure_start, persona_service
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
 from persona_api.services.flag_report import log_effective_flags
@@ -303,6 +303,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             memory_backend = PostgresBackend(engine=rls_engine, embedder=app.state.embedder)
     app.state.rls_engine = rls_engine
     app.state.admin_engine = admin_engine
+    # R9-284: the engine an erasure works on. It must see every row the persona left behind,
+    # which persona_app cannot once the persona row is gone: the persona_platform engine on
+    # hosted, the community engine (no row level security, or a superuser) otherwise.
+    app.state.platform_engine = admin_engine if admin_engine is not None else rls_engine
     # Spec K10 (D-K10-9): the managed-Postgres lifecycle owner (None unless the
     # community managed path is active). The finally block stops an embedded
     # postmaster on shutdown; external mode makes it a no-op.
@@ -896,6 +900,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # file_extract_queue_ready gate). workspace_root is always set.
                 sandbox_pool=sandbox_pool,
                 workspace_root=app.state.workspace_root,
+                # R9-284: the persona_erase tenant's engine (see app.state.platform_engine).
+                platform_engine=app.state.platform_engine,
             )
         except AuthenticationError:
             # Keyless boot (D-K10-7 auto-off): a default tier registry is ALWAYS built,
@@ -910,6 +916,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             in_process_worker = None
     app.state.in_process_worker = in_process_worker
+    # R9-284: an erasure whose job died, or whose process stopped mid-way, carries on.
+    app.state.erasure_resume_task = erasure_start.resume_persona_erasures_on_startup(app.state)
 
     # Spec I1 (T2, D-I1-17): host the connector transports IN THIS PROCESS behind
     # PERSONA_API_EMBED_CONNECTORS (default OFF). The standalone connector service runs a

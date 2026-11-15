@@ -405,7 +405,7 @@
       "delete": {
         "tags": ["personas"],
         "summary": "Delete Persona",
-        "description": "Delete a persona + all its conversations and memory (cascade).",
+        "description": "Erase a persona (R9-284, D-R9-284-erase): gone at once, erased by a resumable job.\n\nClaimed in the ledger, fenced and its row deleted before this answers (see\n:mod:`persona_api.services.erasure_start`); its live turns and runs are cancelled; then its\nmemory, files and remaining rows are erased by the ``persona_erase`` job, or in the\nbackground where this process runs no worker for it.",
         "operationId": "delete_persona_v1_personas__persona_id__delete",
         "parameters": [
           {
@@ -419,8 +419,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaErasureAccepted"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -8525,6 +8532,19 @@
         ],
         "title": "PersonaSpecialitySummary",
         "description": "A speciality plus THIS persona's consent state (Spec S3, S3-D-3).\n\nThe persona-scoped surface adds the server-computed ``consent_state`` \u2014 the one\nsecurity-authoritative bit the client cannot derive (it needs the consent store +\nthe current hash). ``not_required`` (builtin/vetted), ``granted`` (consented at the\ncurrent hash), ``stale`` (consented at an old body hash \u2192 re-gate, S1-D-5), or\n``none`` (never/revoked \u2192 default-deny). Enablement (the ``skills:`` declaration)\nand ``unavailable`` stay client-derived from the edited persona draft."
+      },
+      "PersonaErasureAccepted": {
+        "properties": {
+          "erasure_id": {
+            "type": "string",
+            "title": "Erasure Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["erasure_id"],
+        "title": "PersonaErasureAccepted",
+        "description": "A persona delete was accepted (R9-284): the persona is gone, its erasure is running.\n\nThe row is deleted before this answers, so the persona no longer lists or opens. Its memory,\nfiles and the rest are erased by a resumable job, recorded under ``erasure_id``."
       },
       "PersonaSummary": {
         "properties": {

@@ -149,7 +149,8 @@ def test_delete_conversation_leaves_workspace_intact_v01(
 def test_delete_persona_cleans_workspace_images(
     client: tuple[TestClient, str, Path],
 ) -> None:
-    """D-13-4: persona delete unlinks every workspace file under the persona."""
+    """Persona delete removes every workspace file under the persona (R9-284: by the erasure,
+    which runs inline here because this app starts no worker)."""
     c, user_id, workspace_root = client
     pid = _create_persona(c, user_id)
     for _ in range(2):
@@ -163,7 +164,7 @@ def test_delete_persona_cleans_workspace_images(
     assert file_a.is_file()
     assert file_b.is_file()
     resp = c.delete(f"/v1/personas/{pid}", headers=_auth(user_id))
-    assert resp.status_code == 204
+    assert resp.status_code == 202
     assert not file_a.exists()
     assert not file_b.exists()
     assert not persona_root.exists()
