@@ -14,7 +14,8 @@ paths), and re-raises so the queue retries.
 The graph is the owner's: what only the persona contributed goes, and the persona's entries
 leave the rest (:mod:`persona_api.services.erasure_graph`).
 
-What stays, by the ruling: the store audit (ids and labels), the owner's declines and schedule
+What stays, by the ruling: the store audit (ids and labels; its free-text ``reason`` goes,
+:mod:`persona_api.services.erasure_audit`), the owner's declines and schedule
 tombstones (their persona reference is cleared), and ``audit_log`` rows with their content keys
 removed. What goes: memory in K8-D-14 order (evidence before what was derived from it, the core
 block last), stored and local files, the tool audit and its ``{persona}.tools.jsonl``, and the
@@ -51,6 +52,7 @@ from persona_api.db.models import tool_audit_events as tool_audit_events_t
 from persona_api.errors import ErasureRecordError
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services import audit_service
+from persona_api.services.erasure_audit import scrub_store_audit_files, scrub_store_audit_rows
 from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_lock import erasure_lock
@@ -351,6 +353,9 @@ def _step_files(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
         "objects": objects,
         "folder": int(folder),
         "tool_log": _remove_tool_log(deps.audit_root, pid),
+        "store_audit_lines_scrubbed": scrub_store_audit_files(
+            deps.audit_root, owner_id=owner, persona_id=pid
+        ),
     }
 
 
@@ -417,6 +422,7 @@ def _step_rows(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
                 delete(tool_audit_events_t).where(tool_audit_events_t.c.persona_id == pid)
             ).rowcount,
             "audit_log_scrubbed": _scrub_audit_log(conn, erasure),
+            "store_audit_scrubbed": scrub_store_audit_rows(conn, owner_id=owner, persona_id=pid),
         }
         for name, table in (
             ("initiative_declines", initiative_declines_t),

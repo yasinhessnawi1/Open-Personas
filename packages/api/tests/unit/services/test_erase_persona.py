@@ -30,7 +30,7 @@ from _erase_seed import (
     seed,
     uncovered,
 )
-from persona_api.db.models import audit_log
+from persona_api.db.models import audit_log, store_audit_events
 from persona_api.errors import ErasureRecordError
 from persona_api.services import erasure_service
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -416,3 +416,32 @@ def test_two_runs_of_one_erasure_count_it_once_and_audit_it_once(
             )
         ).all()
     assert len(audited) == 1
+
+
+def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -> None:
+    """The ruling keeps store audit as ids and labels; a reason is free text from the model."""
+    erase_persona(_deps(seeded), _claim(seeded))
+
+    with seeded.engine.connect() as conn:
+        rows = {
+            r.id: (r.reason, r.chunk_ids, r.metadata)
+            for r in conn.execute(
+                select(
+                    store_audit_events.c.id,
+                    store_audit_events.c.reason,
+                    store_audit_events.c.chunk_ids,
+                    store_audit_events.c.metadata,
+                )
+            )
+        }
+    assert rows["store_aaaaaa"] == (None, ["c"], {"to_version": "2"})
+    assert rows["graphaudit_aaaaaa"] == (None, ["node"], {"action": "created"})
+    assert rows["store_bbbbbb"][0] == SECRET, "the sibling's audit is untouched"
+    assert rows["graphaudit_bbbbbb"][0] == SECRET
+
+    own = (seeded.audit_root / f"{PERSONA}.jsonl").read_text(encoding="utf-8")
+    graph = (seeded.audit_root / f"{OWNER}.jsonl").read_text(encoding="utf-8")
+    assert SECRET not in own
+    assert json.loads(own)["chunk_ids"] == ["c"]
+    lines = [json.loads(line) for line in graph.splitlines()]
+    assert {e["written_by"]: e["reason"] for e in lines} == {PERSONA: None, SIBLING: SECRET}

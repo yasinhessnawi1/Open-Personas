@@ -210,9 +210,25 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
         action="write",
         store="episodic",
         source="user",
+        reason=SECRET,
         chunk_ids=["c"],
         logical_ids=["l"],
-        metadata={},
+        metadata={"to_version": "2"},
+    )
+    # The graph's events ride the owner's id and name the persona as written_by (CSA-1).
+    row(
+        conn,
+        "store_audit_events",
+        id=f"graphaudit_{pid[-6:]}",
+        persona_id=owner,
+        action="write",
+        store="knowledge_graph",
+        source="persona_self",
+        written_by=pid,
+        reason=SECRET,
+        chunk_ids=["node"],
+        logical_ids=[],
+        metadata={"action": "created"},
     )
     row(
         conn,
@@ -284,7 +300,17 @@ def _persona_files(seeded: Seeded, owner: str, pid: str) -> None:
     local_only = seeded.workspace_root / owner / pid / "sandbox"
     local_only.mkdir(parents=True, exist_ok=True)
     (local_only / "out.txt").write_text(SECRET, encoding="utf-8")
-    (seeded.audit_root / f"{pid}.jsonl").write_text(json.dumps({"ids": ["c"]}), encoding="utf-8")
+    (seeded.audit_root / f"{pid}.jsonl").write_text(
+        json.dumps({"persona_id": pid, "chunk_ids": ["c"], "reason": SECRET}) + "\n",
+        encoding="utf-8",
+    )
+    with (seeded.audit_root / f"{owner}.jsonl").open("a", encoding="utf-8") as graph_log:
+        graph_log.write(
+            json.dumps(
+                {"persona_id": owner, "written_by": pid, "chunk_ids": ["n"], "reason": SECRET}
+            )
+            + "\n"
+        )
     (seeded.audit_root / f"{pid}.tools.jsonl").write_text(json.dumps({"code": SECRET}), "utf-8")
 
 
