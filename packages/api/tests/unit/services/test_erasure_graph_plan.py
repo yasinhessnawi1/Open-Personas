@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from persona_api.services.erasure_graph import (
+    delete_mirrors,
     merge_record,
     plan_trails,
     unmerged,
@@ -219,3 +220,17 @@ def test_a_consolidation_entry_stops_listing_the_personas_names() -> None:
     assert (
         without_alias_names([{**_entry(_OTHER), "reason": "said aliases:mine"}], ["mine"]) is None
     )
+
+
+def test_a_mirror_is_deleted_only_while_it_is_still_the_merges() -> None:
+    """Review M-4: another persona may have asserted the same fact since, under the same id."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    stmt = delete_mirrors("user_alice", ["k::causal::x"], run_id="r3")
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+
+    assert "@>" in sql, sql
+    assert "invalid_at IS NULL" in sql
+    assert {"source": "system", "reason": "consolidation:r3"} in compiled.params.values()
+    assert ["k::causal::x"] in compiled.params.values()

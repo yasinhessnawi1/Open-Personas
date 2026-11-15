@@ -359,3 +359,18 @@ def test_the_backstop_finds_what_a_finished_erasure_left_and_nothing_else(graph:
     erase_persona_graph(graph, owner_id=_OWNER, persona_id=_PERSONA)
 
     assert erased_personas_in_graph(graph) == []
+
+
+def test_a_mirror_another_persona_reasserted_is_left_alone(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    """Review M-4: the same id, but now another persona's assertion, not the merge's mirror."""
+    engine, backend = consolidated
+    (mirror,) = _open_edges(engine, "q_canon")
+    src, link_type, dst = mirror.split("::")
+    backend.upsert_edge(_OWNER, _edge(mirror, src, dst, _OTHER))  # reasserted by another
+
+    erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert _open_edges(engine, "q_canon") == {mirror}
+    assert link_type

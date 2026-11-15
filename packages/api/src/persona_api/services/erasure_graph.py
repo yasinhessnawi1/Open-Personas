@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = [
     "GraphPlan",
     "erase_persona_graph",
+    "delete_mirrors",
     "erased_personas_in_graph",
     "merge_record",
     "plan_trails",
@@ -236,6 +237,24 @@ def _unmerge_members_of(conn: Connection, owner_id: str, doomed: list[str]) -> i
     return len(members)
 
 
+def delete_mirrors(owner_id: str, edge_ids: list[str], *, run_id: str) -> Any:  # noqa: ANN401
+    """Delete the open edges a merge mirrored, and only while they are still the merge's.
+
+    An edge id is ``src::type::dst``, so another persona (or the user) asserting the same fact
+    later upserts the same open row and makes it theirs; deleting by id alone would take that
+    with the mirror (review M-4). So the row must still carry the consolidation's SYSTEM
+    provenance with this run's tag.
+    """
+    return delete(graph_edges).where(
+        graph_edges.c.owner_id == owner_id,
+        graph_edges.c.id.in_(edge_ids),
+        graph_edges.c.invalid_at.is_(None),
+        cast(graph_edges.c.provenance, JSONB).contains(
+            {"source": "system", "reason": f"consolidation:{run_id}"}
+        ),
+    )
+
+
 def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: set[str]) -> int:
     """A doomed member's contributions to a canonical that stays: edges, entities, its name."""
     names_by_canonical: dict[str, list[str]] = {}
@@ -246,13 +265,7 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
             continue
         mirrored = [str(e) for e in record.get("mirrored_edges", [])]
         if mirrored:
-            conn.execute(
-                delete(graph_edges).where(
-                    graph_edges.c.owner_id == owner_id,
-                    graph_edges.c.id.in_(mirrored),
-                    graph_edges.c.invalid_at.is_(None),
-                )
-            )
+            conn.execute(delete_mirrors(owner_id, mirrored, run_id=str(record.get("run_id"))))
         added = [str(e) for e in record.get("added_entities", [])]
         if added:
             conn.execute(
