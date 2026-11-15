@@ -62,6 +62,9 @@ class _FakeRepo:
     ) -> InteractionData | None:
         return self._data
 
+    def exists(self, conn: object, *, owner_id: str, payload: SynthesisJobPayload) -> bool:
+        return self._data is not None
+
     def advance(
         self, conn: object, *, owner_id: str, payload: SynthesisJobPayload, high_water_mark: int
     ) -> None:
@@ -257,12 +260,17 @@ class _GoneAfterTheCallRepo(_FakeRepo):
     def __init__(self, data: InteractionData) -> None:
         super().__init__(data)
         self.reads = 0
+        self.checks = 0
 
     def read(
         self, conn: object, *, owner_id: str, payload: SynthesisJobPayload
     ) -> InteractionData | None:
         self.reads += 1
-        return self._data if self.reads == 1 else None
+        return self._data
+
+    def exists(self, conn: object, *, owner_id: str, payload: SynthesisJobPayload) -> bool:
+        self.checks += 1
+        return False
 
 
 @pytest.mark.asyncio
@@ -273,5 +281,5 @@ async def test_a_conversation_deleted_during_the_model_call_is_not_advanced() ->
     await SynthesisHandler(runner=runner, repository=repo).handle(_payload(), ctx)  # type: ignore[arg-type]
 
     assert len(runner.calls) == 1
-    assert repo.reads == 2
+    assert (repo.reads, repo.checks) == (1, 1), "a cheap check, not a second transcript read"
     assert repo.advanced == []

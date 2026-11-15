@@ -96,6 +96,10 @@ class SynthesisRepository(Protocol):
         """Read the marker + transcript + summary, or ``None`` if the interaction is gone."""
         ...
 
+    def exists(self, conn: Connection, *, owner_id: str, payload: SynthesisJobPayload) -> bool:
+        """Whether the interaction is still there: one row, not the transcript (R9-284)."""
+        ...
+
     def advance(
         self,
         conn: Connection,
@@ -194,7 +198,7 @@ class SynthesisHandler:
             # R9-284 review H2: the conversation (or its persona) can be erased while the
             # model call is awaited. The synthesizer checks the persona before each merge;
             # this is the handler's own look, before it writes the marker.
-            if self._repo.read(conn, owner_id=context.owner_id, payload=payload) is None:
+            if not self._repo.exists(conn, owner_id=context.owner_id, payload=payload):
                 _logger.info(
                     "synthesis interaction deleted during the model call",
                     interaction_id=payload.interaction_id,
@@ -276,6 +280,20 @@ class PgSynthesisRepository:
             messages=transcript,
             compacted_summary=convo.compacted_summary or "",
         )
+
+    def exists(
+        self,
+        conn: Connection,
+        *,
+        owner_id: str,  # noqa: ARG002 - the job's connection is already owner scoped
+        payload: SynthesisJobPayload,
+    ) -> bool:
+        if payload.interaction_kind != InteractionKind.CONVERSATION.value:
+            return False
+        found = conn.execute(
+            select(conversations.c.id).where(conversations.c.id == payload.interaction_id)
+        ).first()
+        return found is not None
 
     def advance(
         self,
