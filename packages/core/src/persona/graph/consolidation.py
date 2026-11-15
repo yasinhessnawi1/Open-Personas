@@ -64,6 +64,11 @@ _MERGE_KEY = "_k7_merge"
 _ALIAS_KEY = "_k7_aliases"
 
 
+def _personas_of(node: ConceptNode) -> list[str]:
+    """The personas a node's trail names, for the R9-284 write guard."""
+    return sorted({p.persona_id for p in node.provenance if p.persona_id})
+
+
 class MergeGroup(BaseModel):
     """One consolidated cluster in a :class:`ConsolidationReport`."""
 
@@ -115,7 +120,9 @@ class _ConsolidationBackend(Protocol):
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
     def open_assertion_edges(self, owner_id: str, node_id: str) -> list[TypedLink]: ...
-    def upsert_edge(self, owner_id: str, link: TypedLink) -> None: ...
+    def upsert_edge(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> None: ...
     def close_edges_incident(
         self, owner_id: str, node_id: str, *, invalidated_by: str
     ) -> list[str]: ...
@@ -131,7 +138,12 @@ class _ConsolidationBackend(Protocol):
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
     def update_node(
-        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        guard_personas: Sequence[str] = (),
     ) -> int | None: ...
     def set_merged_into(
         self,
@@ -328,7 +340,12 @@ class ConsolidationPass:
                 metadata={"action": "consolidation_merge", "member": member.id, "run_id": run_id},
             )
         self._accrete_aliases(
-            owner_id, canonical.id, [m.concept_name for m in members], run_id=run_id, now=now
+            owner_id,
+            canonical.id,
+            [m.concept_name for m in members],
+            run_id=run_id,
+            now=now,
+            personas=[p for m in members for p in _personas_of(m)],
         )
 
     def _apply_disuse(self, owner_id: str, current_epoch: int) -> None:
@@ -362,7 +379,9 @@ class ConsolidationPass:
             mirror_id = make_edge_id(src, dst, edge.link_type)
             self._backend.upsert_edge(
                 owner_id,
-                TypedLink(
+                # R9-284: the mirror carries the member's knowledge; hold its personas.
+                guard_personas=_personas_of(member),
+                link=TypedLink(
                     id=mirror_id,
                     src_node_id=src,
                     dst_node_id=dst,
@@ -413,7 +432,14 @@ class ConsolidationPass:
         )
 
     def _accrete_aliases(
-        self, owner_id: str, canonical_id: str, names: list[str], *, run_id: str, now: datetime
+        self,
+        owner_id: str,
+        canonical_id: str,
+        names: list[str],
+        *,
+        run_id: str,
+        now: datetime,
+        personas: Sequence[str] = (),
     ) -> None:
         current = self._backend.get_node(owner_id, canonical_id)
         if current is None:  # pragma: no cover - the canonical was just read
@@ -447,7 +473,8 @@ class ConsolidationPass:
             ),
             created_at=current.created_at,
         )
-        self._backend.update_node(owner_id, rebuilt, emb)
+        # R9-284: the aliases are the members' names; hold the personas that gave them.
+        self._backend.update_node(owner_id, rebuilt, emb, guard_personas=personas)
 
     # ===== the inverse ====================================================
 

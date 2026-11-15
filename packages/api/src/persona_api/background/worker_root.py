@@ -279,13 +279,15 @@ def build_worker_registry(
         free_tier_registry=free_tier_registry,
         metered=True,
     )
-    graph_backend = PostgresGraphBackend(engine=rls_engine)
+    # R9-284: every graph write that names a persona holds that persona's row.
+    graph_backend = PostgresGraphBackend(engine=rls_engine, persona_guard=True)
     graph_store = build_graph_store(
         engine=rls_engine,
         embedder=embedder,
         # R5-D-2: Postgres audit when PERSONA_API_AUDIT_BACKEND=postgres, else the
         # JSONL default (config.audit_root) — the same selection the API makes.
         audit_logger=build_audit_logger(config, rls_engine),
+        persona_guard=True,
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(

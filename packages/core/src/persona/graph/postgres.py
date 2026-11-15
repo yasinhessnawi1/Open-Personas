@@ -37,7 +37,7 @@ from persona.graph._schema import (
     graph_node_versions,
     graph_nodes,
 )
-from persona.graph.errors import GraphIndexError
+from persona.graph.errors import GraphIndexError, GraphPersonaGoneError
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -51,13 +51,16 @@ from persona.graph.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 __all__ = ["PostgresGraphBackend"]
 
 _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
+
+# R9-284: a graph write holds the persona it names (see PostgresGraphBackend._hold_personas).
+_HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
 
 
 class PostgresGraphBackend:
@@ -69,8 +72,31 @@ class PostgresGraphBackend:
     statements. Vectors are supplied pre-computed (the store embeds once).
     """
 
-    def __init__(self, *, engine: Engine) -> None:
+    def __init__(self, *, engine: Engine, persona_guard: bool = False) -> None:
         self._engine = engine
+        # R9-284: hold each named persona's row in the write's own transaction. Off where the
+        # schema has no ``personas`` table (the graph's own tests); the api turns it on.
+        self._persona_guard = persona_guard
+
+    def _hold_personas(
+        self, conn: Connection, owner_id: str, persona_ids: Iterable[str | None]
+    ) -> None:
+        """Hold the row of every persona this write names, or refuse the write (R9-284).
+
+        ``FOR KEY SHARE`` on the owner's persona row, in the same transaction as the write: an
+        erasure's row delete waits for this write to commit (and its graph step then removes
+        what it wrote), and a write after the delete finds no row and raises
+        :class:`GraphPersonaGoneError`. A no-op with the guard off.
+        """
+        if not self._persona_guard:
+            return
+        for persona_id in sorted({p for p in persona_ids if p}):
+            held = conn.execute(_HOLD_PERSONA, {"p": persona_id, "o": owner_id}).first()
+            if held is None:
+                raise GraphPersonaGoneError(
+                    "a graph write names a persona that no longer exists",
+                    context={"persona_id": persona_id[:80]},
+                )
 
     # ===== nodes ===========================================================
 
@@ -86,6 +112,7 @@ class PostgresGraphBackend:
         row = self._node_to_row(owner_id, node, embedding, embedding_model)
         stmt = pg_insert(graph_nodes).values(**row).returning(graph_nodes.c.surrogate)
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
             surrogate = conn.execute(stmt).scalar_one()
         return int(surrogate)
 
@@ -113,6 +140,7 @@ class PostgresGraphBackend:
             .returning(graph_nodes.c.surrogate)
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
             surrogate = conn.execute(stmt).scalar_one_or_none()
         return None if surrogate is None else int(surrogate)
 
@@ -123,6 +151,7 @@ class PostgresGraphBackend:
         embedding: Sequence[float],
         *,
         embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        guard_personas: Sequence[str] = (),
     ) -> int | None:
         """Replace a node's mutable fields in place (the extend path, D-K0-4).
 
@@ -152,6 +181,9 @@ class PostgresGraphBackend:
             .returning(graph_nodes.c.surrogate)
         )
         with self._engine.begin() as conn:
+            self._hold_personas(
+                conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
+            )
             surrogate = conn.execute(stmt).scalar_one_or_none()
         return None if surrogate is None else int(surrogate)
 
@@ -517,6 +549,11 @@ class PostgresGraphBackend:
             )
             if row is None:
                 return None
+            self._hold_personas(
+                conn,
+                owner_id,
+                (e.get("persona_id") for e in (row["provenance"] or []) if isinstance(e, dict)),
+            )
             ins = (
                 pg_insert(graph_node_versions)
                 .values(
@@ -625,7 +662,9 @@ class PostgresGraphBackend:
 
     # ===== edges ===========================================================
 
-    def upsert_edge(self, owner_id: str, link: TypedLink) -> None:
+    def upsert_edge(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> None:
         """Insert or replace the OPEN edge for a fact-id (idempotent assertion, D-K0-2, K7-D-1).
 
         The conflict target is the partial unique index ``(id) WHERE invalid_at IS
@@ -644,7 +683,9 @@ class PostgresGraphBackend:
             index_where=graph_edges.c.invalid_at.is_(None),
             set_=update_cols,
         )
+        asserted_by = link.provenance.persona_id if link.provenance is not None else None
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
             conn.execute(stmt)
 
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
@@ -801,7 +842,9 @@ class PostgresGraphBackend:
             else entity.provenance.model_dump(mode="json"),
             "created_at": entity.created_at,
         }
+        named = [entity.provenance.persona_id if entity.provenance else None]
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, named)
             conn.execute(pg_insert(graph_entities).values(**row))
 
     def get_entity(self, owner_id: str, entity_id: str) -> CanonicalEntity | None:
@@ -824,6 +867,7 @@ class PostgresGraphBackend:
             .values(aliases=[a.model_dump(mode="json") for a in merged])
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [getattr(alias, "persona_id", None)])
             conn.execute(stmt)
 
     def find_entity_by_text(self, owner_id: str, normalized_name: str) -> CanonicalEntity | None:

@@ -15,6 +15,7 @@ from persona.errors import PersonaError
 __all__ = [
     "EntityResolutionError",
     "GraphError",
+    "GraphPersonaGoneError",
     "GraphIndexError",
     "GraphNodeNotFoundError",
     "GraphProtectedNodeError",
@@ -88,6 +89,17 @@ class GraphProtectedNodeError(GraphError):
     not deletable). This closes the Phase-1 gap where SELF was reachable as a
     merge/evolve/delete target. ``context`` conventionally carries the offending
     ``node_id`` and the attempted operation.
+    """
+
+
+class GraphPersonaGoneError(GraphError):
+    """A graph write names a persona whose row is gone (R9-284).
+
+    The graph is owner scoped, so nothing else stops a write from putting an erased persona
+    back into it. With the persona guard on, every write that carries a persona id holds that
+    persona's row (``FOR KEY SHARE``) in its own transaction: the erasure's row delete waits for
+    it, and a write that comes after the delete is refused with this. ``context`` carries the
+    persona id.
     """
 
 

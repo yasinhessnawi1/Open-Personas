@@ -695,6 +695,7 @@ def build_graph_store(
     embedder: Embedder,
     audit_logger: AuditLogger,
     settings: GraphSettings | None = None,
+    persona_guard: bool = False,
 ) -> PostgresGraphStore:
     """Composition root: wire the transport, index, merge engine, and store.
 
@@ -708,7 +709,7 @@ def build_graph_store(
     from persona.graph.postgres import PostgresGraphBackend
 
     resolved = settings or _Settings()
-    backend = PostgresGraphBackend(engine=engine)
+    backend = PostgresGraphBackend(engine=engine, persona_guard=persona_guard)
     index = make_graph_index(
         settings=resolved, engine=engine, float32_fetch=backend.embeddings_by_surrogate
     )
