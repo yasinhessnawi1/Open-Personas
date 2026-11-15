@@ -110,6 +110,7 @@ from persona_api.sandbox import (
 from persona_api.services import erasure_start, persona_service
 from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.chat_turn_sink import MessagesTurnSink
+from persona_api.services.erasure_ledger import ErasureLedger
 from persona_api.services.flag_report import log_effective_flags
 from persona_api.services.free_model_usage import FreeModelDailyCounter
 from persona_api.services.model_tiers import build_free_tier_registry
@@ -307,6 +308,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # which persona_app cannot once the persona row is gone: the persona_platform engine on
     # hosted, the community engine (no row level security, or a superuser) otherwise.
     app.state.platform_engine = admin_engine if admin_engine is not None else rls_engine
+    # Review L7: an engine that cannot write the ledger would accept every persona delete and
+    # fail every erasure. Probed once here; /healthz fails readiness on hosted when it cannot.
+    app.state.erasure_ledger_writable = (
+        ErasureLedger(app.state.platform_engine).can_write()
+        if app.state.platform_engine is not None
+        else None
+    )
+    if app.state.erasure_ledger_writable is False:
+        _LOG.error(
+            "OPERATOR ALERT: the platform engine cannot write the erasure ledger; persona and "
+            "account deletes will fail until DATABASE_URL is persona_platform with its grants"
+        )
     # Spec K10 (D-K10-9): the managed-Postgres lifecycle owner (None unless the
     # community managed path is active). The finally block stops an embedded
     # postmaster on shutdown; external mode makes it a no-op.

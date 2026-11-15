@@ -27,6 +27,8 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from persona_api.config import Edition
+
 router = APIRouter(tags=["health"])
 
 __all__ = ["router"]
@@ -57,6 +59,13 @@ def _worker_health(request: Request) -> tuple[str, float | None]:
     return ("stale" if age > _WORKER_BEAT_STALE_AFTER_SECONDS else "ok"), age
 
 
+def _erasures_blocked(request: Request) -> bool:
+    """Hosted, and the boot probe found the erasure ledger unwritable."""
+    config = getattr(request.app.state, "config", None)
+    hosted = config is not None and config.edition is Edition.cloud
+    return hosted and getattr(request.app.state, "erasure_ledger_writable", None) is False
+
+
 @router.get("/healthz")
 async def healthz(request: Request) -> JSONResponse:
     """Readiness: DB connectivity + background-worker liveness."""
@@ -76,6 +85,11 @@ async def healthz(request: Request) -> JSONResponse:
         )
     worker_state, beat_age = _worker_health(request)
     body: dict[str, object] = {"status": "ok", "db": "connected", "worker": worker_state}
+    if _erasures_blocked(request):
+        # R9-284 review L7: deletes would be accepted and never erased.
+        body["status"] = "degraded"
+        body["erasure_ledger"] = "unwritable"
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=body)
     if beat_age is not None:
         body["worker_beat_age_seconds"] = round(beat_age, 1)
     if worker_state == "stale":

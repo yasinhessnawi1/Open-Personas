@@ -134,6 +134,32 @@ class ErasureLedger:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def can_write(self) -> bool:
+        """Whether this engine can open an erasure: a probe row, always rolled back (review L7).
+
+        Run at boot. On hosted the ledger is SELECT-only to ``persona_app``, so an api whose
+        platform engine is that role (or lacks the grant) would accept every delete and then
+        fail every erasure; this says so before the first request.
+        """
+        try:
+            with self._engine.connect() as conn:
+                transaction = conn.begin()
+                try:
+                    conn.execute(
+                        insert(erasures_t).values(
+                            id=f"erasure_{uuid.uuid4().hex}",
+                            owner_id="boot-probe",
+                            subject_kind=SubjectKind.PERSONA.value,
+                            subject_id=f"probe_{uuid.uuid4().hex}",
+                            captured={},
+                        )
+                    )
+                finally:
+                    transaction.rollback()
+        except Exception:  # noqa: BLE001 - any refusal means the same thing here
+            return False
+        return True
+
     def get(self, subject_kind: SubjectKind, subject_id: str) -> Erasure | None:
         """This subject's open erasure, else its latest finished one, else ``None``."""
         finished_last = case((erasures_t.c.state == ErasureState.COMPLETE.value, 1), else_=0)
