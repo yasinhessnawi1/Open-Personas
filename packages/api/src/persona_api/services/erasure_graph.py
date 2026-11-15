@@ -56,6 +56,7 @@ __all__ = [
     "delete_mirrors",
     "erased_personas_in_graph",
     "merge_record",
+    "names_only_the_doomed_gave",
     "mirror_id_for",
     "plan_trails",
     "unmerged",
@@ -132,6 +133,15 @@ def merge_record(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
     except ValueError:
         return None
     return record if isinstance(record, dict) else None
+
+
+def names_only_the_doomed_gave(doomed: Iterable[str], surviving: Iterable[str]) -> list[str]:
+    """The doomed members' names that no surviving member of the canonical also gave.
+
+    An alias is one name however many members carried it; a member that stays still gives it.
+    """
+    kept = set(surviving)
+    return sorted({n for n in doomed if n and n not in kept})
 
 
 def without_aliases(metadata: Mapping[str, Any], names: Iterable[str]) -> dict[str, Any] | None:
@@ -279,7 +289,17 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
             )
         names_by_canonical.setdefault(canonical, []).append(row.concept_name)
     cleaned = 0
-    for canonical_id, names in names_by_canonical.items():
+    for canonical_id, given in names_by_canonical.items():
+        survivors = conn.execute(
+            select(nodes_t.c.concept_name).where(
+                nodes_t.c.owner_id == owner_id,
+                nodes_t.c.merged_into == canonical_id,
+                nodes_t.c.id.not_in(sorted(doomed)),
+            )
+        ).scalars()
+        names = names_only_the_doomed_gave(given, survivors)
+        if not names:
+            continue
         canonical = conn.execute(
             select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
             .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical_id)

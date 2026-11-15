@@ -13,6 +13,7 @@ from persona_api.services.erasure_graph import (
     delete_mirrors,
     merge_record,
     mirror_id_for,
+    names_only_the_doomed_gave,
     plan_trails,
     unmerged,
     without_alias_names,
@@ -265,3 +266,10 @@ def test_every_row_lock_the_graph_step_takes_is_taken_in_a_fixed_order() -> None
                 unordered += 1
     assert locked >= 5
     assert unordered == 0
+
+
+def test_a_name_a_surviving_member_also_gave_stays() -> None:
+    """Review LOW: the alias is the canonical's while any member that stays carries it."""
+    assert names_only_the_doomed_gave(["oslo", "bergen", ""], ["oslo"]) == ["bergen"]
+    assert names_only_the_doomed_gave(["oslo"], ["oslo"]) == []
+    assert names_only_the_doomed_gave(["b", "a", "a"], []) == ["a", "b"]
