@@ -195,6 +195,23 @@ class ErasureLedger:
             raise _refuse("claim_not_visible")
         return claimed
 
+    def add_captured(self, erasure_id: str, name: str, ids: Sequence[str]) -> None:
+        """Add ids to one captured list (a union), for rows found after the claim.
+
+        The claim's capture is a snapshot; the row step re-reads under the persona's row lock
+        what was created since (a conversation started mid-delete), so its rows are erased
+        too. Ids only, like every other write here.
+        """
+        clean = _require_captured({name: ids})[name]
+        with self._engine.begin() as conn:
+            row = self._lock_open(conn, erasure_id)
+            merged = sorted({*row.captured.get(name, []), *clean})
+            conn.execute(
+                update(erasures_t)
+                .where(erasures_t.c.id == erasure_id)
+                .values(captured={**row.captured, name: merged}, updated_at=func.now())
+            )
+
     def record_step(self, erasure_id: str, step: str, counts: Mapping[str, int]) -> None:
         """Add one run of a step to what that step has recorded so far.
 

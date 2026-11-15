@@ -32,10 +32,11 @@ from persona.stores import EpisodicStore, IdentityStore, SelfFactsStore, Worldvi
 from persona.stores.core_memory import CORE_MEMORY_KIND, CoreMemoryStore
 from persona.stores.document_store import DocumentStore
 from persona.tools._sandbox import require_path_segment
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import conversations as conversations_t
+from persona_api.db.models import event_triggers as event_triggers_t
 from persona_api.db.models import initiative_declines as initiative_declines_t
 from persona_api.db.models import initiative_notices as initiative_notices_t
 from persona_api.db.models import jobs as jobs_t
@@ -79,8 +80,11 @@ _log = get_logger("api.erasure")
 
 PERSONA_ERASE_JOB_TYPE = "persona_erase"
 
+# A row delete that keeps finding new conversations under its lock gives up after this many.
+_ROW_ATTEMPTS = 3
+
 # ``audit_log`` metadata keys that hold what a person said rather than ids and outcomes.
-AUDIT_CONTENT_KEYS = frozenset({"verbatim_ask"})
+AUDIT_CONTENT_KEYS = frozenset({"verbatim_ask", "workspace_path"})
 
 
 @dataclass(frozen=True)
@@ -168,11 +172,19 @@ def capture_persona(conn: Connection, *, owner_id: str, persona_id: str) -> dict
     ):
         if schedule_id == f"initsched:{persona_id}" or _names(template, named):
             schedules.add(str(schedule_id))
+    # Their event_trigger_dropped notifications name them, and they go by cascade (review L1).
+    triggers = _column(
+        conn,
+        select(event_triggers_t.c.id).where(
+            event_triggers_t.c.persona_id == persona_id, event_triggers_t.c.owner_id == owner_id
+        ),
+    )
     return {
         "conversations": conversations,
         "tasks": tasks,
         "runs": runs,
         "schedules": sorted(schedules),
+        "event_triggers": triggers,
     }
 
 
@@ -237,16 +249,58 @@ def _step_fence(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
     return fence_persona(deps.engine, erasure)
 
 
+def delete_row_capturing(
+    engine: Engine, erasure: Erasure, *, ledger_engine: Engine | None = None
+) -> int:
+    """Delete the persona's row once the ledger holds every conversation it still has.
+
+    Under the row's lock nothing new can be created for the persona (a conversation insert
+    takes a key share on it), so the conversations read there are all there will ever be,
+    including one started after the claim (review L2): its documents are keyed by its id, and
+    without it they would outlive the erasure. When there are new ones the delete is rolled
+    back, they are recorded, and it tries again, so the row never goes with an id unrecorded.
+    ``ledger_engine`` is where the ledger is written when ``engine`` cannot (the route deletes
+    on the caller's RLS engine). Returns the rows deleted (0 or 1).
+    """
+    owner, pid = erasure.owner_id, erasure.subject_id
+    ledger = ErasureLedger(ledger_engine or engine)
+    known = set(erasure.captured.get("conversations", []))
+    for _ in range(_ROW_ATTEMPTS):
+        with engine.begin() as conn:
+            conn.execute(
+                select(personas_t.c.id)
+                .where(personas_t.c.id == pid, personas_t.c.owner_id == owner)
+                .with_for_update()
+            ).first()
+            new = (
+                set(
+                    _column(
+                        conn,
+                        select(conversations_t.c.id).where(
+                            conversations_t.c.persona_id == pid, conversations_t.c.owner_id == owner
+                        ),
+                    )
+                )
+                - known
+            )
+            if not new:
+                return delete_persona_row(conn, owner_id=owner, persona_id=pid)
+        ledger.add_captured(erasure.id, "conversations", sorted(new))
+        known |= new
+    raise _refuse("conversations_kept_appearing")
+
+
 def _step_row(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
-    with deps.engine.begin() as conn:
-        removed = delete_persona_row(conn, owner_id=erasure.owner_id, persona_id=erasure.subject_id)
-    return {"personas": removed}
+    return {"personas": delete_row_capturing(deps.engine, erasure)}
 
 
 def _step_memory(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
     """Every memory kind through its own door: evidence first, the core block last."""
     backend, audit = deps.memory_backend, deps.audit_logger
     pid = erasure.subject_id
+    # memory_chunks has no owner column: these doors are keyed by persona id (and documents by
+    # conversation ids captured under the owner predicate); _require_not_anothers, run before
+    # any step, is what keeps them inside this owner (review L4).
     counts = {
         store.STORE_KIND: store(backend=backend, audit_logger=audit).delete(pid)
         for store in (IdentityStore, SelfFactsStore, WorldviewStore)
@@ -287,20 +341,42 @@ def _step_files(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
     }
 
 
+def _scrubbed_target(target: str, conversations: frozenset[str]) -> str:
+    """A document's audit target, ``{conversation}/{doc_ref}``, becomes its conversation."""
+    head, sep, _ = target.partition("/")
+    return head if sep and head in conversations else target
+
+
 def _scrub_audit_log(conn: Connection, erasure: Erasure) -> int:
-    """Remove content keys from the owner's audit rows about the persona; keep the rows."""
+    """Remove content from the owner's audit rows about the persona; keep the rows.
+
+    Content is what a person said and the names of their files (review L3): the content keys,
+    and the document part of a ``{conversation}/{doc_ref}`` target.
+    """
+    ids = _subject_ids(erasure)
+    conversations = frozenset(erasure.captured.get("conversations", []))
+    target = audit_log_t.c.target
     rows = conn.execute(
-        select(audit_log_t.c.id, audit_log_t.c.metadata).where(
+        select(audit_log_t.c.id, target, audit_log_t.c.metadata).where(
             audit_log_t.c.user_id == erasure.owner_id,
-            audit_log_t.c.target.in_(sorted(_subject_ids(erasure))),
+            or_(
+                target.in_(sorted(ids)),
+                *(target.startswith(f"{c}/", autoescape=True) for c in sorted(conversations)),
+            ),
         )
     ).all()
     scrubbed = 0
-    for audit_id, meta in rows:
-        if not isinstance(meta, Mapping) or not AUDIT_CONTENT_KEYS & set(meta):
+    for audit_id, was, meta in rows:
+        clean = meta if isinstance(meta, Mapping) else {}
+        kept = {k: v for k, v in clean.items() if k not in AUDIT_CONTENT_KEYS}
+        now = _scrubbed_target(str(was), conversations)
+        if kept == clean and now == was:
             continue
-        kept = {k: v for k, v in meta.items() if k not in AUDIT_CONTENT_KEYS}
-        conn.execute(update(audit_log_t).where(audit_log_t.c.id == audit_id).values(metadata=kept))
+        conn.execute(
+            update(audit_log_t)
+            .where(audit_log_t.c.id == audit_id)
+            .values(metadata=kept, target=now)
+        )
         scrubbed += 1
     return scrubbed
 
@@ -323,6 +399,7 @@ def _step_rows(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
                     initiative_notices_t.c.persona_id == pid,
                 )
             ).rowcount,
+            # No owner column here either; the same guard as the memory step (review L4).
             "tool_audit_events": conn.execute(
                 delete(tool_audit_events_t).where(tool_audit_events_t.c.persona_id == pid)
             ).rowcount,
@@ -378,6 +455,8 @@ def _run_steps(
     steps: Iterable[tuple[str, Step]],
 ) -> None:
     for name, step in steps:
+        # Re-read before each step: the row step adds what it found under the row lock.
+        erasure = ledger.get(SubjectKind.PERSONA, erasure.subject_id) or erasure
         try:
             counts = step(deps, erasure)
         except Exception as exc:

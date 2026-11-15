@@ -222,6 +222,52 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
         target=conv,
         metadata={"persona_id": pid, "verbatim_ask": SECRET, "outcome": "done"},
     )
+    # File names are content (review L3): an upload and a document upload.
+    row(
+        conn,
+        "audit_log",
+        id=f"upload_{pid[-6:]}",
+        user_id=owner,
+        action="upload.create",
+        target=pid,
+        metadata={"workspace_path": f"uploads/{SECRET}.png", "media_type": "image/png"},
+    )
+    row(
+        conn,
+        "audit_log",
+        id=f"docup_{pid[-6:]}",
+        user_id=owner,
+        action="upload.create",
+        target=f"{conv}/doc_{SECRET}",
+        metadata={"workspace_path": f"conversations/{conv}/{SECRET}.pdf", "format": "pdf"},
+    )
+    trigger = f"trig_{pid[-6:]}"
+    row(
+        conn,
+        "event_triggers",
+        id=trigger,
+        owner_id=owner,
+        persona_id=pid,
+        event_kind="message",
+        filter={},
+        action={},
+    )
+    for kind, ref in (
+        ("event_trigger_dropped", trigger),
+        ("run_terminal", run),
+        ("schedule_fired", schedule),
+    ):
+        row(
+            conn,
+            "notifications",
+            id=f"{kind}_{pid[-6:]}",
+            owner_id=owner,
+            kind=kind,
+            ref_id=ref,
+            level="info",
+            message_key="k",
+            params={},
+        )
 
 
 def _persona_memory(memory: Backend, pid: str) -> None:

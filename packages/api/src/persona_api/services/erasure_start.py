@@ -31,11 +31,11 @@ from persona_api.jobs.handlers.persona_erase import (
     enqueue_persona_erase,
     persona_erase_queue_available,
 )
-from persona_api.services import persona_service
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
 from persona_api.services.erasure_service import (
     PersonaEraseDeps,
     capture_persona,
+    delete_row_capturing,
     erase_persona,
     fence_persona,
 )
@@ -77,7 +77,8 @@ def begin_persona_erasure(
         captured=captured,
     )
     ledger.record_step(erasure.id, "fence", fence_persona(platform_engine, erasure))
-    persona_service.delete_persona(rls_engine=rls_engine, persona_id=persona_id, owner_id=owner_id)
+    if delete_row_capturing(rls_engine, erasure, ledger_engine=platform_engine) == 0:
+        raise not_found
     ledger.record_step(erasure.id, "row", {"personas": 1})
     return erasure
 

@@ -26,6 +26,7 @@ from _erase_seed import (
     chunk,
     conversation_of,
     ids_naming,
+    row,
     seed,
 )
 from persona_api.db.models import audit_log, metadata
@@ -140,9 +141,53 @@ def test_what_the_ruling_keeps_is_kept(seeded: Seeded) -> None:
     assert len(ids_naming(seeded.engine, "schedule_tombstones", "tomb_aaaaaa")) == 1
     with seeded.engine.connect() as conn:
         kept = conn.execute(
-            select(audit_log.c.metadata).where(audit_log.c.target == conversation_of(PERSONA))
+            select(audit_log.c.metadata).where(audit_log.c.id == "audit_aaaaaa")
         ).scalar_one()
     assert kept == {"persona_id": PERSONA, "outcome": "done"}
+
+
+def test_file_names_leave_the_audit_log_and_its_rows_stay(seeded: Seeded) -> None:
+    """Review L3: a workspace path and a document's target name the user's files."""
+    erase_persona(_deps(seeded), _claim(seeded))
+
+    with seeded.engine.connect() as conn:
+        rows = {
+            r.id: (r.target, r.metadata)
+            for r in conn.execute(
+                select(audit_log.c.id, audit_log.c.target, audit_log.c.metadata).where(
+                    audit_log.c.id.in_(["upload_aaaaaa", "docup_aaaaaa", "upload_bbbbbb"])
+                )
+            )
+        }
+    assert rows["upload_aaaaaa"] == (PERSONA, {"media_type": "image/png"})
+    assert rows["docup_aaaaaa"] == (conversation_of(PERSONA), {"format": "pdf"})
+    assert SECRET in json.dumps(rows["upload_bbbbbb"]), "the sibling's rows are untouched"
+
+
+def test_the_personas_event_trigger_notifications_go(seeded: Seeded) -> None:
+    """Review L1: the trigger goes by cascade, so its id is captured for its notification."""
+    erase_persona(_deps(seeded), _claim(seeded))
+
+    for kind in ("event_trigger_dropped", "run_terminal", "schedule_fired"):
+        assert ids_naming(seeded.engine, "notifications", f"{kind}_aaaaaa") == []
+        assert ids_naming(seeded.engine, "notifications", f"{kind}_bbbbbb") != []
+
+
+def test_a_conversation_started_after_the_claim_loses_its_documents_too(seeded: Seeded) -> None:
+    """Review L2: the row step re-reads the persona's conversations under the row lock."""
+    erasure = _claim(seeded)
+    late = "convlateaaaaaa"
+    with seeded.engine.begin() as conn:
+        row(conn, "conversations", id=late, owner_id=OWNER, persona_id=PERSONA, origin="chat")
+    seeded.memory.upsert(persona_id=late, store_kind="document", chunks=[chunk("late-doc")])
+
+    erase_persona(_deps(seeded), erasure)
+
+    assert seeded.memory.get_all(persona_id=late, store_kind="document") == []
+    done = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
+    assert done is not None
+    assert late in done.captured["conversations"]
+    assert done.counts["memory"]["document"] == 2
 
 
 def test_the_erasure_completes_with_counts_and_is_audited_without_content(seeded: Seeded) -> None:
@@ -180,6 +225,7 @@ def test_capture_reads_what_the_later_steps_need_while_it_still_exists(seeded: S
         "tasks": ["task_aaaaaa"],
         "runs": ["run_aaaaaa"],
         "schedules": [f"initsched:{PERSONA}", "sched_aaaaaa"],
+        "event_triggers": ["trig_aaaaaa"],
     }
 
 
@@ -212,8 +258,6 @@ def test_the_fence_stops_what_would_run_for_the_persona(seeded: Seeded) -> None:
 
 def test_the_erase_job_itself_is_never_fenced(seeded: Seeded) -> None:
     erasure = _claim(seeded)
-    from _erase_seed import row  # noqa: PLC0415 - one helper, one test
-
     with seeded.engine.begin() as conn:
         row(
             conn,
