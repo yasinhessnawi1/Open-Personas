@@ -39,7 +39,9 @@ def _claim(engine: Engine, persona: str, *, age: timedelta = timedelta(0)) -> st
     )
     with engine.begin() as conn:
         conn.execute(
-            update(erasures_t).where(erasures_t.c.id == erasure.id).values(requested_at=_NOW - age)
+            update(erasures_t)
+            .where(erasures_t.c.id == erasure.id)
+            .values(requested_at=_NOW - age, updated_at=_NOW - age)
         )
     return erasure.id
 
@@ -72,7 +74,9 @@ def test_the_sweep_resumes_and_reports_each_stall_once(
     monkeypatch.setattr(persona_erase._log, "error", lambda _msg, **kw: alerts.append(kw["eid"]))  # noqa: SLF001
     monkeypatch.setattr(persona_erase, "datetime", _FrozenClock)
     resumed: list[str] = []
-    sweep = PersonaEraseSweep(engine=engine, run=lambda e, _t: resumed.append(e.id))
+    sweep = PersonaEraseSweep(
+        engine=engine, grace=timedelta(0), run=lambda e, _t: resumed.append(e.id)
+    )
 
     assert sweep() == 1
     assert sweep() == 1
@@ -147,7 +151,7 @@ def test_a_finished_erasure_has_its_graph_step_run_once_more_after_a_lease(
         lambda _engine, *, persona_id, **_kw: rechecked.append(persona_id) or {},
     )
     monkeypatch.setattr(persona_erase, "datetime", _FrozenClock)
-    sweep = PersonaEraseSweep(engine=engine, run=lambda _e, _t: None)
+    sweep = PersonaEraseSweep(engine=engine, grace=timedelta(0), run=lambda _e, _t: None)
 
     sweep()
     sweep()

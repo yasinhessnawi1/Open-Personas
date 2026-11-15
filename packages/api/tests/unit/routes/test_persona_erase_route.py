@@ -10,6 +10,7 @@ never claimed, and a process that could not erase the memory refuses before touc
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from types import SimpleNamespace
 from typing import Any
@@ -230,7 +231,9 @@ def test_an_unfinished_erasure_is_finished_at_the_next_start(seeded: Seeded) -> 
     )
 
     async def _boot() -> None:
-        task = erasure_start.resume_persona_erasures_on_startup(state, interval_seconds=0.05)
+        task = erasure_start.resume_persona_erasures_on_startup(
+            state, interval_seconds=0.05, grace=timedelta(0)
+        )
         assert task is not None
         for _ in range(600):
             if _state(seeded) is ErasureState.COMPLETE:
@@ -272,6 +275,7 @@ def test_a_failure_after_the_row_delete_is_picked_up_by_the_sweep(
     sweep = PersonaEraseSweep(
         engine=seeded.engine,
         run=lambda erasure, _token: erasure_start.run_persona_erasure_inline(deps, erasure),
+        grace=timedelta(0),
     )
     assert sweep() == 1
 
@@ -293,7 +297,9 @@ def test_a_process_with_no_worker_keeps_sweeping(seeded: Seeded) -> None:
     )
 
     async def _run() -> None:
-        task = erasure_start.resume_persona_erasures_on_startup(state, interval_seconds=0.05)
+        task = erasure_start.resume_persona_erasures_on_startup(
+            state, interval_seconds=0.05, grace=timedelta(0)
+        )
         assert task is not None
         await asyncio.sleep(0.3)  # the first sweeps find nothing
         with seeded.engine.connect() as conn:

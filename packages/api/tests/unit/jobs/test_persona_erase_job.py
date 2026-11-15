@@ -8,6 +8,7 @@ refusal is permanent, and an erasure whose job died is resumed under a key of it
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from typing import TYPE_CHECKING, Any
 
@@ -198,7 +199,9 @@ def test_every_unfinished_persona_erasure_is_resumed_and_nothing_else(seeded: Se
     resumed: list[tuple[str, str]] = []
 
     count = resume_persona_erasures(
-        engine=seeded.engine, run=lambda e, token: resumed.append((e.id, token))
+        engine=seeded.engine,
+        grace=timedelta(0),
+        run=lambda e, token: resumed.append((e.id, token)),
     )
 
     assert count == 2
@@ -239,7 +242,9 @@ def test_an_erasure_with_a_live_job_is_left_to_it(
         )
     ran: list[str] = []
 
-    count = resume_persona_erasures(engine=seeded.engine, run=lambda e, _t: ran.append(e.id))
+    count = resume_persona_erasures(
+        engine=seeded.engine, grace=timedelta(0), run=lambda e, _t: ran.append(e.id)
+    )
 
     assert count == resumed
     assert ran == [erasure.id] * resumed
@@ -251,7 +256,9 @@ def test_a_permanent_refusal_is_left_to_the_alert(seeded: Seeded, code: str, res
     erasure = _claim(seeded)
     ErasureLedger(seeded.engine).fail(erasure.id, code)
 
-    count = resume_persona_erasures(engine=seeded.engine, run=lambda _e, _t: None)
+    count = resume_persona_erasures(
+        engine=seeded.engine, grace=timedelta(0), run=lambda _e, _t: None
+    )
 
     assert count == resumed
 
@@ -288,3 +295,41 @@ def test_rows_that_keep_appearing_are_retried_not_refused(
     assert failed is not None
     assert failed.error_code == "row_failed"
     assert failed.error_code not in erasure_service.PERMANENT_REFUSALS
+
+
+def test_an_erasure_changed_within_the_grace_is_left_to_its_route(seeded: Seeded) -> None:
+    """Review L4: the route that just claimed it may still be fencing or deleting the row."""
+    _claim(seeded)
+    ran: list[str] = []
+
+    fresh = resume_persona_erasures(engine=seeded.engine, run=lambda e, _t: ran.append(e.id))
+    settled = resume_persona_erasures(
+        engine=seeded.engine, grace=timedelta(0), run=lambda e, _t: ran.append(e.id)
+    )
+
+    assert (fresh, settled) == (0, 1)
+
+
+def test_a_route_finding_the_erasure_locked_leaves_the_row_to_the_holder(seeded: Seeded) -> None:
+    """Review L4: the route fences and deletes only while it holds the erasure's lock."""
+    from persona_api.services.erasure_lock import erasure_lock  # noqa: PLC0415
+    from persona_api.services.erasure_start import begin_persona_erasure  # noqa: PLC0415
+
+    with seeded.engine.connect() as conn:
+        captured = capture_persona(conn, owner_id=OWNER, persona_id=PERSONA)
+    held = ErasureLedger(seeded.engine).claim(
+        owner_id=OWNER, subject_kind=SubjectKind.PERSONA, subject_id=PERSONA, captured=captured
+    )
+    with erasure_lock(seeded.engine, held.id) as mine:
+        assert mine
+        erasure = begin_persona_erasure(
+            rls_engine=seeded.engine,
+            platform_engine=seeded.engine,
+            owner_id=OWNER,
+            persona_id=PERSONA,
+        )
+
+    assert erasure.id == held.id
+    again = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
+    assert again is not None
+    assert again.counts == {}, "the route recorded nothing while another run held the lock"

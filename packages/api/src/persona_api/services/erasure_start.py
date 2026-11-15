@@ -19,6 +19,7 @@ next start (:func:`resume_persona_erasures_on_startup`).
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from persona.errors import PersonaNotFoundError
@@ -26,12 +27,14 @@ from persona.logging import get_logger
 
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.persona_erase import (
+    RESUME_GRACE,
     PersonaEraseSweep,
     build_persona_erase_deps,
     enqueue_persona_erase,
     persona_erase_queue_available,
 )
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
+from persona_api.services.erasure_lock import erasure_lock
 from persona_api.services.erasure_service import (
     PersonaEraseDeps,
     capture_persona,
@@ -76,10 +79,15 @@ def begin_persona_erasure(
         subject_id=persona_id,
         captured=captured,
     )
-    ledger.record_step(erasure.id, "fence", fence_persona(platform_engine, erasure))
-    if delete_row_capturing(rls_engine, erasure, ledger_engine=platform_engine) == 0:
-        raise not_found
-    ledger.record_step(erasure.id, "row", {"personas": 1})
+    # Held while this request fences and deletes, so a sweep cannot run the erasure under it
+    # (review L4). If another run holds it, that run fences and deletes the row itself.
+    with erasure_lock(platform_engine, erasure.id) as held:
+        if not held:
+            return erasure
+        ledger.record_step(erasure.id, "fence", fence_persona(platform_engine, erasure))
+        if delete_row_capturing(rls_engine, erasure, ledger_engine=platform_engine) == 0:
+            raise not_found
+        ledger.record_step(erasure.id, "row", {"personas": 1})
     return erasure
 
 
@@ -147,6 +155,7 @@ def resume_persona_erasures_on_startup(
     state: Any,  # noqa: ANN401 - app.state
     *,
     interval_seconds: float = INLINE_SWEEP_SECONDS,
+    grace: timedelta = RESUME_GRACE,
 ) -> asyncio.Task[None] | None:
     """Resume unfinished persona erasures now, and keep sweeping where no worker will.
 
@@ -167,7 +176,7 @@ def resume_persona_erasures_on_startup(
         if not dispatch_persona_erasure(state, erasure, token=token):
             run_persona_erasure_inline(deps, erasure)
 
-    sweep = PersonaEraseSweep(engine=deps.engine, run=_run)
+    sweep = PersonaEraseSweep(engine=deps.engine, run=_run, grace=grace)
 
     def _once() -> None:
         try:

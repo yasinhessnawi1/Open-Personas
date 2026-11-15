@@ -57,6 +57,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PERSONA_ERASE_JOB_TYPE",
     "STALL_AFTER",
+    "RESUME_GRACE",
     "PersonaEraseSweep",
     "build_persona_erase_sweep",
     "stalled_persona_erasures",
@@ -249,15 +250,28 @@ def _has_live_job(conn: Connection, erasure_id: str) -> bool:
     return found is not None
 
 
-def resume_persona_erasures(*, engine: Engine, run: Callable[[Erasure, str], object]) -> int:
+#: An erasure changed more recently than this is left alone by a resume (review L4): the
+#: route that claimed it may still be fencing it, deleting its row or handing it off.
+RESUME_GRACE = timedelta(minutes=2)
+
+
+def resume_persona_erasures(
+    *,
+    engine: Engine,
+    run: Callable[[Erasure, str], object],
+    grace: timedelta = RESUME_GRACE,
+) -> int:
     """Hand every unfinished persona erasure to ``run`` with its resume token; return how many.
 
     Called at startup and from the periodic sweep, on an engine that sees every tenant. ``run``
     enqueues the job, or runs the erasure inline where no worker consumes it. An erasure that
-    already has a job waiting or running is left to it.
+    already has a job waiting or running is left to it, and so is one changed within ``grace``.
     """
+    settled = datetime.now(UTC) - grace
     pending = [
-        e for e in ErasureLedger(engine).unfinished() if e.subject_kind is SubjectKind.PERSONA
+        e
+        for e in ErasureLedger(engine).unfinished()
+        if e.subject_kind is SubjectKind.PERSONA and (aware_utc(e.updated_at) or settled) <= settled
     ]
     with engine.connect() as conn:
         orphaned = [
@@ -301,14 +315,21 @@ class PersonaEraseSweep:
     ``bin/erasurecheck.sh`` timer is what raises the kit's alert (deploy/server).
     """
 
-    def __init__(self, *, engine: Engine, run: Callable[[Erasure, str], object]) -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        run: Callable[[Erasure, str], object],
+        grace: timedelta = RESUME_GRACE,
+    ) -> None:
         self._engine = engine
         self._run = run
+        self._grace = grace
         self._reported: set[str] = set()
         self._graph_rechecked: set[str] = set()
 
     def __call__(self) -> int:
-        resumed = resume_persona_erasures(engine=self._engine, run=self._run)
+        resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
         self._recheck_the_graph(datetime.now(UTC))
         for erasure in stalled_persona_erasures(self._engine, now=datetime.now(UTC)):
             if erasure.id in self._reported:
