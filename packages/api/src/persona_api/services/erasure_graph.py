@@ -39,7 +39,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from persona.graph.models import _compute_node_hash, make_self_node_id
+from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
 from sqlalchemy import cast, delete, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -56,6 +56,7 @@ __all__ = [
     "delete_mirrors",
     "erased_personas_in_graph",
     "merge_record",
+    "mirror_id_for",
     "plan_trails",
     "unmerged",
     "without_alias_names",
@@ -389,7 +390,66 @@ def _asserted(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expres
     return cast(column, JSONB).contains({"persona_id": persona_id})
 
 
+def mirror_id_for(
+    src: str, dst: str, link_type: str, *, member_id: str, canonical_id: str
+) -> str | None:
+    """The id consolidation gave the mirror of a member's edge, as ``_mirror_assertion_edges``.
+
+    The member's end is re-pointed onto the canonical; a self-loop is never mirrored.
+    """
+    if src == member_id:
+        src = canonical_id
+    elif dst == member_id:
+        dst = canonical_id
+    else:
+        return None
+    return None if src == dst else make_edge_id(src, dst, LinkType(link_type))
+
+
+def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> int:
+    """The mirrors on a canonical of edges the persona asserted on a member that stays.
+
+    The persona's edge goes by the edge rule, but consolidation copied it onto the canonical as
+    a SYSTEM mirror, which would survive unattributed (review M-3). Deleted only while it is
+    still that merge's mirror.
+    """
+    asserted = conn.execute(
+        select(graph_edges.c.src_node_id, graph_edges.c.dst_node_id, graph_edges.c.link_type)
+        .where(graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id))
+        .order_by(graph_edges.c.id)
+    ).all()
+    ends = sorted({n for e in asserted for n in (e.src_node_id, e.dst_node_id)})
+    members = conn.execute(
+        select(nodes_t.c.id, nodes_t.c.metadata).where(
+            nodes_t.c.owner_id == owner_id,
+            nodes_t.c.id.in_(ends),
+            nodes_t.c.merged_into.is_not(None),
+        )
+    ).all()
+    records = {m.id: merge_record(m.metadata) for m in members}
+    deleted = 0
+    for edge in asserted:
+        for member_id in {edge.src_node_id, edge.dst_node_id} & set(records):
+            record = records[member_id]
+            canonical = record.get("canonical") if record else None
+            if record is None or not isinstance(canonical, str):
+                continue
+            mirror = mirror_id_for(
+                edge.src_node_id,
+                edge.dst_node_id,
+                str(edge.link_type),
+                member_id=member_id,
+                canonical_id=canonical,
+            )
+            if mirror is not None:
+                deleted += conn.execute(
+                    delete_mirrors(owner_id, [mirror], run_id=str(record.get("run_id")))
+                ).rowcount
+    return deleted
+
+
 def _edges_and_entities(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
+    mirrors = _mirrors_of_asserted(conn, owner_id, persona_id)
     edges = conn.execute(
         delete(graph_edges).where(
             graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id)
@@ -409,6 +469,7 @@ def _edges_and_entities(conn: Connection, owner_id: str, persona_id: str) -> dic
     ).rowcount
     return {
         "edges_deleted": edges,
+        "mirrors_of_asserted_deleted": mirrors,
         "entities_deleted": entities,
         "entities_unattributed": unattributed,
         "entity_aliases_removed": _strip_entity_aliases(conn, owner_id, persona_id),

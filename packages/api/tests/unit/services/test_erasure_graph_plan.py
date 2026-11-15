@@ -12,6 +12,7 @@ import json
 from persona_api.services.erasure_graph import (
     delete_mirrors,
     merge_record,
+    mirror_id_for,
     plan_trails,
     unmerged,
     without_alias_names,
@@ -234,3 +235,14 @@ def test_a_mirror_is_deleted_only_while_it_is_still_the_merges() -> None:
     assert "invalid_at IS NULL" in sql
     assert {"source": "system", "reason": "consolidation:r3"} in compiled.params.values()
     assert ["k::causal::x"] in compiled.params.values()
+
+
+def test_the_mirror_id_is_the_one_consolidation_gave() -> None:
+    """Review M-3: the member's end re-pointed onto the canonical, as the merge act does."""
+    out = mirror_id_for("m", "x", "causal", member_id="m", canonical_id="k")
+    into = mirror_id_for("x", "m", "temporal", member_id="m", canonical_id="k")
+
+    assert out == "k::causal::x"
+    assert into == "x::temporal::k"
+    assert mirror_id_for("m", "k", "causal", member_id="m", canonical_id="k") is None
+    assert mirror_id_for("a", "b", "causal", member_id="m", canonical_id="k") is None

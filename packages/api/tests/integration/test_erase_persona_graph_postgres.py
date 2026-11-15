@@ -169,6 +169,7 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
         "versions_deleted": 1,
         "versions_stripped": 2,
         "edges_deleted": 1,
+        "mirrors_of_asserted_deleted": 0,
         "entities_deleted": 1,
         "entities_unattributed": 1,
         "entity_aliases_removed": 1,
@@ -216,11 +217,16 @@ def consolidated(migrated_engine: Engine, embedder: Any) -> tuple[Engine, Postgr
         _node("q_other", _OTHER),
         _node("p_canon2", _PERSONA),
         _node("q_member", _OTHER),
+        _node("q_canon2", _OTHER),
+        _node("q_member2", _OTHER),
+        _node("q_x", _OTHER),
     ):
         backend.insert_node(_OWNER, node, vector)
     # Open assertion edges the merge act mirrors onto the canonical and closes on the member.
     backend.upsert_edge(_OWNER, _edge("e_pq", "p_into_q", "q_other", _OTHER))
     backend.upsert_edge(_OWNER, _edge("e_qm", "q_member", "q_other", _OTHER))
+    # Review M-3: the erased persona asserted an edge on a member that stays.
+    backend.upsert_edge(_OWNER, _edge("e_pm", "q_member2", "q_x", _PERSONA))
     settings = GraphSettings()
     consolidation = ConsolidationPass(
         backend=backend,
@@ -238,6 +244,7 @@ def consolidated(migrated_engine: Engine, embedder: Any) -> tuple[Engine, Postgr
         ("r2", _SELF, "p_self_member"),
         ("r3", "q_canon", "p_into_q"),
         ("r4", "p_canon2", "q_member"),
+        ("r5", "q_canon2", "q_member2"),
     ):
         consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself, as a run does it
             _OWNER,
@@ -374,3 +381,16 @@ def test_a_mirror_another_persona_reasserted_is_left_alone(
 
     assert _open_edges(engine, "q_canon") == {mirror}
     assert link_type
+
+
+def test_the_mirror_of_an_edge_the_persona_asserted_on_a_kept_member_goes(
+    consolidated: tuple[Engine, PostgresGraphBackend],
+) -> None:
+    """Review M-3: the persona's edge goes by the edge rule; its mirror must go with it."""
+    engine, _backend = consolidated
+    assert _open_edges(engine, "q_canon2") == {"q_canon2::causal::q_x"}
+
+    counts = erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert _open_edges(engine, "q_canon2") == set()
+    assert counts["mirrors_of_asserted_deleted"] == 1
