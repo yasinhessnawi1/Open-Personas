@@ -784,7 +784,14 @@ def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None
     assert "User=" not in service
 
 
-@pytest.mark.parametrize("unit", ["open-persona-backup.service", "open-persona-diskcheck.service"])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "open-persona-backup.service",
+        "open-persona-diskcheck.service",
+        "open-persona-erasurecheck.service",
+    ],
+)
 def test_a_failing_timer_job_raises_an_alert(unit: str) -> None:
     text = (KIT / "systemd" / unit).read_text(encoding="utf-8")
     assert "OnFailure=open-persona-alert@%n.service" in text
@@ -955,3 +962,16 @@ def test_every_unit_runs_the_kit_from_its_new_path() -> None:
         text = unit.read_text(encoding="utf-8")
         for path in re.findall(r"/opt/open-persona/repo/\S+", text):
             assert path.startswith("/opt/open-persona/repo/deploy/server/bin/"), (unit.name, path)
+
+
+def test_the_erasure_check_reports_failed_and_long_unfinished_erasures() -> None:
+    """R9-284 review M2: a failed erasure, or one unfinished for 15 minutes, raises an alert."""
+    check = (KIT / "bin" / "erasurecheck.sh").read_text(encoding="utf-8")
+    assert "state = 'failed'" in check
+    assert "state <> 'complete'" in check
+    assert 'STALL_MINUTES="${OP_ERASURE_STALL_MINUTES:-15}"' in check
+    assert "exit 1" in check
+    timer = (KIT / "systemd" / "open-persona-erasurecheck.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=hourly" in timer
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert "open-persona-erasurecheck.timer" in provision.split("systemctl enable --now", 1)[1]

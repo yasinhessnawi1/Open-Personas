@@ -121,7 +121,10 @@ from persona_api.jobs.handlers.file_extract import (
     file_extract_queue_ready,
     register_file_extract_handler,
 )
-from persona_api.jobs.handlers.persona_erase import register_persona_erase_tenant
+from persona_api.jobs.handlers.persona_erase import (
+    build_persona_erase_sweep,
+    register_persona_erase_tenant,
+)
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.handlers.title_refresh import (
     build_title_refresh_generator,
@@ -1832,6 +1835,12 @@ def start_in_process_worker(
         revival_sweep_builder=_revival_sweep_builder,
         title_backfill_builder=_title_backfill_builder,
         on_drain=leg_drain.request_drain,
+        # R9-284 (review M2): erasures whose job died, or whose request failed between the
+        # row delete and the enqueue, are resumed on the maintenance cadence; the erasure
+        # lock makes a resume beside a live run a no-op.
+        maintenance_hooks=(
+            (build_persona_erase_sweep(platform_engine),) if platform_engine is not None else ()
+        ),
     )
     handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()

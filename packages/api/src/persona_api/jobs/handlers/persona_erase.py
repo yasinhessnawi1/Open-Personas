@@ -15,19 +15,23 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from persona.errors import PermanentJobError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
+from persona.logging import get_logger
 from persona.stores.postgres import PostgresBackend
 from pydantic import field_validator
 from sqlalchemy import or_, select
 
 from persona_api.db.audit_factory import build_audit_logger
+from persona_api.db.engine import aware_utc
 from persona_api.db.models import jobs as jobs_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
+from persona_api.jobs.queue import JobQueue
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import (
     PERSONA_ERASE_JOB_TYPE,
@@ -44,12 +48,16 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
     from persona_api.config import APIConfig
-    from persona_api.jobs.queue import JobQueue, JobRecord
+    from persona_api.jobs.queue import JobRecord
     from persona_api.services.erasure_ledger import Erasure
     from persona_api.storage import FileStorage
 
 __all__ = [
     "PERSONA_ERASE_JOB_TYPE",
+    "STALL_AFTER",
+    "PersonaEraseSweep",
+    "build_persona_erase_sweep",
+    "stalled_persona_erasures",
     "PersonaEraseHandler",
     "PersonaErasePayload",
     "build_persona_erase_deps",
@@ -61,6 +69,8 @@ __all__ = [
     "resume_persona_erasures",
     "resume_token",
 ]
+
+_log = get_logger("api.erasure")
 
 _ERASURE_ID = re.compile(r"erasure_[0-9a-f]{32}")
 _TOKEN = re.compile(r"[0-9]{0,32}")
@@ -252,3 +262,57 @@ def resume_persona_erasures(*, engine: Engine, run: Callable[[Erasure, str], obj
     for erasure in orphaned:
         run(erasure, resume_token(erasure))
     return len(orphaned)
+
+
+#: An erasure unfinished for longer than this is stalled: the operator is told.
+STALL_AFTER = timedelta(minutes=15)
+
+
+def stalled_persona_erasures(engine: Engine, *, now: datetime) -> list[Erasure]:
+    """Unfinished persona erasures that failed, or that have been running too long."""
+    stalled = []
+    for erasure in ErasureLedger(engine).unfinished():
+        if erasure.subject_kind is not SubjectKind.PERSONA:
+            continue
+        requested = aware_utc(erasure.requested_at)
+        too_old = requested is not None and now - requested >= STALL_AFTER
+        if erasure.state is ErasureState.FAILED or too_old:
+            stalled.append(erasure)
+    return stalled
+
+
+class PersonaEraseSweep:
+    """The periodic half of resuming (review M2): resume what has no live job, report stalls.
+
+    Each stalled erasure is reported once per process, as an ERROR log line starting
+    ``OPERATOR ALERT``: the api cannot reach the host's alert marker, so the host's own
+    ``bin/erasurecheck.sh`` timer is what raises the kit's alert (deploy/server).
+    """
+
+    def __init__(self, *, engine: Engine, run: Callable[[Erasure, str], object]) -> None:
+        self._engine = engine
+        self._run = run
+        self._reported: set[str] = set()
+
+    def __call__(self) -> int:
+        resumed = resume_persona_erasures(engine=self._engine, run=self._run)
+        for erasure in stalled_persona_erasures(self._engine, now=datetime.now(UTC)):
+            if erasure.id in self._reported:
+                continue
+            self._reported.add(erasure.id)
+            _log.error(
+                "OPERATOR ALERT: persona erasure stalled erasure={eid} state={state} error={code}",
+                eid=erasure.id,
+                state=erasure.state.value,
+                code=erasure.error_code or "none",
+            )
+        return resumed
+
+
+def build_persona_erase_sweep(platform_engine: Engine) -> PersonaEraseSweep:
+    """The worker's sweep: resumes go to the queue on the platform engine."""
+    queue = JobQueue(platform_engine)
+    return PersonaEraseSweep(
+        engine=platform_engine,
+        run=lambda erasure, token: enqueue_persona_erase(queue, erasure, token=token),
+    )

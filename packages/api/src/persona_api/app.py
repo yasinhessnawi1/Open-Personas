@@ -916,7 +916,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             in_process_worker = None
     app.state.in_process_worker = in_process_worker
-    # R9-284: an erasure whose job died, or whose process stopped mid-way, carries on.
+    # R9-284: an erasure whose job died, or whose process stopped mid-way, carries on; a
+    # worker-less process keeps sweeping for them (review M2).
     app.state.erasure_resume_task = erasure_start.resume_persona_erasures_on_startup(app.state)
 
     # Spec I1 (T2, D-I1-17): host the connector transports IN THIS PROCESS behind
@@ -1153,6 +1154,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:
             await app.state.telemetry_buffer.aclose()
+        # R9-284: the periodic erasure sweep of a worker-less process (a finished task where a
+        # worker sweeps instead).
+        erasure_resume_task = getattr(app.state, "erasure_resume_task", None)
+        if erasure_resume_task is not None:
+            erasure_resume_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await erasure_resume_task
         if in_process_worker is not None:
             await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
         if embedded_connectors is not None:

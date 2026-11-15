@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from persona_api.app import create_app
 from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig
+from persona_api.jobs.handlers.persona_erase import PersonaEraseSweep
 from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimiter
 from persona_api.services import audit_service, erasure_start
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -229,12 +230,83 @@ def test_an_unfinished_erasure_is_finished_at_the_next_start(seeded: Seeded) -> 
     )
 
     async def _boot() -> None:
-        task = erasure_start.resume_persona_erasures_on_startup(state)
+        task = erasure_start.resume_persona_erasures_on_startup(state, interval_seconds=0.05)
         assert task is not None
-        await task
+        for _ in range(600):
+            if _state(seeded) is ErasureState.COMPLETE:
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
 
     asyncio.run(_boot())
 
     assert _state(seeded) is ErasureState.COMPLETE
     assert ids_naming(seeded.engine, "personas", PERSONA) == []
     assert _memory(seeded, PERSONA) == 0
+
+
+def test_a_failure_after_the_row_delete_is_picked_up_by_the_sweep(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M2: a 500 between the row delete and the hand-off leaves an erasure no job holds.
+
+    The persona is already gone from the owner's view; the next sweep finishes the rest.
+    """
+
+    def _broken(*_args: Any, **_kwargs: Any) -> bool:  # noqa: ANN401
+        raise RuntimeError("the queue is unavailable")
+
+    monkeypatch.setattr(erasure_start, "dispatch_persona_erasure", _broken)
+    app_client = _client(seeded)
+    client = TestClient(app_client.app, raise_server_exceptions=False)
+
+    resp = client.delete(f"/v1/personas/{PERSONA}", headers=_auth())
+
+    assert resp.status_code == 500
+    assert _state(seeded) is ErasureState.RUNNING
+    assert ids_naming(seeded.engine, "personas", PERSONA) == []
+    assert _memory(seeded, PERSONA) == 7
+
+    deps = erasure_start.erase_deps_from_state(app_client.app.state)
+    assert deps is not None
+    sweep = PersonaEraseSweep(
+        engine=seeded.engine,
+        run=lambda erasure, _token: erasure_start.run_persona_erasure_inline(deps, erasure),
+    )
+    assert sweep() == 1
+
+    assert _state(seeded) is ErasureState.COMPLETE
+    assert _memory(seeded, PERSONA) == 0
+
+
+def test_a_process_with_no_worker_keeps_sweeping(seeded: Seeded) -> None:
+    """Review M2: an erasure stranded after start is finished by a later sweep, not a restart."""
+    state = SimpleNamespace(
+        platform_engine=seeded.engine,
+        memory_backend=seeded.memory,
+        audit_logger=seeded.audit,
+        file_storage=seeded.storage,
+        workspace_root=seeded.workspace_root,
+        audit_root=seeded.audit_root,
+        job_queue=None,
+        in_process_worker=None,
+    )
+
+    async def _run() -> None:
+        task = erasure_start.resume_persona_erasures_on_startup(state, interval_seconds=0.05)
+        assert task is not None
+        await asyncio.sleep(0.3)  # the first sweeps find nothing
+        with seeded.engine.connect() as conn:
+            captured = capture_persona(conn, owner_id=OWNER, persona_id=PERSONA)
+        ErasureLedger(seeded.engine).claim(
+            owner_id=OWNER, subject_kind=SubjectKind.PERSONA, subject_id=PERSONA, captured=captured
+        )
+        for _ in range(600):
+            if _state(seeded) is ErasureState.COMPLETE:
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(_run())
+
+    assert _state(seeded) is ErasureState.COMPLETE

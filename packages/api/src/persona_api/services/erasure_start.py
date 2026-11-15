@@ -26,10 +26,10 @@ from persona.logging import get_logger
 
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.persona_erase import (
+    PersonaEraseSweep,
     build_persona_erase_deps,
     enqueue_persona_erase,
     persona_erase_queue_available,
-    resume_persona_erasures,
 )
 from persona_api.services import persona_service
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
@@ -138,27 +138,56 @@ def dispatch_persona_erasure(state: Any, erasure: Erasure, *, token: str = "") -
     return True
 
 
-def resume_persona_erasures_on_startup(state: Any) -> asyncio.Task[None] | None:  # noqa: ANN401
-    """Hand every unfinished persona erasure back to the job, or run them inline in a thread.
+#: How often a process with no worker for the erase job sweeps for unfinished erasures.
+INLINE_SWEEP_SECONDS = 300.0
+
+
+def resume_persona_erasures_on_startup(
+    state: Any,  # noqa: ANN401 - app.state
+    *,
+    interval_seconds: float = INLINE_SWEEP_SECONDS,
+) -> asyncio.Task[None] | None:
+    """Resume unfinished persona erasures now, and keep sweeping where no worker will.
+
+    Each sweep hands an erasure with no live job to the queue, or runs it inline in a thread,
+    and reports a stalled one (:class:`PersonaEraseSweep`). Where a worker here consumes the
+    erase job, its maintenance cadence sweeps from then on and this runs once; otherwise
+    (legacy SQLite, a worker-less boot) it repeats every ``interval_seconds`` until the task
+    is cancelled at shutdown. A failed sweep is logged and never stops the process.
 
     Returns the background task (held by the caller) or ``None`` when there is nothing to run
-    on. A failure to read the ledger is logged and never stops the process from starting.
+    on.
     """
     deps = erase_deps_from_state(state)
     if deps is None:
         return None
 
-    def _resume() -> None:
-        def _run(erasure: Erasure, token: str) -> None:
-            if not dispatch_persona_erasure(state, erasure, token=token):
-                run_persona_erasure_inline(deps, erasure)
+    def _run(erasure: Erasure, token: str) -> None:
+        if not dispatch_persona_erasure(state, erasure, token=token):
+            run_persona_erasure_inline(deps, erasure)
 
+    sweep = PersonaEraseSweep(engine=deps.engine, run=_run)
+
+    def _once() -> None:
         try:
-            count = resume_persona_erasures(engine=deps.engine, run=_run)
-        except Exception as exc:  # noqa: BLE001 - startup must not fail on this; logged loudly
+            count = sweep()
+        except Exception as exc:  # noqa: BLE001 - must not stop the process; logged loudly
             _log.error("could not resume unfinished erasures error={err}", err=type(exc).__name__)
             return
         if count:
             _log.warning("resumed unfinished persona erasures count={n}", n=count)
 
-    return asyncio.get_running_loop().create_task(asyncio.to_thread(_resume))
+    def _worker_sweeps() -> bool:
+        return persona_erase_queue_available(
+            job_queue=getattr(state, "job_queue", None),
+            in_process_worker=getattr(state, "in_process_worker", None),
+        )
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.to_thread(_once)
+            if _worker_sweeps():
+                return
+            await asyncio.sleep(interval_seconds)
+
+    return asyncio.get_running_loop().create_task(_loop())
