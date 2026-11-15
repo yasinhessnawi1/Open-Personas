@@ -212,6 +212,7 @@ def _unmerge_members_of(conn: Connection, owner_id: str, doomed: list[str]) -> i
             nodes_t.c.merged_into.in_(doomed),
             nodes_t.c.id.not_in(doomed),
         )
+        .order_by(nodes_t.c.id)
         .with_for_update()
     ).all()
     for member in members:
@@ -325,7 +326,9 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         )
         .where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, persona_id))
         # Locked until the rewrite commits: a concurrent extend (synthesis, consolidation)
-        # waits, instead of appending to a trail this is about to overwrite (review L1).
+        # waits, instead of appending to a trail this is about to overwrite (review L1). In id
+        # order, so two transactions locking overlapping rows cannot deadlock.
+        .order_by(nodes_t.c.id)
         .with_for_update()
     ).all()
     plan = plan_trails(
@@ -361,6 +364,7 @@ def _versions(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int
     rows = conn.execute(
         select(versions_t.c.version_key, versions_t.c.node_id, versions_t.c.provenance)
         .where(versions_t.c.owner_id == owner_id, _naming(versions_t.c.provenance, persona_id))
+        .order_by(versions_t.c.version_key)
         .with_for_update()
     ).all()
     plan = plan_trails(

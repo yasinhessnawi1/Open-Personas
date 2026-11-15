@@ -246,3 +246,22 @@ def test_the_mirror_id_is_the_one_consolidation_gave() -> None:
     assert into == "x::temporal::k"
     assert mirror_id_for("m", "k", "causal", member_id="m", canonical_id="k") is None
     assert mirror_id_for("a", "b", "causal", member_id="m", canonical_id="k") is None
+
+
+def test_every_row_lock_the_graph_step_takes_is_taken_in_a_fixed_order() -> None:
+    """Review LOW: two transactions locking overlapping rows in any order can deadlock."""
+    import ast  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    from persona_api.services import erasure_graph  # noqa: PLC0415
+
+    tree = ast.parse(inspect.getsource(erasure_graph))
+    locked = unordered = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "with_for_update":
+            locked += 1
+            chain = ast.unparse(node.value)
+            if ".order_by(" not in chain and "== canonical_id" not in chain:
+                unordered += 1
+    assert locked >= 5
+    assert unordered == 0
