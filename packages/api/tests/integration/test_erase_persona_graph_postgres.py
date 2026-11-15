@@ -19,6 +19,7 @@ from persona.graph.index import make_graph_index
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
+    EntityAlias,
     LinkType,
     NodeKind,
     NodeProvenance,
@@ -111,6 +112,10 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
             ),
             vector,
         )
+    # Review H-1: a surface the persona gave another persona's entity, and one from before
+    # aliases carried a persona (left alone: whose it was is not known).
+    backend.add_alias(_OWNER, "ent_theirs", EntityAlias(surface="my doctor", persona_id=_PERSONA))
+    backend.add_alias(_OWNER, "ent_theirs", EntityAlias(surface="the GP"))
     for node_id, entity_id in (
         ("only", "ent_gone"),
         ("theirs", "ent_kept"),
@@ -153,6 +158,8 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
     assert set(entities) == {"ent_kept", "ent_theirs"}
     assert entities["ent_kept"] is None
     assert entities["ent_theirs"]["persona_id"] == _OTHER
+    aliases = _column(graph, "SELECT id, aliases FROM graph_entities WHERE owner_id = :o")
+    assert [a["surface"] for a in aliases["ent_theirs"]] == ["the GP"]
 
     assert counts == {
         "nodes_deleted": 1,
@@ -164,6 +171,7 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
         "edges_deleted": 1,
         "entities_deleted": 1,
         "entities_unattributed": 1,
+        "entity_aliases_removed": 1,
     }
 
 

@@ -77,7 +77,11 @@ class EntityResolver:
                 owner_id=owner_id, mention=surface, candidates=verdict.candidates
             )
             if chosen is not None:
-                self._registry.add_alias(owner_id, chosen, EntityAlias(surface=surface))
+                # R9-284: the surface came through this persona; erasing it removes it.
+                persona_id = provenance.persona_id if provenance is not None else None
+                self._registry.add_alias(
+                    owner_id, chosen, EntityAlias(surface=surface, persona_id=persona_id)
+                )
                 return chosen
         # SEPARATE, a judge-rejected AMBIGUOUS, or a malformed MERGE (no id): create.
         entity = self._registry.create_entity(

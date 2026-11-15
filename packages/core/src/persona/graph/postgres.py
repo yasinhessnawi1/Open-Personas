@@ -842,7 +842,10 @@ class PostgresGraphBackend:
             else entity.provenance.model_dump(mode="json"),
             "created_at": entity.created_at,
         }
-        named = [entity.provenance.persona_id if entity.provenance else None]
+        named = [
+            entity.provenance.persona_id if entity.provenance else None,
+            *(a.persona_id for a in entity.aliases),
+        ]
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, named)
             conn.execute(pg_insert(graph_entities).values(**row))
@@ -867,7 +870,7 @@ class PostgresGraphBackend:
             .values(aliases=[a.model_dump(mode="json") for a in merged])
         )
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, [getattr(alias, "persona_id", None)])
+            self._hold_personas(conn, owner_id, [alias.persona_id])
             conn.execute(stmt)
 
     def find_entity_by_text(self, owner_id: str, normalized_name: str) -> CanonicalEntity | None:

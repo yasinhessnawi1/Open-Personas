@@ -14,6 +14,7 @@ from persona_api.services.erasure_graph import (
     plan_trails,
     unmerged,
     without_aliases,
+    without_persona_aliases,
 )
 
 _PERSONA = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -191,3 +192,14 @@ def test_a_member_without_a_usable_record_is_still_freed() -> None:
     assert unmerged({"kept": "yes"}) == (None, {"kept": "yes"})
     assert unmerged({"_k7_merge": json.dumps({"canonical": "c"})}) == (None, {})
     assert unmerged(None) == (None, {})
+
+
+def test_an_entity_loses_the_surfaces_the_persona_gave_and_keeps_the_rest() -> None:
+    """Review H-1: an alias with no persona (older than the field) is not guessed at."""
+    mine = {"surface": "my doctor", "confidence": 0.9, "persona_id": _PERSONA}
+    theirs = {"surface": "the GP", "confidence": None, "persona_id": _OTHER}
+    unknown = {"surface": "Dr. Hansen", "confidence": None}
+
+    assert without_persona_aliases([mine, theirs, unknown], _PERSONA) == [theirs, unknown]
+    assert without_persona_aliases([theirs, unknown], _PERSONA) is None
+    assert without_persona_aliases([], _PERSONA) is None

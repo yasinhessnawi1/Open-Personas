@@ -15,7 +15,8 @@ graph. It deletes what only that persona contributed and removes that persona fr
   as dated stubs with nothing of the persona left in them, and consolidation's entries go;
 - version snapshots get the same treatment, and a snapshot that was only the persona's goes;
 - an edge the persona asserted goes; an entity it established loses that provenance, and goes
-  if no node links to it any more.
+  if no node links to it any more; an entity's aliases lose the surfaces the persona gave
+  (review H-1; an alias written before aliases carried a persona stays, unattributed).
 
 Consolidation also moves things between nodes, and that is undone where it would strand them:
 
@@ -56,6 +57,7 @@ __all__ = [
     "plan_trails",
     "unmerged",
     "without_aliases",
+    "without_persona_aliases",
 ]
 
 Trail = list[dict[str, Any]]
@@ -344,7 +346,43 @@ def _edges_and_entities(conn: Connection, owner_id: str, persona_id: str) -> dic
         "edges_deleted": edges,
         "entities_deleted": entities,
         "entities_unattributed": unattributed,
+        "entity_aliases_removed": _strip_entity_aliases(conn, owner_id, persona_id),
     }
+
+
+def without_persona_aliases(aliases: Iterable[Any], persona_id: str) -> list[Any] | None:
+    """An entity's alias list without the surfaces this persona contributed (review H-1).
+
+    ``None`` when nothing changes. An alias written before aliases carried a persona has no
+    ``persona_id`` and stays: whose it was is not known, and the erasure does not guess.
+    """
+    aliases = list(aliases)
+    kept = [a for a in aliases if not _is_persona(a, persona_id)]
+    return None if len(kept) == len(aliases) else kept
+
+
+def _strip_entity_aliases(conn: Connection, owner_id: str, persona_id: str) -> int:
+    rows = conn.execute(
+        select(graph_entities.c.id, graph_entities.c.aliases)
+        .where(
+            graph_entities.c.owner_id == owner_id,
+            _naming(graph_entities.c.aliases, persona_id),
+        )
+        .order_by(graph_entities.c.id)
+        .with_for_update()
+    ).all()
+    removed = 0
+    for entity_id, aliases in rows:
+        kept = without_persona_aliases(aliases or [], persona_id)
+        if kept is None:
+            continue
+        removed += len(aliases) - len(kept)
+        conn.execute(
+            update(graph_entities)
+            .where(graph_entities.c.owner_id == owner_id, graph_entities.c.id == entity_id)
+            .values(aliases=kept)
+        )
+    return removed
 
 
 def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:

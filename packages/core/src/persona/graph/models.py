@@ -385,12 +385,16 @@ class EntityAlias(BaseModel):
         confidence: Optional [0, 1] confidence that this surface maps to the
             canonical entity — set by the resolver (T5); ``None`` for an alias
             asserted without a score.
+        persona_id: The persona whose conversation contributed this surface (R9-284), so
+            erasing that persona removes it. ``None`` for the user's own or a system alias,
+            and for aliases written before this field existed.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     surface: str
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    persona_id: str | None = None
 
 
 class CanonicalEntity(BaseModel):
