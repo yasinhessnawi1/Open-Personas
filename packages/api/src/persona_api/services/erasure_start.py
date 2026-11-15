@@ -37,6 +37,7 @@ from persona_api.jobs.handlers.persona_erase import (
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
 from persona_api.services.erasure_lock import erasure_lock
 from persona_api.services.erasure_service import (
+    ErasureRaceError,
     PersonaEraseDeps,
     capture_persona,
     delete_row_capturing,
@@ -86,7 +87,15 @@ def begin_persona_erasure(
         if not held:
             return erasure
         ledger.record_step(erasure.id, "fence", fence_persona(platform_engine, erasure))
-        if delete_row_capturing(rls_engine, erasure, ledger_engine=platform_engine) == 0:
+        try:
+            deleted = delete_row_capturing(rls_engine, erasure, ledger_engine=platform_engine)
+        except ErasureRaceError:
+            # Conversations kept appearing under the row lock. The erasure is claimed and
+            # fenced; its job deletes the row and retries this race (review LOW): accepted,
+            # not a 500.
+            _log.warning("persona row delete raced; left to the job erasure={eid}", eid=erasure.id)
+            return erasure
+        if deleted == 0:
             raise not_found
         ledger.record_step(erasure.id, "row", {"personas": 1})
     return erasure

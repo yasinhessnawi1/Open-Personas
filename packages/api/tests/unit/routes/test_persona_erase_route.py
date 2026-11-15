@@ -318,3 +318,21 @@ def test_a_process_with_no_worker_keeps_sweeping(seeded: Seeded) -> None:
     asyncio.run(_run())
 
     assert _state(seeded) is ErasureState.COMPLETE
+
+
+def test_a_row_delete_that_keeps_racing_is_accepted_and_left_to_the_job(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review LOW: conversations appearing under the row lock are a retry, not a 500."""
+    from persona_api.services.erasure_service import ErasureRaceError  # noqa: PLC0415
+
+    def _racing(*_args: Any, **_kwargs: Any) -> int:  # noqa: ANN401
+        raise ErasureRaceError("conversations kept appearing")
+
+    monkeypatch.setattr(erasure_start, "delete_row_capturing", _racing)
+
+    resp = _client(seeded).delete(f"/v1/personas/{PERSONA}", headers=_auth())
+
+    assert resp.status_code == 202, resp.text
+    assert _state(seeded) is ErasureState.COMPLETE, "the erasure's own row step finished it"
+    assert ids_naming(seeded.engine, "personas", PERSONA) == []
