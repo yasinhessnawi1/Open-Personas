@@ -32,6 +32,7 @@ from persona_api.db.models import jobs as jobs_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
 from persona_api.jobs.queue import JobQueue
+from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import (
     PERSONA_ERASE_JOB_TYPE,
@@ -267,6 +268,10 @@ def resume_persona_erasures(*, engine: Engine, run: Callable[[Erasure, str], obj
 #: An erasure unfinished for longer than this is stalled: the operator is told.
 STALL_AFTER = timedelta(minutes=15)
 
+#: How long after an erasure completes the sweep runs its graph step once more (review H2):
+#: the longest a job that was running at completion can keep its lease.
+GRAPH_RECHECK_AFTER = timedelta(seconds=LONG_LEASE.lease_seconds)
+
 
 def stalled_persona_erasures(engine: Engine, *, now: datetime) -> list[Erasure]:
     """Unfinished persona erasures that failed, or that have been running too long."""
@@ -293,9 +298,11 @@ class PersonaEraseSweep:
         self._engine = engine
         self._run = run
         self._reported: set[str] = set()
+        self._graph_rechecked: set[str] = set()
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run)
+        self._recheck_the_graph(datetime.now(UTC))
         for erasure in stalled_persona_erasures(self._engine, now=datetime.now(UTC)):
             if erasure.id in self._reported:
                 continue
@@ -307,6 +314,34 @@ class PersonaEraseSweep:
                 code=erasure.error_code or "none",
             )
         return resumed
+
+    def _recheck_the_graph(self, now: datetime) -> None:
+        """Run the graph step once more for each recently finished erasure (review H2).
+
+        The backstop behind the synthesizer's own check: a job that was already past every
+        check when the erasure finished can still write. Waited until a long lease has passed
+        since completion, so any job that was running then has finished or lost its lease; the
+        window closes later, so a sweep that missed a few cycles still gets to it. Once per
+        erasure per process. Counts above zero are logged, never recorded: the erasure is
+        complete.
+        """
+        settled = now - GRAPH_RECHECK_AFTER
+        for erasure in ErasureLedger(self._engine).completed_since(now - 3 * GRAPH_RECHECK_AFTER):
+            done = aware_utc(erasure.completed_at)
+            if erasure.subject_kind is not SubjectKind.PERSONA or done is None or done > settled:
+                continue
+            if erasure.id in self._graph_rechecked:
+                continue
+            self._graph_rechecked.add(erasure.id)
+            counts = erase_persona_graph(
+                self._engine, owner_id=erasure.owner_id, persona_id=erasure.subject_id
+            )
+            if any(counts.values()):
+                _log.warning(
+                    "late graph writes removed after an erasure erasure={eid} counts={counts}",
+                    eid=erasure.id,
+                    counts=counts,
+                )
 
 
 def build_persona_erase_sweep(platform_engine: Engine) -> PersonaEraseSweep:

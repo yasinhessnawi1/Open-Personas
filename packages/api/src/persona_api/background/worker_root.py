@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -136,6 +137,7 @@ from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
+from persona_api.services import persona_service
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
@@ -287,7 +289,12 @@ def build_worker_registry(
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(
-        graph_store=graph_store, registry=entity_registry, backend=backend
+        graph_store=graph_store,
+        registry=entity_registry,
+        backend=backend,
+        # R9-284 review H2: a synthesis past its read writes nothing for an erased persona.
+        # On the RLS engine, inside the job owner's scope.
+        persona_exists=functools.partial(persona_service.persona_exists, rls_engine),
     )
     registry = JobRegistry()
 

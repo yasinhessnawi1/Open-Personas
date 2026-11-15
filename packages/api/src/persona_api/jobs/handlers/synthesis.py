@@ -191,12 +191,21 @@ class SynthesisHandler:
                     "candidates": str(len(outcomes)),
                 },
             )
-            self._repo.advance(
-                conn,
-                owner_id=context.owner_id,
-                payload=payload,
-                high_water_mark=window.high_water_mark,
-            )
+            # R9-284 review H2: the conversation (or its persona) can be erased while the
+            # model call is awaited. The synthesizer checks the persona before each merge;
+            # this is the handler's own look, before it writes the marker.
+            if self._repo.read(conn, owner_id=context.owner_id, payload=payload) is None:
+                _logger.info(
+                    "synthesis interaction deleted during the model call",
+                    interaction_id=payload.interaction_id,
+                )
+            else:
+                self._repo.advance(
+                    conn,
+                    owner_id=context.owner_id,
+                    payload=payload,
+                    high_water_mark=window.high_water_mark,
+                )
 
         # Spec M3 (T5): owner-bill the extractor's real cost, keyed on the job's own
         # idempotency key so a re-delivered synthesis re-runs the extractor and hits the

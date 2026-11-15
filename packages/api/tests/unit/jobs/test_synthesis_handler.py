@@ -249,3 +249,29 @@ def test_the_worker_root_meters_synthesis_and_passes_a_credits_policy() -> None:
 
     assert metered == [True], "the synthesis backend is not metered; its usage cannot be billed"
     assert policies == [True], "the synthesis handler is registered without a credits policy"
+
+
+class _GoneAfterTheCallRepo(_FakeRepo):
+    """The conversation exists at the read and is gone once the model call returns."""
+
+    def __init__(self, data: InteractionData) -> None:
+        super().__init__(data)
+        self.reads = 0
+
+    def read(
+        self, conn: object, *, owner_id: str, payload: SynthesisJobPayload
+    ) -> InteractionData | None:
+        self.reads += 1
+        return self._data if self.reads == 1 else None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_deleted_during_the_model_call_is_not_advanced() -> None:
+    """R9-284 review H2: the handler looks again after the call, before it writes anything."""
+    ctx, repo, runner = _FakeContext(), _GoneAfterTheCallRepo(_data(0)), _FakeRunner()
+
+    await SynthesisHandler(runner=runner, repository=repo).handle(_payload(), ctx)  # type: ignore[arg-type]
+
+    assert len(runner.calls) == 1
+    assert repo.reads == 2
+    assert repo.advanced == []

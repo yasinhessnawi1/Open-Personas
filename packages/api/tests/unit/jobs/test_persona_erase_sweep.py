@@ -118,3 +118,38 @@ def test_every_maintenance_hook_runs_and_one_failing_does_not_stop_the_rest(
     worker.run_maintenance()
 
     assert ran == ["broken", "erasures"]
+
+
+def test_a_finished_erasure_has_its_graph_step_run_once_more_after_a_lease(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review H2's backstop: a job past every check when the erasure finished can still write."""
+    lease = persona_erase.GRAPH_RECHECK_AFTER
+    ages = {
+        "too_fresh": lease / 2,
+        "settled": lease + timedelta(seconds=1),
+        "long_ago": 4 * lease,
+    }
+    ids = {}
+    for letter, (name, age) in zip("abc", ages.items(), strict=True):
+        ids[name] = _claim(engine, _persona(letter))
+        ErasureLedger(engine).complete(ids[name])
+        with engine.begin() as conn:
+            conn.execute(
+                update(erasures_t)
+                .where(erasures_t.c.id == ids[name])
+                .values(completed_at=_NOW - age)
+            )
+    rechecked: list[str] = []
+    monkeypatch.setattr(
+        persona_erase,
+        "erase_persona_graph",
+        lambda _engine, *, persona_id, **_kw: rechecked.append(persona_id) or {},
+    )
+    monkeypatch.setattr(persona_erase, "datetime", _FrozenClock)
+    sweep = PersonaEraseSweep(engine=engine, run=lambda _e, _t: None)
+
+    sweep()
+    sweep()
+
+    assert rechecked == [_persona("b")]

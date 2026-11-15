@@ -59,6 +59,7 @@ __all__ = [
     "load_persona_from_yaml",
     "notify_persona_ready",
     "persona_display_name",
+    "persona_exists",
     "persona_name_from_yaml",
     "remove_persona_folder",
     "set_avatar_url",
@@ -663,6 +664,13 @@ def delete_persona(
             raise not_found
         if workspace_root is not None:
             remove_persona_folder(workspace_root, owner_id=owner_id, persona_id=persona_id)
+
+
+def persona_exists(engine: Engine, persona_id: str) -> bool:
+    """Whether the persona's row is still there, as the engine's role sees it (R9-284)."""
+    with engine.connect() as conn:
+        found = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id))
+        return found.first() is not None
 
 
 def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> int:
