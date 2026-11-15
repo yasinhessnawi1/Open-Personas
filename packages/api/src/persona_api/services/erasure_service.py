@@ -69,6 +69,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AUDIT_CONTENT_KEYS",
+    "PERMANENT_REFUSALS",
+    "ErasureRaceError",
     "PERSONA_ERASE_JOB_TYPE",
     "STEPS",
     "PersonaEraseDeps",
@@ -106,6 +108,14 @@ class PersonaEraseDeps:
 
 
 Step = Callable[[PersonaEraseDeps, "Erasure"], dict[str, int]]
+
+
+#: Ledger error codes no retry can change: the sweep leaves these to the operator alert.
+PERMANENT_REFUSALS = frozenset({"not_the_owners_persona"})
+
+
+class ErasureRaceError(RuntimeError):
+    """A race the next attempt can win (rows kept appearing under the lock): retried."""
 
 
 def _refuse(reason: str) -> ErasureRecordError:
@@ -289,7 +299,8 @@ def delete_row_capturing(
                 return delete_persona_row(conn, owner_id=owner, persona_id=pid)
         ledger.add_captured(erasure.id, "conversations", sorted(new))
         known |= new
-    raise _refuse("conversations_kept_appearing")
+    # Not a refusal: the next attempt may find them all (review L2).
+    raise ErasureRaceError("conversations kept appearing under the row lock")
 
 
 def _step_row(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:

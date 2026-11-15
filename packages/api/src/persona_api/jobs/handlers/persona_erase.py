@@ -35,6 +35,7 @@ from persona_api.jobs.queue import JobQueue
 from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import (
+    PERMANENT_REFUSALS,
     PERSONA_ERASE_JOB_TYPE,
     PersonaEraseDeps,
     erase_persona,
@@ -259,7 +260,13 @@ def resume_persona_erasures(*, engine: Engine, run: Callable[[Erasure, str], obj
         e for e in ErasureLedger(engine).unfinished() if e.subject_kind is SubjectKind.PERSONA
     ]
     with engine.connect() as conn:
-        orphaned = [e for e in pending if not _has_live_job(conn, e.id)]
+        orphaned = [
+            e
+            for e in pending
+            # A permanent refusal would be re-enqueued every sweep forever; the stall alert
+            # reports it instead (review L2).
+            if e.error_code not in PERMANENT_REFUSALS and not _has_live_job(conn, e.id)
+        ]
     for erasure in orphaned:
         run(erasure, resume_token(erasure))
     return len(orphaned)

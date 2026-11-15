@@ -24,6 +24,7 @@ from persona_api.jobs.handlers.persona_erase import (
     resume_persona_erasures,
     resume_token,
 )
+from persona_api.services import erasure_service
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import PersonaEraseDeps, capture_persona
 from pydantic import ValidationError
@@ -242,3 +243,48 @@ def test_an_erasure_with_a_live_job_is_left_to_it(
 
     assert count == resumed
     assert ran == [erasure.id] * resumed
+
+
+@pytest.mark.parametrize(("code", "resumed"), [("not_the_owners_persona", 0), ("row_failed", 1)])
+def test_a_permanent_refusal_is_left_to_the_alert(seeded: Seeded, code: str, resumed: int) -> None:
+    """Review L2: re-enqueueing a refusal every 30 seconds would run forever."""
+    erasure = _claim(seeded)
+    ErasureLedger(seeded.engine).fail(erasure.id, code)
+
+    count = resume_persona_erasures(engine=seeded.engine, run=lambda _e, _t: None)
+
+    assert count == resumed
+
+
+def test_rows_that_keep_appearing_are_retried_not_refused(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L2: the row lock race is one the next attempt can win."""
+    from _erase_seed import row  # noqa: PLC0415 - one helper, one test
+
+    erasure = _claim(seeded)
+    real_add = ErasureLedger.add_captured
+    started = iter(range(10))
+
+    def _another_starts(self: ErasureLedger, erasure_id: str, name: str, ids: list[str]) -> None:
+        real_add(self, erasure_id, name, ids)
+        with seeded.engine.begin() as conn:  # a new conversation every time one is recorded
+            row(
+                conn,
+                "conversations",
+                id=f"convrace{next(started)}",
+                owner_id=OWNER,
+                persona_id=PERSONA,
+                origin="chat",
+            )
+
+    _another_starts(ErasureLedger(seeded.engine), erasure.id, "conversations", [])
+    monkeypatch.setattr(ErasureLedger, "add_captured", _another_starts)
+
+    with pytest.raises(erasure_service.ErasureRaceError):
+        asyncio.run(_handler(seeded).handle(_payload(erasure), _Context(OWNER)))  # type: ignore[arg-type]
+
+    failed = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
+    assert failed is not None
+    assert failed.error_code == "row_failed"
+    assert failed.error_code not in erasure_service.PERMANENT_REFUSALS
