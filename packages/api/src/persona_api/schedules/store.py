@@ -46,7 +46,9 @@ from persona_api.db.models import schedules as schedules_t
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine, RowMapping
+    from collections.abc import Sequence
+
+    from sqlalchemy import Connection, Engine, RowMapping
 
 __all__ = ["ScheduleStore"]
 
@@ -602,6 +604,24 @@ class ScheduleStore:
             target=schedule_id,
             metadata={},
         )
+
+    @staticmethod
+    def delete_for_erasure(conn: Connection, *, owner_id: str, schedule_ids: Sequence[str]) -> int:
+        """Delete an erased persona's schedules inside the erasure's transaction (R9-284).
+
+        The one schedule-write door still holds: this is the erasure's way through it. Owner
+        scoped by an explicit predicate, because the erasure runs on the platform engine,
+        which bypasses row level security. Not audited per schedule: the erasure records the
+        count in its ledger and its ``persona.erase`` row. Returns how many went.
+        """
+        if not schedule_ids:
+            return 0
+        result = conn.execute(
+            delete(schedules_t).where(
+                schedules_t.c.owner_id == owner_id, schedules_t.c.id.in_(list(schedule_ids))
+            )
+        )
+        return int(result.rowcount)
 
     # --- internals ----------------------------------------------------------
 

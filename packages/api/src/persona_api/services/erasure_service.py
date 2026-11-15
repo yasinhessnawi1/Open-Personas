@@ -49,6 +49,7 @@ from persona_api.db.models import schedules as schedules_t
 from persona_api.db.models import tasks as tasks_t
 from persona_api.db.models import tool_audit_events as tool_audit_events_t
 from persona_api.errors import ErasureRecordError
+from persona_api.schedules.store import ScheduleStore
 from persona_api.services import audit_service
 from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -225,10 +226,11 @@ def fence_persona(engine: Engine, erasure: Erasure) -> dict[str, int]:
             for r in rows
             if r.id in captured or r.id == scan or _names(r.payload_template, ids)
         ]
-        if doomed:
-            conn.execute(delete(schedules_t).where(schedules_t.c.id.in_(doomed)))
+        removed = ScheduleStore.delete_for_erasure(
+            conn, owner_id=erasure.owner_id, schedule_ids=doomed
+        )
         jobs = _delete_naming(conn, jobs_t, erasure, "payload")
-    return {"schedules": len(doomed), "jobs": jobs}
+    return {"schedules": removed, "jobs": jobs}
 
 
 def _require_not_anothers(engine: Engine, erasure: Erasure) -> None:
