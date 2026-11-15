@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.graph.errors import GraphPersonaGoneError
-from persona.graph.models import ConceptNode, NodeKind, NodeProvenance
+from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
 from persona.graph.postgres import PostgresGraphBackend
 from persona.schema.chunks import WriteSource
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
@@ -92,34 +92,69 @@ def test_a_write_after_the_erasure_deleted_the_row_is_refused(
     assert _nodes(migrated_engine) == set()
 
 
-def test_a_write_holding_the_row_makes_the_erasures_delete_wait(
+def _edge(edge_id: str, src: str, dst: str) -> TypedLink:
+    return TypedLink(
+        id=edge_id,
+        src_node_id=src,
+        dst_node_id=dst,
+        link_type=LinkType.CAUSAL,
+        provenance=NodeProvenance(
+            source=WriteSource.PERSONA_SELF, persona_id=_PERSONA, written_at=_NOW
+        ),
+        created_at=_NOW,
+        valid_at=_NOW,
+    )
+
+
+@pytest.mark.parametrize("table", ["graph_nodes", "graph_edges"])
+def test_the_row_stays_held_until_the_write_commits(
     app_engine: Engine,
     migrated_engine: Engine,
     embedder: Any,  # noqa: ANN401
+    table: str,
 ) -> None:
+    """The hold and the write are one transaction: the delete waits past the write itself.
+
+    The writer is paused after its INSERT has run and before it commits. Nothing in the graph
+    references ``personas`` by foreign key, so only the hold, still open in that same
+    transaction, can make the delete wait here; a hold committed before the write (its own
+    transaction) would already be gone, and the delete would go through.
+    """
     backend = PostgresGraphBackend(engine=app_engine, persona_guard=True)
-    holding, release = threading.Event(), threading.Event()
+    vector = embedder.encode(["x"])[0]
+    if table == "graph_edges":
+        for node_id in ("a", "b"):
+            backend.insert_node(_OWNER, _node(node_id), vector)
+
+    def _write() -> None:
+        if table == "graph_nodes":
+            backend.insert_node(_OWNER, _node("racing"), vector)
+        else:
+            backend.upsert_edge(_OWNER, _edge("e_racing", "a", "b"))
+
+    written, release = threading.Event(), threading.Event()
 
     @event.listens_for(app_engine, "after_execute")
-    def _pause_after_the_hold(_conn: Any, clause: Any, *_args: Any) -> None:  # noqa: ANN401
-        if "FOR KEY SHARE" in str(clause) and not holding.is_set():
-            holding.set()
+    def _pause_after_the_write(_conn: Any, clause: Any, *_args: Any) -> None:  # noqa: ANN401
+        is_the_write = str(clause).lstrip().upper().startswith(f"INSERT INTO {table.upper()}")
+        if is_the_write and not written.is_set():
+            written.set()
             release.wait(timeout=60)
 
     errors: list[BaseException] = []
 
-    def _write() -> None:
+    def _run() -> None:
         token = current_user_id.set(_OWNER)
         try:
-            backend.insert_node(_OWNER, _node("racing"), embedder.encode(["racing"])[0])
+            _write()
         except BaseException as exc:  # noqa: BLE001 - reported to the test
             errors.append(exc)
         finally:
             current_user_id.reset(token)
 
-    writer = threading.Thread(target=_write)
+    writer = threading.Thread(target=_run)
     writer.start()
-    assert holding.wait(timeout=60), "the writer never took the persona's row"
+    assert written.wait(timeout=60), "the writer never wrote"
     try:
         with migrated_engine.begin() as conn:
             conn.execute(text("SET LOCAL lock_timeout = '1s'"))
@@ -130,6 +165,7 @@ def test_a_write_holding_the_row_makes_the_erasures_delete_wait(
         writer.join(timeout=60)
 
     assert errors == []
-    assert _nodes(migrated_engine) == {"racing"}, "the writer that held the row committed"
-    with migrated_engine.begin() as conn:  # and once it has, the delete goes through
+    if table == "graph_nodes":
+        assert "racing" in _nodes(migrated_engine), "the writer that held the row committed"
+    with migrated_engine.begin() as conn:  # once the write has committed, the delete goes through
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
