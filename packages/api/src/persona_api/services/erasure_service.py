@@ -11,6 +11,9 @@ step whose work is done adds 0 to its counts (the ledger adds, it does not overw
 that fails marks the erasure failed with a code, never the exception's message (those carry
 paths), and re-raises so the queue retries.
 
+The graph is the owner's: what only the persona contributed goes, and the persona's entries
+leave the rest (:mod:`persona_api.services.erasure_graph`).
+
 What stays, by the ruling: the store audit (ids and labels), the owner's declines and schedule
 tombstones (their persona reference is cleared), and ``audit_log`` rows with their content keys
 removed. What goes: memory in K8-D-14 order (evidence before what was derived from it, the core
@@ -46,6 +49,7 @@ from persona_api.db.models import tasks as tasks_t
 from persona_api.db.models import tool_audit_events as tool_audit_events_t
 from persona_api.errors import ErasureRecordError
 from persona_api.services import audit_service
+from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.persona_service import delete_persona_row, remove_persona_folder
 
@@ -335,15 +339,27 @@ def _step_rows(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
     return counts
 
 
+def _step_graph(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
+    """What only the persona contributed to the owner's graph, and its entries in the rest."""
+    return erase_persona_graph(
+        deps.engine, owner_id=erasure.owner_id, persona_id=erasure.subject_id
+    )
+
+
 def _step_late_writes(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
     """Anything written or enqueued while the steps above ran. Expected to be all zeros."""
-    return {**_step_memory(deps, erasure), **fence_persona(deps.engine, erasure)}
+    return {
+        **_step_memory(deps, erasure),
+        **_step_graph(deps, erasure),
+        **fence_persona(deps.engine, erasure),
+    }
 
 
 STEPS: tuple[tuple[str, Step], ...] = (
     ("fence", _step_fence),
     ("row", _step_row),
     ("memory", _step_memory),
+    ("graph", _step_graph),
     ("files", _step_files),
     ("rows", _step_rows),
     ("late_writes", _step_late_writes),

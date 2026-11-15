@@ -86,6 +86,7 @@ def make_record_user_fact_tool(
     graph_store: GraphStore,
     owner_provider: Callable[[], str | None],
     persona_id: str | None = None,
+    persona_exists: Callable[[str], bool] | None = None,
 ) -> AsyncTool:
     """Build the ``record_user_fact`` tool bound to a graph store + owner context.
 
@@ -95,6 +96,10 @@ def make_record_user_fact_tool(
             (the toolbox is built once; the owner is per-request). ``None`` ⇒ the
             write fails closed.
         persona_id: The persona recording the fact (→ provenance).
+        persona_exists: Asked at dispatch whether ``persona_id`` still exists (R9-284). The
+            graph is owner scoped, so nothing else refuses a write from a turn that was still
+            running when its persona was erased; without this it would put the persona back
+            into a graph the erasure took it out of. ``None`` skips the check.
     """
 
     @tool(name="record_user_fact", description=_GUIDANCE)
@@ -110,6 +115,12 @@ def make_record_user_fact_tool(
             return ToolResult(
                 tool_name="record_user_fact",
                 content="Nothing to record: the fact is empty.",
+                is_error=True,
+            )
+        if persona_id and persona_exists is not None and not persona_exists(persona_id):
+            return ToolResult(
+                tool_name="record_user_fact",
+                content="Not recorded: this persona has been deleted.",
                 is_error=True,
             )
         wellbeing = _coerce_category(category)
