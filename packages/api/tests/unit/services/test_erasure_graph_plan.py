@@ -13,6 +13,7 @@ from persona_api.services.erasure_graph import (
     merge_record,
     plan_trails,
     unmerged,
+    without_alias_names,
     without_aliases,
     without_persona_aliases,
 )
@@ -203,3 +204,18 @@ def test_an_entity_loses_the_surfaces_the_persona_gave_and_keeps_the_rest() -> N
     assert without_persona_aliases([mine, theirs, unknown], _PERSONA) == [theirs, unknown]
     assert without_persona_aliases([theirs, unknown], _PERSONA) is None
     assert without_persona_aliases([], _PERSONA) is None
+
+
+def test_a_consolidation_entry_stops_listing_the_personas_names() -> None:
+    """Review H-3: _accrete_aliases wrote the member's name into the canonical's trail too."""
+    other = _entry(_OTHER)
+    both = {**_consolidation(), "reason": "consolidation:r1 aliases:mine,theirs"}
+    only_mine = {**_consolidation(), "reason": "consolidation:r2 aliases:mine"}
+
+    rewritten = without_alias_names([other, both, only_mine], ["mine"])
+
+    assert rewritten == [other, {**both, "reason": "consolidation:r1 aliases:theirs"}]
+    assert without_alias_names([other, both], ["nobody"]) is None
+    assert (
+        without_alias_names([{**_entry(_OTHER), "reason": "said aliases:mine"}], ["mine"]) is None
+    )

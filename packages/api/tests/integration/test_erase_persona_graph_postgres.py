@@ -301,6 +301,14 @@ def test_a_canonical_that_stays_takes_back_what_the_personas_member_gave(
     canonical = backend.get_node(_OWNER, "q_canon")
     assert canonical is not None
     assert "p_into_q" not in canonical.metadata.get("_k7_aliases", "")
+    assert not any("p_into_q" in (p.reason or "") for p in canonical.provenance), (
+        "the consolidation entry no longer lists the erased member (review H-3)"
+    )
+    with engine.connect() as conn:
+        snapshots = conn.execute(
+            text("SELECT provenance FROM graph_node_versions WHERE node_id = 'q_canon'")
+        ).all()
+    assert not any("p_into_q" in str(s[0]) for s in snapshots)
     assert _open_edges(engine, "q_canon") == set()
     assert [p.persona_id for p in canonical.provenance if p.persona_id] == [_OTHER]
 

@@ -57,6 +57,7 @@ __all__ = [
     "merge_record",
     "plan_trails",
     "unmerged",
+    "without_alias_names",
     "without_aliases",
     "without_persona_aliases",
 ]
@@ -158,6 +159,31 @@ def unmerged(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, 
     return tag, {k: v for k, v in (metadata or {}).items() if k != _MERGE_KEY}
 
 
+_ALIASES_MARK = " aliases:"
+
+
+def without_alias_names(trail: Iterable[Any], names: Iterable[str]) -> Trail | None:
+    """A trail whose consolidation entries no longer list ``names`` (review H-3).
+
+    ``_accrete_aliases`` records ``consolidation:{run} aliases:{a,b}`` on the canonical, so a
+    member's name survives there after it leaves ``_k7_aliases``. An entry left with no names
+    goes. ``None`` when nothing changes.
+    """
+    gone = set(names)
+    trail = list(trail)
+    out: Trail = []
+    for entry in trail:
+        reason = str(entry.get("reason") or "") if isinstance(entry, Mapping) else ""
+        if not _is_consolidation(entry) or _ALIASES_MARK not in reason:
+            out.append(entry)
+            continue
+        head, _, listed = reason.partition(_ALIASES_MARK)
+        kept = [n for n in listed.split(",") if n and n not in gone]
+        if kept:
+            out.append({**entry, "reason": f"{head}{_ALIASES_MARK}{','.join(kept)}"})
+    return None if out == trail else out
+
+
 def _naming(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressions
     """A JSONB trail (a list of entries) with an entry from this persona."""
     return cast(column, JSONB).contains([{"persona_id": persona_id}])
@@ -248,7 +274,30 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         if canonical is not None and metadata is not None:
             _set_metadata(conn, owner_id, canonical, metadata)
             cleaned += 1
+        _drop_alias_names_from_trails(conn, owner_id, canonical_id, names)
     return cleaned
+
+
+def _drop_alias_names_from_trails(
+    conn: Connection, owner_id: str, canonical_id: str, names: list[str]
+) -> None:
+    """The names also leave the canonical's consolidation entries, and its snapshots'."""
+    for table, key in ((nodes_t, nodes_t.c.id), (versions_t, versions_t.c.version_key)):
+        node_column = table.c.id if table is nodes_t else table.c.node_id
+        rows = conn.execute(
+            select(key, table.c.provenance)
+            .where(table.c.owner_id == owner_id, node_column == canonical_id)
+            .order_by(key)
+            .with_for_update()
+        ).all()
+        for row_key, trail in rows:
+            rewritten = without_alias_names(trail or [], names)
+            if rewritten is not None:
+                conn.execute(
+                    update(table)
+                    .where(table.c.owner_id == owner_id, key == row_key)
+                    .values(provenance=rewritten)
+                )
 
 
 def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
@@ -271,18 +320,20 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         self_node_id=make_self_node_id(owner_id),
     )
     doomed = set(plan.doomed)
+    # The persona's entries leave the trails first, so what the doomed members give back is
+    # taken from the trails as they now are, and not overwritten after.
+    for node_id, trail in plan.rewrites.items():
+        conn.execute(
+            update(nodes_t)
+            .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == node_id)
+            .values(provenance=trail)
+        )
     cleaned = unmerged_members = 0
     if doomed:
         unmerged_members = _unmerge_members_of(conn, owner_id, sorted(doomed))
         cleaned = _give_back(conn, owner_id, [r for r in rows if r.id in doomed], doomed)
         conn.execute(
             delete(nodes_t).where(nodes_t.c.owner_id == owner_id, nodes_t.c.id.in_(sorted(doomed)))
-        )
-    for node_id, trail in plan.rewrites.items():
-        conn.execute(
-            update(nodes_t)
-            .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == node_id)
-            .values(provenance=trail)
         )
     return {
         "nodes_deleted": len(doomed),
