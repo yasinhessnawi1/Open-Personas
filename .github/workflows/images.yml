@@ -49,17 +49,23 @@ jobs:
       - name: Smoke-test the image
         run: |
           echo "architecture: $(docker image inspect -f '{{.Architecture}}' open-persona/api:ci)"
-          # As the server kit runs it: the data uid (2001), not the image's uid 1000.
-          docker run --rm --user 2001:2001 -e HOME=/tmp open-persona/api:ci python -c "
+          # As the server kit runs it: the data uid (2001), not the image's uid 1000, and
+          # with NO network, as its migrate container has (the baked tiktoken encoding).
+          docker run --rm --network none --user 2001:2001 -e HOME=/tmp open-persona/api:ci python -c "
           import importlib.util
+          import tiktoken
           import torch
           import persona_api.app
           import persona_connectors.service
+          assert tiktoken.get_encoding('cl100k_base').encode('ok')
           assert not torch.cuda.is_available(), 'CUDA torch in the image'
           assert torch.__version__.endswith('+cpu'), torch.__version__
           assert importlib.util.find_spec('persona_voice') is None, 'voice is in the api image'
           print('smoke ok, torch', torch.__version__)
           "
+          # The whole import graph, release.py and every migration, every socket refused.
+          docker run --rm --network none --user 2001:2001 -e HOME=/tmp open-persona/api:ci \
+            python packages/api/offline_import_check.py
 
       - name: Check the image size
         run: |

@@ -46,6 +46,23 @@ COPY packages/ packages/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package persona-connectors
 
+# tiktoken's cl100k_base encoding, baked in. persona.skills._tokens builds the encoder at
+# import, and a migration imports it, so without this tiktoken downloads the file at the
+# first import: the server kit's migrate container has no route out (by design) and died
+# there, and the api re-downloaded it on every cold start. Downloaded once here, checked
+# against the sha256 tiktoken itself pins, stored under the name tiktoken looks up (the
+# sha1 of the URL), root-owned and world-readable; the runtime stage points
+# TIKTOKEN_CACHE_DIR at it. scripts/tests/test_api_image_offline.py pins all of this.
+RUN install -d -m 0755 /opt/tiktoken \
+    && curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" -o "/opt/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4" \
+    && echo "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7  /opt/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4" | sha256sum -c - \
+    && chmod 0755 /opt/tiktoken \
+    && chmod 0644 /opt/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+# With the network OFF: the api, its connectors, release.py and every migration import,
+# and tiktoken builds cl100k_base from the baked file. Any import-time download fails the
+# build here instead of a deploy.
+RUN --network=none TIKTOKEN_CACHE_DIR=/opt/tiktoken PYTHONDONTWRITEBYTECODE=1 /opt/venv/bin/python packages/api/offline_import_check.py
+
 # ---------- runtime ----------
 FROM python:3.12-slim@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -63,6 +80,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app /app
+# The baked tiktoken encoding (builder, above): root-owned, read-only to the app.
+COPY --from=builder /opt/tiktoken /opt/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
 
 WORKDIR /app
 USER persona
