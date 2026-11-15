@@ -8,7 +8,8 @@ The route's half of D-R9-284-erase, in this order:
    ``persona_app``).
 3. Fence: delete the persona's schedules and jobs so nothing fires for it.
 4. Delete the row in one transaction on the RLS engine. The persona is gone from the owner's
-   view now, and no memory can be written for it.
+   view now, and no memory or graph write can name it (the memory owner guard, and the graph
+   write guard that holds the persona's row in each write).
 
 Then the route hands the erasure to the ``persona_erase`` job, or, where this process runs no
 worker that consumes it (legacy SQLite, a keyless boot), to :func:`run_persona_erasure_inline`

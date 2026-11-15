@@ -126,36 +126,59 @@ def test_every_maintenance_hook_runs_and_one_failing_does_not_stop_the_rest(
     assert ran == ["broken", "erasures"]
 
 
-def test_a_finished_erasure_has_its_graph_step_run_once_more_after_a_lease(
+def test_the_graph_backstop_runs_every_sweep_and_marks_nothing(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review H2's backstop: a job past every check when the erasure finished can still write."""
-    lease = persona_erase.GRAPH_RECHECK_AFTER
-    ages = {
-        "too_fresh": lease / 2,
-        "settled": lease + timedelta(seconds=1),
-        "long_ago": 4 * lease,
-    }
-    ids = {}
-    for letter, (name, age) in zip("abc", ages.items(), strict=True):
-        ids[name] = _claim(engine, _persona(letter))
-        ErasureLedger(engine).complete(ids[name])
-        with engine.begin() as conn:
-            conn.execute(
-                update(erasures_t)
-                .where(erasures_t.c.id == ids[name])
-                .values(completed_at=_NOW - age)
-            )
-    rechecked: list[str] = []
+    """Review H-2: whatever the graph still names is erased on every sweep until it is gone."""
+    left = {(_OWNER, _persona("a")), (_OWNER, _persona("b"))}
+    erased: list[str] = []
+
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:
+        erased.append(persona_id)
+        if persona_id == _persona("a"):
+            raise RuntimeError("a lock timed out")
+        left.discard((owner_id, persona_id))
+        return {"nodes_deleted": 1}
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine: sorted(left),
+    )
+
+    sweep()
+    sweep()
+
+    # The failing persona is tried on every sweep; the one that succeeded is not found again.
+    assert erased == [_persona("a"), _persona("b"), _persona("a")]
+
+
+def test_a_backstop_failure_does_not_skip_the_stall_alerts(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = _claim(engine, _persona("c"), age=timedelta(hours=1))
+    alerts: list[str] = []
     monkeypatch.setattr(
-        persona_erase,
-        "erase_persona_graph",
-        lambda _engine, *, persona_id, **_kw: rechecked.append(persona_id) or {},
+        persona_erase._log,  # noqa: SLF001
+        "error",
+        lambda _msg, **kw: alerts.append(kw.get("eid", "backstop")),
     )
     monkeypatch.setattr(persona_erase, "datetime", _FrozenClock)
-    sweep = PersonaEraseSweep(engine=engine, grace=timedelta(0), run=lambda _e, _t: None)
+
+    def _cannot_look(_engine: Engine) -> list[tuple[str, str]]:
+        raise RuntimeError("the graph query failed")
+
+    sweep = PersonaEraseSweep(
+        engine=engine, grace=timedelta(0), run=lambda _e, _t: None, find_leftovers=_cannot_look
+    )
 
     sweep()
-    sweep()
 
-    assert rechecked == [_persona("b")]
+    assert alerts == ["backstop", stuck]
+
+
+def test_the_backstop_looks_at_nothing_without_a_graph(engine: Engine) -> None:
+    """The legacy edition (SQLite) has no graph tables to ask."""
+    assert persona_erase.erased_personas_in_graph(engine) == []

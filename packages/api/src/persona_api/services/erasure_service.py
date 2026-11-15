@@ -1,10 +1,12 @@
 """Erasing a persona: every step, in order, resumable and counted (R9-284, D-R9-284-erase).
 
 The route claims the erasure in the ledger with the ids it captured, fences off what would run
-for the persona, and deletes its row, so the persona is gone from the owner's view at once and
-nothing new can be written for it (row level security on hosted, the memory owner guard on both
-Postgres editions). Everything else is the job's: :func:`erase_persona` runs :data:`STEPS` in
-order and records each step's counts.
+for the persona, and deletes its row, so the persona is gone from the owner's view at once.
+Its row being gone is what refuses new writes for it: memory through row level security on
+hosted and the memory owner guard on both Postgres editions; the graph, which is owner scoped
+and so not protected by either, through the graph write guard, which holds the persona's row
+in each write's transaction (``PostgresGraphBackend(persona_guard=True)``). Everything else is
+the job's: :func:`erase_persona` runs :data:`STEPS` in order and records each step's counts.
 
 Every step is idempotent and owner scoped, so a resumed erasure simply runs them all again: a
 step whose work is done adds 0 to its counts (the ledger adds, it does not overwrite). A step

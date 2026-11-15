@@ -32,7 +32,7 @@ from persona_api.db.models import jobs as jobs_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
 from persona_api.jobs.queue import JobQueue
-from persona_api.services.erasure_graph import erase_persona_graph
+from persona_api.services.erasure_graph import erase_persona_graph, erased_personas_in_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import (
     PERMANENT_REFUSALS,
@@ -289,10 +289,6 @@ def resume_persona_erasures(
 #: An erasure unfinished for longer than this is stalled: the operator is told.
 STALL_AFTER = timedelta(minutes=15)
 
-#: How long after an erasure completes the sweep runs its graph step once more (review H2):
-#: the longest a job that was running at completion can keep its lease.
-GRAPH_RECHECK_AFTER = timedelta(seconds=LONG_LEASE.lease_seconds)
-
 
 def stalled_persona_erasures(engine: Engine, *, now: datetime) -> list[Erasure]:
     """Unfinished persona erasures that failed, or that have been running too long."""
@@ -321,16 +317,17 @@ class PersonaEraseSweep:
         engine: Engine,
         run: Callable[[Erasure, str], object],
         grace: timedelta = RESUME_GRACE,
+        find_leftovers: Callable[[Engine], list[tuple[str, str]]] = erased_personas_in_graph,
     ) -> None:
         self._engine = engine
         self._run = run
         self._grace = grace
         self._reported: set[str] = set()
-        self._graph_rechecked: set[str] = set()
+        self._find_leftovers = find_leftovers
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
-        self._recheck_the_graph(datetime.now(UTC))
+        self._graph_backstop()
         for erasure in stalled_persona_erasures(self._engine, now=datetime.now(UTC)):
             if erasure.id in self._reported:
                 continue
@@ -343,33 +340,36 @@ class PersonaEraseSweep:
             )
         return resumed
 
-    def _recheck_the_graph(self, now: datetime) -> None:
-        """Run the graph step once more for each recently finished erasure (review H2).
+    def _graph_backstop(self) -> None:
+        """Take out of the graph any erased persona something still names (review H-2).
 
-        The backstop behind the synthesizer's own check: a job that was already past every
-        check when the erasure finished can still write. Waited until a long lease has passed
-        since completion, so any job that was running then has finished or lost its lease; the
-        window closes later, so a sweep that missed a few cycles still gets to it. Once per
-        erasure per process. Counts above zero are logged, never recorded: the erasure is
-        complete.
+        Recurring and idempotent: every sweep asks the graph which completed erasures it still
+        names (nodes, versions, edges, entities and their aliases), and runs the graph step for
+        each. Nothing is marked, so a persona whose step fails is found again next sweep, and
+        one erasure's failure is logged and does not stop the others or the stall alerts. The
+        write guard is what keeps new writes out; this catches anything written before it, or
+        by a path it does not cover.
         """
-        settled = now - GRAPH_RECHECK_AFTER
-        for erasure in ErasureLedger(self._engine).completed_since(now - 3 * GRAPH_RECHECK_AFTER):
-            done = aware_utc(erasure.completed_at)
-            if erasure.subject_kind is not SubjectKind.PERSONA or done is None or done > settled:
-                continue
-            if erasure.id in self._graph_rechecked:
-                continue
-            self._graph_rechecked.add(erasure.id)
-            counts = erase_persona_graph(
-                self._engine, owner_id=erasure.owner_id, persona_id=erasure.subject_id
-            )
-            if any(counts.values()):
-                _log.warning(
-                    "late graph writes removed after an erasure erasure={eid} counts={counts}",
-                    eid=erasure.id,
-                    counts=counts,
+        try:
+            leftovers = self._find_leftovers(self._engine)
+        except Exception as exc:  # noqa: BLE001 - logged; the sweep goes on to its alerts
+            _log.error("graph backstop could not look error={err}", err=type(exc).__name__)
+            return
+        for owner_id, persona_id in leftovers:
+            try:
+                counts = erase_persona_graph(self._engine, owner_id=owner_id, persona_id=persona_id)
+            except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
+                _log.error(
+                    "graph backstop failed persona={pid} error={err}",
+                    pid=persona_id,
+                    err=type(exc).__name__,
                 )
+                continue
+            _log.warning(
+                "graph backstop removed what an erased persona left persona={pid} counts={counts}",
+                pid=persona_id,
+                counts=counts,
+            )
 
 
 def build_persona_erase_sweep(platform_engine: Engine) -> PersonaEraseSweep:

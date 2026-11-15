@@ -206,19 +206,6 @@ class ErasureLedger:
             ).all()
         return [_to_erasure(row) for row in rows]
 
-    def completed_since(self, since: datetime) -> list[Erasure]:
-        """Erasures that completed at or after ``since``, oldest first."""
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(erasures_t)
-                .where(
-                    erasures_t.c.state == ErasureState.COMPLETE.value,
-                    erasures_t.c.completed_at >= since,
-                )
-                .order_by(erasures_t.c.completed_at, erasures_t.c.id)
-            ).all()
-        return [_to_erasure(row) for row in rows]
-
     def claim(
         self,
         *,

@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from persona.graph.models import _compute_node_hash, make_self_node_id
-from sqlalchemy import cast, delete, exists, or_, select, update
+from sqlalchemy import cast, delete, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 
 from persona_api.db.models import graph_edges, graph_entities, graph_node_entities
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = [
     "GraphPlan",
     "erase_persona_graph",
+    "erased_personas_in_graph",
     "merge_record",
     "plan_trails",
     "unmerged",
@@ -383,6 +384,42 @@ def _strip_entity_aliases(conn: Connection, owner_id: str, persona_id: str) -> i
             .values(aliases=kept)
         )
     return removed
+
+
+# Completed persona erasures the graph still names, for the sweep's backstop (review H-2).
+_LEFTOVERS = text("""
+    SELECT e.owner_id, e.subject_id
+    FROM erasures e
+    WHERE e.subject_kind = 'persona' AND e.state = 'complete'
+      AND NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = e.subject_id)
+      AND (
+        EXISTS (SELECT 1 FROM graph_nodes n WHERE n.owner_id = e.owner_id
+                AND n.provenance::jsonb
+                    @> jsonb_build_array(jsonb_build_object('persona_id', e.subject_id)))
+        OR EXISTS (SELECT 1 FROM graph_node_versions v WHERE v.owner_id = e.owner_id
+                AND v.provenance::jsonb
+                    @> jsonb_build_array(jsonb_build_object('persona_id', e.subject_id)))
+        OR EXISTS (SELECT 1 FROM graph_edges g WHERE g.owner_id = e.owner_id
+                AND g.provenance::jsonb @> jsonb_build_object('persona_id', e.subject_id))
+        OR EXISTS (SELECT 1 FROM graph_entities x WHERE x.owner_id = e.owner_id
+                AND (x.provenance::jsonb @> jsonb_build_object('persona_id', e.subject_id)
+                     OR x.aliases::jsonb
+                        @> jsonb_build_array(jsonb_build_object('persona_id', e.subject_id))))
+      )
+    GROUP BY e.owner_id, e.subject_id
+    ORDER BY e.owner_id, e.subject_id
+""")
+
+
+def erased_personas_in_graph(engine: Engine) -> list[tuple[str, str]]:
+    """``(owner, persona)`` for every completed erasure the graph still names. Postgres only.
+
+    A persona whose row exists is never returned, so a live persona is never touched.
+    """
+    if engine.dialect.name != "postgresql":
+        return []
+    with engine.connect() as conn:
+        return [(str(o), str(p)) for o, p in conn.execute(_LEFTOVERS)]
 
 
 def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:

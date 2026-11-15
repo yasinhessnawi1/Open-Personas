@@ -330,3 +330,24 @@ def test_a_member_merged_into_an_erased_node_is_unmerged_not_stranded(
     assert merged_into is None
     assert _open_edges(engine, "q_member") == {"e_qm"}
     assert counts["members_unmerged"] == 1
+
+
+def test_the_backstop_finds_what_a_finished_erasure_left_and_nothing_else(graph: Engine) -> None:
+    """Review H-2: a completed erasure the graph still names is found until it is gone."""
+    from persona_api.services.erasure_graph import erased_personas_in_graph  # noqa: PLC0415
+    from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind  # noqa: PLC0415
+
+    ledger = ErasureLedger(graph)
+    for persona in (_PERSONA, _OTHER):
+        done = ledger.claim(
+            owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=persona, captured={}
+        )
+        ledger.complete(done.id)
+    with graph.begin() as conn:  # only the erased persona's row is gone
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    assert erased_personas_in_graph(graph) == [(_OWNER, _PERSONA)]
+
+    erase_persona_graph(graph, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert erased_personas_in_graph(graph) == []
