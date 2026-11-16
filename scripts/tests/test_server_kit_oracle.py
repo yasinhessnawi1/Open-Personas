@@ -897,3 +897,56 @@ def test_preflight_checks_containerds_root_against_the_profile() -> None:
     assert "^root = " in block
     assert '[ "${containerd_root}" = "${OP_CONTAINERD_ROOT}" ]' in block
     assert "|| bad " in block
+
+
+def _preflight_root_check(tmp_path: Path, dump: str) -> subprocess.CompletedProcess[str]:
+    """The preflight's containerd root block, run as written, with `sudo` stubbed to print
+    ``dump`` for `containerd config dump` (review HIGH-1)."""
+    preflight = _text("bin/preflight.sh")
+    start = preflight.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then')
+    block = preflight[start : preflight.index("\nfi\n", start) + 4]
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "dump.out").write_text(dump, encoding="utf-8", newline="\n")
+    (stubs / "sudo").write_text(
+        '#!/usr/bin/env bash\ncat "${STUB_DIR}/dump.out"\n', encoding="utf-8", newline="\n"
+    )
+    (stubs / "sudo").chmod(0o755)
+    script = tmp_path / "check.sh"
+    script.write_text(
+        "set -u\nfails=0\n"
+        'ok() { echo "OK $*"; }\nbad() { echo "BAD $*"; fails=$((fails + 1)); }\n'
+        f'export STUB_DIR="{stubs.as_posix()}"\n'
+        f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"\n'
+        "OP_CONTAINERD_ROOT=/srv/containerd\n" + block,
+        encoding="utf-8",
+        newline="\n",
+    )
+    return _bash(f'bash "{script.as_posix()}"')
+
+
+CONTAINERD_DUMP = "version = 3\n{root}\nstate = '/run/containerd'\n\n[grpc]\n  address = 'x'\n"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "line",
+    ["root = '/srv/containerd'", 'root = "/srv/containerd"'],
+    ids=["containerd 2 single quotes", "containerd 1 double quotes"],
+)
+def test_preflight_reads_containerds_root_in_either_quote_style(tmp_path: Path, line: str) -> None:
+    """Review HIGH-1: containerd 2.4.2 on the Oracle host prints single quotes."""
+    result = _preflight_root_check(tmp_path, CONTAINERD_DUMP.format(root=line))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK containerd's root is /srv/containerd"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "dump",
+    ["", CONTAINERD_DUMP.format(root="root = '/var/lib/containerd'")],
+    ids=["empty dump", "another root"],
+)
+def test_preflight_fails_an_empty_or_other_root(tmp_path: Path, dump: str) -> None:
+    result = _preflight_root_check(tmp_path, dump)
+    assert result.stdout.startswith("BAD containerd's root is"), result.stdout
