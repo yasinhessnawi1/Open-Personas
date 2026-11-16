@@ -934,6 +934,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # R9-284: an erasure whose job died, or whose process stopped mid-way, carries on; a
     # worker-less process keeps sweeping for them (review M2).
     app.state.erasure_resume_task = erasure_start.resume_persona_erasures_on_startup(app.state)
+    # R9-284 T9: account erasures run on their own thread (not a job: a job owned by the account
+    # would cascade away with it), and every api process sweeps the unfinished ones.
+    from persona_api.services.account_erasure_runner import start_account_erasures
+
+    app.state.account_erasure_task = start_account_erasures(app.state)
 
     # Spec I1 (T2, D-I1-17): host the connector transports IN THIS PROCESS behind
     # PERSONA_API_EMBED_CONNECTORS (default OFF). The standalone connector service runs a
@@ -1176,6 +1181,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             erasure_resume_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await erasure_resume_task
+        account_erasure_task = getattr(app.state, "account_erasure_task", None)
+        if account_erasure_task is not None:
+            account_erasure_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await account_erasure_task
+        account_erase_runner = getattr(app.state, "account_erase_runner", None)
+        if account_erase_runner is not None:
+            account_erase_runner.close()  # an erasure cut short resumes at the next start
         if in_process_worker is not None:
             await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
         if embedded_connectors is not None:
@@ -1245,6 +1258,8 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # ``None`` on a community / flag-off boot — every billing route 404s then, and the
     # ``stripe`` SDK is never imported (M4 ships dark until live keys).
     app.state.stripe_gateway = build_stripe_gateway(config)
+    # R9-284 T9: built by the lifespan on cloud (start_account_erasures); ``None`` until then.
+    app.state.account_erase_runner = None
     # Spec M4 (T3a): the webhook event router (T3b's lifecycle handlers). Cheap + SDK-free.
     app.state.webhook_dispatcher = build_event_dispatcher()
     # Spec M4 (T3b): the webhook's cross-tenant READ-ONLY resolution engine — a factory-time
