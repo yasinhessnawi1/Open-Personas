@@ -503,13 +503,23 @@ class PostgresGraphBackend:
     def delete_node(self, owner_id: str, node_id: str) -> int | None:
         """Delete a node (edges cascade); return its ``surrogate`` for index removal.
 
+        :meth:`delete_node_and_members`, keeping only the node's own surrogate.
+        """
+        return self.delete_node_and_members(owner_id, node_id).get(node_id)
+
+    def delete_node_and_members(self, owner_id: str, node_id: str) -> dict[str, int]:
+        """Delete a node and what was merged into it; ``{deleted id: surrogate}`` (R9-287).
+
+        Empty when the node was not there. Every id the DELETE returned is in it, so the store
+        can audit each node that went (round 2 LOW-2).
+
         With a node releaser (R9-287) the delete runs under the owner's graph maintenance lock,
         waiting at most :data:`DELETE_LOCK_TIMEOUT` for a running consolidation
         (:class:`GraphNodeBusyError` after that), and releases what consolidation copied from
         the node (its mirrors, entity links and names on the canonical) in the same transaction.
         Every node merged into it, directly or down a chain, goes in the same statement
-        (D-R9-287-forget-canonical). The returned surrogate is the node's own; a member left
-        the dense index when it was merged, and a stale entry is benign.
+        (D-R9-287-forget-canonical). A member left the dense index when it was merged, and a
+        stale entry is benign.
         """
         try:
             with self._engine.begin() as conn:
@@ -531,7 +541,6 @@ class PostgresGraphBackend:
                         .returning(graph_nodes.c.id, graph_nodes.c.surrogate)
                     ).all()
                 }
-                surrogate = gone.get(node_id)
                 release.after()
         except OperationalError as exc:
             if getattr(exc.orig, "sqlstate", None) not in _BUSY_SQLSTATES:
@@ -539,7 +548,7 @@ class PostgresGraphBackend:
             raise GraphNodeBusyError(
                 "the graph is being reorganised", context={"node_id": node_id}
             ) from exc
-        return None if surrogate is None else int(surrogate)
+        return gone
 
     # ===== dense + sparse retrieval (the K1 legs' SQL) =====================
 

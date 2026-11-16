@@ -49,7 +49,8 @@ class _Conn:
         elif sql.startswith("SET LOCAL lock_timeout"):
             self.log.append(sql)
         elif sql.startswith("DELETE FROM graph_nodes"):
-            ids = [str(i) for i in stmt.compile().params.get("id_1", [])]
+            lists = [v for v in stmt.compile().params.values() if isinstance(v, list)]
+            ids = [str(i) for i in (lists[0] if lists else [])]
             self.log.append("delete " + ",".join(ids) if len(ids) > 1 else "delete")
             return _Result(ids)
         return _Result()

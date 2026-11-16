@@ -68,8 +68,8 @@ class _RecentFakeBackend:
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
         return None
 
-    def delete_node(self, owner_id: str, node_id: str) -> int | None:
-        return None
+    def delete_node_and_members(self, owner_id: str, node_id: str) -> dict[str, int]:
+        return {}
 
     def surrogates_for_owner(self, owner_id: str) -> list[int]:
         return []

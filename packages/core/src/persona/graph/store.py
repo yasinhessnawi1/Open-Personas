@@ -85,7 +85,7 @@ class _StoreBackend(Protocol):
     def read_version_for_restore(
         self, owner_id: str, version_id: str
     ) -> tuple[NodeVersion, list[float]] | None: ...
-    def delete_node(self, owner_id: str, node_id: str) -> int | None: ...
+    def delete_node_and_members(self, owner_id: str, node_id: str) -> dict[str, int]: ...
     def insert_node_if_absent(
         self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
     ) -> int | None: ...
@@ -240,11 +240,15 @@ class PostgresGraphStore:
                 "the SELF node is not deletable",
                 context={"node_id": node_id, "op": "delete"},
             )
-        surrogate = self._backend.delete_node(owner_id, node_id)  # Postgres (authoritative)
-        if surrogate is None:
+        # Postgres (authoritative): the node and every node merged into it (R9-287).
+        gone = self._backend.delete_node_and_members(owner_id, node_id)
+        if node_id not in gone:
             return False
-        self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=node_id)
-        self._index.remove(surrogate)  # same path; raises on failure (stale entry benign)
+        # One DELETE event per node that went, the forgotten one first (round 2 LOW-2).
+        for deleted in [node_id, *sorted(set(gone) - {node_id})]:
+            self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=deleted)
+        # The node's own entry; a member left the index when it was merged (stale is benign).
+        self._index.remove(gone[node_id])  # same path; raises on failure
         return True
 
     # ===== the user's self node (Spec K6) =================================

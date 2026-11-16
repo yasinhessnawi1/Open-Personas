@@ -130,6 +130,7 @@ class _FakeBackend:
         self.entity_neighbor_nodes: list[ConceptNode] = []
         self.deleted: list[str] = []
         self.delete_returns: int | None = 7
+        self.delete_members: dict[str, int] = {}
 
     def surrogate_for(self, owner_id: str, node_id: str) -> int | None:
         return self.nodes[node_id][0] if node_id in self.nodes else None
@@ -146,9 +147,11 @@ class _FakeBackend:
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
         return self.nodes[node_id][1] if node_id in self.nodes else None
 
-    def delete_node(self, owner_id: str, node_id: str) -> int | None:
+    def delete_node_and_members(self, owner_id: str, node_id: str) -> dict[str, int]:
         self.deleted.append(node_id)
-        return self.delete_returns
+        if self.delete_returns is None:
+            return {}
+        return {node_id: self.delete_returns, **self.delete_members}
 
     def surrogates_for_owner(self, owner_id: str) -> list[int]:
         return list(self.owner_surrogates)
@@ -263,6 +266,23 @@ def test_delete_removes_from_both_and_audits_once() -> None:
     assert idx.removed == [7]  # delete_returns
     assert len(audit.events) == 1
     assert audit.events[0].action is AuditAction.DELETE
+
+
+def test_a_delete_audits_every_node_that_went_once() -> None:
+    """Round 2 LOW-2: the members merged into it go too, and each gets its DELETE event."""
+    b, idx, audit = _FakeBackend(), _FakeIndex(), MemoryAuditLogger()
+    b.delete_members = {"u1::node::m2": 9, "u1::node::m1": 8}
+    store = _store(b, idx, _created_merge(), audit)
+
+    assert store.delete_node("u1", "u1::node::00000001") is True
+
+    assert [e.chunk_ids for e in audit.events] == [
+        ["u1::node::00000001"],
+        ["u1::node::m1"],
+        ["u1::node::m2"],
+    ]
+    assert all(e.action is AuditAction.DELETE for e in audit.events)
+    assert idx.removed == [7], "only the node's own index entry"
 
 
 def test_delete_self_node_raises_protected() -> None:
