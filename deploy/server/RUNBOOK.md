@@ -256,20 +256,71 @@ while Docker holds containers or images, and it is a clean no-op on a host alrea
 root (no change, no restart).
 
 **The Oracle core host was moved by hand on 2026-11-16, 17:22 to 17:28 UTC**, with the
-owner's approval: its `/etc/containerd/config.toml` starts with `root = "/srv/containerd"`,
-the original is kept as `/etc/containerd/config.toml.bak-r9289`, and `/var/lib/containerd`
-is gone. Re-running `provision.sh` there changes nothing.
+owner's approval, by the steps below: its `/etc/containerd/config.toml` starts with
+`root = "/srv/containerd"`, the original is kept as `/etc/containerd/config.toml.bak-r9289`,
+and `/var/lib/containerd` is gone. Re-running `provision.sh` there changes nothing.
 
-For any other host that already holds images on the boot disk, as root, outside call hours:
+For any other host that already holds images on the boot disk: as ubuntu, with sudo,
+outside call hours. **Stop the app first.** `daemon.json` sets `live-restore: true`, so
+stopping Docker alone leaves the containers running on the old snapshot mounts, and copying
+containerd's root under running containers is not safe. Expect about 6 minutes of downtime
+for about 10 GB of images.
 
 ```bash
-systemctl stop docker docker.socket containerd
-cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289
-rsync -aHAX /var/lib/containerd/ /srv/containerd/
-sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
-systemctl start containerd docker
-docker images                      # the images are all there
-rm -rf /var/lib/containerd         # only once they are
+# 1. a fresh backup first; it must end Result=success
+sudo systemctl start open-persona-backup.service
+systemctl show -p Result open-persona-backup.service
+
+# 2. stop the app (live-restore would keep it running through step 3)
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
+
+# 3. stop Docker and containerd
+sudo systemctl stop docker.socket docker containerd
+
+# 4. copy the root
+sudo rsync -aHAX --numeric-ids /var/lib/containerd/ /srv/containerd/
+
+# 5. the two trees must be the same size; stop here (and roll back) if they are not
+sudo du -sb /var/lib/containerd /srv/containerd
+
+# 6. back up the config, then prepend the root
+sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289
+sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
+
+# 7. keep the old root aside; do not delete it yet
+sudo mv /var/lib/containerd /var/lib/containerd.old
+
+# 8. containerd first, then Docker
+sudo systemctl start containerd
+sudo systemctl start docker
+
+# 9. the images are there
+sudo docker images | grep 'open-persona/api' | grep current
+
+# 10. the app, then /healthz 200
+sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/healthz
+
+# 11. preflight
+sudo -u deploy deploy/server/bin/preflight.sh </dev/null
+
+# 12. containerd's root, and new files landing under it
+sudo containerd config dump | grep ^root
+sudo find /srv/containerd -newer /etc/containerd/config.toml | head
+
+# 13. only once 9 to 12 all passed
+sudo rm -rf /var/lib/containerd.old
+```
+
+**Rolling back**, if any check fails before step 13:
+
+```bash
+sudo systemctl stop docker.socket docker containerd
+sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml
+sudo mv /var/lib/containerd.old /var/lib/containerd   # after step 7 only
+sudo systemctl start containerd
+sudo systemctl start docker
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
 ```
 
 Then re-run `provision.sh`: it adds containerd's wait for the block volume and is otherwise
