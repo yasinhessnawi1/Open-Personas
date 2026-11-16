@@ -45,8 +45,20 @@ from persona.graph.maintenance_lock import (
     try_graph_maintenance_lock,
 )
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
-from sqlalchemy import cast, delete, exists, or_, select, text, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    BigInteger,
+    Text,
+    any_,
+    cast,
+    delete,
+    exists,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from persona_api.db.models import graph_edges, graph_entities, graph_node_entities
 from persona_api.db.models import graph_node_versions as versions_t
@@ -288,6 +300,11 @@ def without_alias_names(
     return None if out == trail else out
 
 
+def _any_of(column: Any, values: Iterable[Any], element: Any) -> Any:  # noqa: ANN401 - SQL
+    """``column = ANY(:array)``: one array parameter, however many values (round 7 LOW-3)."""
+    return column == any_(literal(list(values), ARRAY(element)))
+
+
 def _naming(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressions
     """A JSONB trail (a list of entries) with an entry from this persona."""
     return cast(column, JSONB).contains([{"persona_id": persona_id}])
@@ -479,7 +496,9 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) 
         unmerged_members = _unmerge_members_of(conn, owner_id, sorted(doomed))
         cleaned = _give_back(conn, owner_id, [r for r in rows if r.id in doomed], doomed)
         conn.execute(
-            delete(nodes_t).where(nodes_t.c.owner_id == owner_id, nodes_t.c.id.in_(sorted(doomed)))
+            delete(nodes_t).where(
+                nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, sorted(doomed), Text)
+            )
         )
     return {
         "nodes_deleted": len(doomed),
@@ -649,16 +668,19 @@ def orphaned_mirrors(
     return sorted(doomed), rewrites
 
 
-def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
-    """Apply :func:`orphaned_mirrors` to the owner's graph, after the rest of the step."""
+def _prune_orphans(conn: Connection, owner_id: str, mirrors: _Mirrors) -> dict[str, int]:
+    """Apply :func:`orphaned_mirrors` to the owner's graph, after the rest of the step.
+
+    The mirror rows are the ones ``_remove_mirrors`` read, less those it deleted (nothing in
+    between deletes a mirror row), and only the records it rewrites are locked (round 7 LOW-3).
+    """
     members = conn.execute(
-        select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
-        .where(nodes_t.c.owner_id == owner_id, nodes_t.c.merged_into.is_not(None))
-        .order_by(nodes_t.c.id)
-        .with_for_update()
+        select(nodes_t.c.id, nodes_t.c.metadata).where(
+            nodes_t.c.owner_id == owner_id, nodes_t.c.merged_into.is_not(None)
+        )
     ).all()
     records = {m.id: r for m in members if (r := merge_record(m.metadata)) is not None}
-    rows = _mirror_rows(conn, owner_id)
+    rows = {g: keys - mirrors.removed for g, keys in mirrors.rows.items() if keys - mirrors.removed}
     named = sorted(
         {
             k
@@ -671,7 +693,8 @@ def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
         set(
             conn.execute(
                 select(graph_edges.c.edge_key).where(
-                    graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(named)
+                    graph_edges.c.owner_id == owner_id,
+                    _any_of(graph_edges.c.edge_key, named, BigInteger),
                 )
             ).scalars()
         )
@@ -679,15 +702,20 @@ def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
         else set()
     )
     doomed, rewrites = orphaned_mirrors(records, rows, existing)
-    deleted = 0
     deleted = sum(
         conn.execute(stmt).rowcount for stmt in mirror_row_deletes(owner_id, doomed, rows)
     )
-    by_id = {m.id: m for m in members}
-    for member_id, record in rewrites.items():
-        member = by_id[member_id]
-        metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
-        _set_metadata(conn, owner_id, member, metadata)
+    if rewrites:
+        locked = conn.execute(
+            select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
+            .where(nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, sorted(rewrites), Text))
+            .order_by(nodes_t.c.id)
+            .with_for_update()
+        ).all()
+        for member in locked:
+            record = rewrites[member.id]
+            metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
+            _set_metadata(conn, owner_id, member, metadata)
     return {"orphan_mirrors_deleted": deleted, "merge_records_pruned": len(rewrites)}
 
 
@@ -711,7 +739,7 @@ def mirror_row_deletes(
     return [
         delete(graph_edges).where(
             graph_edges.c.owner_id == owner_id,
-            graph_edges.c.edge_key.in_(sorted(run_keys)),
+            _any_of(graph_edges.c.edge_key, sorted(run_keys), BigInteger),
             cast(graph_edges.c.provenance, JSONB).contains(
                 {"source": "system", "reason": f"consolidation:{run_id}"}
             ),
@@ -726,6 +754,7 @@ def _mirror_rows(conn: Connection, owner_id: str) -> dict[tuple[str, str], set[i
         select(graph_edges.c.id, graph_edges.c.edge_key, graph_edges.c.provenance).where(
             graph_edges.c.owner_id == owner_id,
             cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
+            cast(graph_edges.c.provenance, JSONB)["reason"].astext.like("consolidation:%"),
         )
     ).all()
     out: dict[tuple[str, str], set[int]] = {}
@@ -751,6 +780,9 @@ class _Mirrors:
     legacy: dict[str, dict[str, Any]]
     asserted: list[Any]
     existing: set[int]
+    # Set by _remove_mirrors: the mirror rows it read, and the keys it deleted (round 7 LOW-3).
+    rows: dict[tuple[str, str], set[int]] = field(default_factory=dict)
+    removed: set[int] = field(default_factory=set)
 
 
 def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
@@ -783,7 +815,8 @@ def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
             int(k)
             for k in conn.execute(
                 select(graph_edges.c.edge_key).where(
-                    graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(named)
+                    graph_edges.c.owner_id == owner_id,
+                    _any_of(graph_edges.c.edge_key, named, BigInteger),
                 )
             ).scalars()
         }
@@ -804,7 +837,10 @@ def _seed_incident(conn: Connection, owner_id: str, doomed: list[str], mirrors: 
     rows = conn.execute(
         select(graph_edges.c.edge_key).where(
             graph_edges.c.owner_id == owner_id,
-            or_(graph_edges.c.src_node_id.in_(doomed), graph_edges.c.dst_node_id.in_(doomed)),
+            or_(
+                _any_of(graph_edges.c.src_node_id, doomed, Text),
+                _any_of(graph_edges.c.dst_node_id, doomed, Text),
+            ),
         )
     ).scalars()
     mirrors.seeds.update(int(k) for k in rows)
@@ -821,11 +857,13 @@ def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
     while it carries the merge's provenance.
     """
     rows = _mirror_rows(conn, owner_id)
+    mirrors.rows = rows
     # A mirror row is an edge too: present before this erasure, unless it went with a node.
     existing = mirrors.existing | {k for keys in rows.values() for k in keys}
     keys = mirrors_to_remove(mirrors.seeds, mirrors.sources, rows, existing)
     deleted = 0
     deleted += sum(conn.execute(stmt).rowcount for stmt in mirror_row_deletes(owner_id, keys, rows))
+    mirrors.removed = set(keys)
     for edge in mirrors.asserted:
         for member_id in {edge.src_node_id, edge.dst_node_id} & set(mirrors.legacy):
             record = mirrors.legacy[member_id]
@@ -985,5 +1023,5 @@ def erase_persona_graph(
             **_versions(conn, owner_id, persona_id),
             **_edges_and_entities(conn, owner_id, persona_id, mirrors),
             # Last: whatever lost its every source, here or by another path (round 6 M-1).
-            **_prune_orphans(conn, owner_id),
+            **_prune_orphans(conn, owner_id, mirrors),
         }

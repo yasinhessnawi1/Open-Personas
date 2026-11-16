@@ -516,8 +516,20 @@ def test_a_mirror_row_is_deleted_only_under_its_own_runs_tag() -> None:
 
     params = [s.compile(dialect=postgresql.dialect()).params for s in statements]
     assert len(statements) == 2, "one per run; key 99 is no mirror row and is not deleted"
-    assert [(p["edge_key_1"], p["param_1"]) for p in params] == [
+    assert [(p["param_1"], p["param_2"]) for p in params] == [
         ([9, 11], {"source": "system", "reason": "consolidation:r1"}),
         ([10], {"source": "system", "reason": "consolidation:r2"}),
     ]
     assert mirror_row_deletes("u1", [], rows) == []
+
+
+def test_a_large_key_set_is_one_array_parameter() -> None:
+    """Round 7 LOW-3: = ANY(:array), not an IN list with a parameter per key."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    keys = list(range(5000))
+    (statement,) = mirror_row_deletes("u1", keys, {("m", "r1"): set(keys)})
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert "= ANY (" in str(compiled)
+    assert len(compiled.params) == 3, "owner, the key array and the tag"
