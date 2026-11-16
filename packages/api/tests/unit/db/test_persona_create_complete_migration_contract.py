@@ -1,0 +1,38 @@
+"""Migration 065 adds what the model says: personas.create_complete, true by default (R9-293)."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from types import ModuleType
+
+from persona_api.db.models import personas
+
+_MIGRATION = (
+    Path(__file__).resolve().parents[3] / "alembic" / "versions" / "065_persona_create_complete.py"
+)
+
+
+def _migration() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("persona_create_complete_065", _MIGRATION)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_065_follows_064() -> None:
+    module = _migration()
+    assert module.revision == "065_persona_create_complete"
+    assert module.down_revision == "064_account_erasure"
+
+
+def test_the_model_column_is_complete_unless_a_create_says_otherwise() -> None:
+    column = personas.c.create_complete
+    assert column.nullable is False
+    assert column.server_default is not None
+    assert str(column.server_default.arg) == "true", "existing rows stay complete"
+    text = _MIGRATION.read_text(encoding="utf-8")
+    assert 'server_default=sa.text("true")' in text
+    assert "nullable=False" in text

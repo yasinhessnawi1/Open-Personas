@@ -35,6 +35,7 @@ from sqlalchemy import insert, select
 from persona_api.config import Edition
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.middleware.rls_context import current_user_id
 
@@ -111,6 +112,7 @@ class OriginationRecorder:
                 select(personas_t.c.id).where(
                     personas_t.c.id == persona_id,
                     personas_t.c.owner_id == owner_id,
+                    persona_complete,
                 )
             ).first()
             if owns_persona is None:

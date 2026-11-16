@@ -37,6 +37,7 @@ from sqlalchemy import delete, func, insert, select, update
 
 from persona_api.db.models import connector_channels as connector_channels_t
 from persona_api.db.models import conversations as conversations_t
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
 from persona_api.services import notifications_service
@@ -407,12 +408,18 @@ def create_persona(
                 schema_version=persona.schema_version,
                 avatar_url=avatar_url,
                 avatar_source=avatar_source,
+                # R9-293 review HIGH-2: hidden until the identity is indexed below.
+                create_complete=False,
             )
         )
     # Persona row committed → its FK target is visible to the store connections.
     try:
         registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
         registry.load_persona(persona)
+        with rls_engine.begin() as conn:
+            conn.execute(
+                update(personas_t).where(personas_t.c.id == persona_id).values(create_complete=True)
+            )
     except Exception:
         _undo_create(compensate, persona_id)
         raise
@@ -421,14 +428,21 @@ def create_persona(
 
 def _undo_create(compensate: Callable[[str], object] | None, persona_id: str) -> None:
     """Undo a create that failed after its row committed (R9-293); never raises."""
+    # The row stays hidden (create_complete is false), and the erasure sweep erases it
+    # after ABANDONED_CREATE_GRACE; the alert says an undo is owed (review HIGH-2).
     if compensate is None:
-        _LOG.error("persona create failed after its row committed persona={pid}", pid=persona_id)
+        _LOG.error(
+            "OPERATOR ALERT: persona create failed after its row committed and nothing undid "
+            "it persona={pid}; the erasure sweep erases it",
+            pid=persona_id,
+        )
         return
     try:
         compensate(persona_id)
     except Exception as exc:  # noqa: BLE001 - the create's own error is the one to raise
         _LOG.error(
-            "persona create failed and undoing it failed too persona={pid} error={err}",
+            "OPERATOR ALERT: persona create failed and undoing it failed too persona={pid} "
+            "error={err}; the erasure sweep erases it",
             pid=persona_id,
             err=type(exc).__name__,
         )
@@ -467,7 +481,7 @@ def update_persona(
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
     with rls_engine.begin() as conn:
         current = conn.execute(
-            select(personas_t.c.yaml).where(personas_t.c.id == persona_id)
+            select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
         ).first()
         if current is None:
             raise PersonaNotFoundError("persona not found", context={"id": persona_id})
@@ -482,7 +496,7 @@ def update_persona(
             values["avatar_source"] = "uploaded"
         result = conn.execute(
             update(personas_t)
-            .where(personas_t.c.id == persona_id)
+            .where(personas_t.c.id == persona_id, persona_complete)
             .values(**values)
             .returning(personas_t.c.id)
         )
@@ -568,7 +582,9 @@ def get_persona(*, rls_engine: Engine, persona_id: str) -> dict[str, object]:
     """Return a persona row (RLS-scoped → 404 if not the caller's)."""
     with rls_engine.begin() as conn:
         row = (
-            conn.execute(select(personas_t).where(personas_t.c.id == persona_id)).mappings().first()
+            conn.execute(select(personas_t).where(personas_t.c.id == persona_id, persona_complete))
+            .mappings()
+            .first()
         )
     if row is None:
         raise PersonaNotFoundError("persona not found", context={"id": persona_id})
@@ -586,7 +602,9 @@ def persona_display_name(*, rls_engine: Engine, persona_id: str) -> str | None:
     """
     with rls_engine.begin() as conn:
         row = (
-            conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id))
+            conn.execute(
+                select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
+            )
             .mappings()
             .first()
         )
@@ -601,6 +619,7 @@ def list_personas(*, rls_engine: Engine, limit: int, offset: int) -> list[dict[s
         rows = (
             conn.execute(
                 select(personas_t)
+                .where(persona_complete)
                 .order_by(personas_t.c.created_at.desc())
                 .limit(limit)
                 .offset(offset)

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from persona_api.approvals import KillSwitchStore
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.db.engine import rls_connection
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.digest import DeferredDigestStore, MorningDigest, build_morning_digest
 from persona_api.initiative.handler import read_initiative_dial, set_initiative_dial
@@ -73,6 +74,7 @@ def _require_owned_persona(engine: Engine, owner_id: str, persona_id: str) -> No
             select(personas_t.c.id).where(
                 personas_t.c.id == persona_id,
                 personas_t.c.owner_id == owner_id,
+                persona_complete,
             )
         ).first()
     if owned is None:

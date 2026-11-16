@@ -48,6 +48,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL, TSVECTOR
 
@@ -183,6 +184,9 @@ personas = Table(
     # Like ``avatar_url`` this is an API-row presentation field, NOT part of the
     # persona YAML schema, so it does not move ``schema_version``.
     Column("avatar_source", Text),
+    # R9-293: false from the create's INSERT until its identity is indexed. A row still
+    # false is a create that never finished: hidden from the owner, and erased by the sweep.
+    Column("create_complete", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     # R9-021: onupdate stamps every Core update(personas_t) that doesn't set the
     # column explicitly (all current write sites omit it) — without this the value
@@ -218,6 +222,10 @@ personas = Table(
     UniqueConstraint("id", "owner_id", name="uq_personas_id_owner"),
     Index("idx_personas_owner", "owner_id"),
 )
+
+#: R9-293: every owner-facing read of personas keeps this; a create that has not finished
+#: (or never will: the process died before its undo) is not the owner's persona yet.
+persona_complete = personas.c.create_complete == true()
 
 conversations = Table(
     "conversations",
