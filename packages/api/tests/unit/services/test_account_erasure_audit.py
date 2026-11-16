@@ -94,3 +94,61 @@ def test_the_moved_owner_file_rekeys_the_author_too(tmp_path: Path) -> None:
 
     moved = (tmp_path / f"{_ERASURE}.jsonl").read_text(encoding="utf-8")
     assert _OWNER not in moved
+
+
+# ---- crash safety (review L-1) ---------------------------------------------------------
+
+
+def _owner_log(tmp_path: Path, n: int = 2) -> Path:
+    source = tmp_path / f"{_OWNER}.jsonl"
+    events = [_event(_OWNER, reason=f"event {i}") for i in range(n)]
+    source.write_bytes(("\n".join(json.dumps(e) for e in events) + "\n").encode())
+    return source
+
+
+def test_a_crash_after_the_rename_is_finished_on_resume(tmp_path: Path) -> None:
+    """The run died after renaming to .moving: the resume lands it, nothing is lost."""
+    source = _owner_log(tmp_path)
+    moving = tmp_path / f"{_ERASURE}.jsonl.moving"
+    source.replace(moving)  # where the crash left it
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 2
+
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    assert not moving.exists()
+    assert len(target.read_text(encoding="utf-8").splitlines()) == 2
+    assert _OWNER not in target.read_text(encoding="utf-8")
+
+
+def test_a_crash_after_the_append_appends_nothing_twice(tmp_path: Path) -> None:
+    """The run died after landing the lines but before removing .moving."""
+    import shutil  # noqa: PLC0415
+
+    source = _owner_log(tmp_path)
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    landed = target.read_bytes()
+    # Rebuild the crash: the same events back in a .moving file next to the landed target.
+    _owner_log(tmp_path)
+    shutil.copyfile(source, tmp_path / f"{_ERASURE}.jsonl.moving")
+    source.unlink()
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 0
+
+    assert target.read_bytes() == landed, "nothing appended twice"
+    assert not (tmp_path / f"{_ERASURE}.jsonl.moving").exists()
+
+
+def test_events_written_after_a_move_are_moved_by_the_next_run(tmp_path: Path) -> None:
+    _owner_log(tmp_path, n=1)
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+    late = tmp_path / f"{_OWNER}.jsonl"
+    later = {**_event(_OWNER), "timestamp": "2026-11-16T12:05:00+00:00"}  # a later event
+    late.write_bytes((json.dumps(later) + "\n").encode())
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 1
+
+    target = (tmp_path / f"{_ERASURE}.jsonl").read_text(encoding="utf-8")
+    assert len(target.splitlines()) == 2
+    assert not late.exists()
+    assert not list(tmp_path.glob("*.tmp")), "no temporary file left"
