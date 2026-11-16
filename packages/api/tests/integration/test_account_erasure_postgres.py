@@ -263,7 +263,8 @@ def test_nothing_of_the_account_remains_and_the_neighbour_keeps_all(
         assert persona is not None
         assert persona.state is ErasureState.COMPLETE, pid
     assert ledger.get(SubjectKind.PERSONA, STRANGER) is None
-    assert stripe.calls == [("cus_alice", erasure.id)]
+    # The stripe step, then again in late_writes after the row is gone (review M4).
+    assert stripe.calls == [("cus_alice", erasure.id)] * 2
     assert clerk.deleted == [OWNER]
 
 
@@ -280,7 +281,7 @@ def test_paid_rows_are_retained_under_the_erasure_id_and_usage_goes(
     assert {(r["source_table"], r["source_id"]) for r in kept} == {
         ("credit_transactions", "ct_paid"),
         ("payg_grants", "pg_alice"),
-        ("subscription", "sub_alice"),
+        ("subscription", "subscription"),  # the fixed id of the claim snapshot (M2)
     }
     for r in kept:
         assert r["erasure_id"] == erasure.id
