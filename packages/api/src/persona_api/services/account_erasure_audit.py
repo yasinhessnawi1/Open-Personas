@@ -137,10 +137,18 @@ def _land(moving: Path, target: Path, offset: Path, *, owner_id: str, erasure_id
     ]
     if offset.exists():  # a run died after recording it: cut back to where it started
         start = int(offset.read_text(encoding="ascii"))
-        with target.open("r+b") as out:
-            out.truncate(start)
-            out.flush()
-            os.fsync(out.fileno())
+        if target.exists():
+            with target.open("r+b") as out:
+                out.truncate(start)
+                out.flush()
+                os.fsync(out.fileno())
+        elif start != 0:
+            # Only a first move can record 0 and die before the append creates the target;
+            # anything else means the target was lost, and appending would hide that.
+            msg = "the recorded offset names an erasure log that is gone"
+            raise OSError(msg)
+        # A first move that died before its append (review round 4 MEDIUM-1): no target yet,
+        # an offset of 0, and the append below creates it.
     else:
         start = target.stat().st_size if target.exists() else 0
         temporary = offset.with_name(offset.name + ".tmp")

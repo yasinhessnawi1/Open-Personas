@@ -221,3 +221,28 @@ def test_the_persona_log_is_rewritten_under_the_loggers_lock(
 
     assert seen == [True], "the rewrite (fsynced) happened inside the lock"
     assert _OWNER not in log.read_text(encoding="utf-8")
+
+
+def test_a_first_move_that_died_before_its_append_resumes(tmp_path: Path) -> None:
+    """Round 4 MEDIUM-1: an offset of 0 recorded, .moving in place, no target created yet.
+    The resume used to fail for ever opening the missing target; it lands the lines."""
+    (tmp_path / f"{_ERASURE}.jsonl.moving.offset").write_text("0", encoding="ascii")
+    _owner_log(tmp_path, n=3).replace(tmp_path / f"{_ERASURE}.jsonl.moving")
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 3
+
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    assert len(target.read_text(encoding="utf-8").splitlines()) == 3
+    assert not (tmp_path / f"{_ERASURE}.jsonl.moving").exists()
+    assert not (tmp_path / f"{_ERASURE}.jsonl.moving.offset").exists()
+
+
+def test_a_lost_target_with_a_later_offset_is_refused(tmp_path: Path) -> None:
+    """Anything but 0 for a target that is not there means the log was lost: say so."""
+    import pytest  # noqa: PLC0415
+
+    (tmp_path / f"{_ERASURE}.jsonl.moving.offset").write_text("120", encoding="ascii")
+    _owner_log(tmp_path).replace(tmp_path / f"{_ERASURE}.jsonl.moving")
+
+    with pytest.raises(OSError, match="gone"):
+        rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
