@@ -91,8 +91,15 @@ def graph_maintenance_held(engine: Engine, owner_id: str) -> Iterator[None]:
     conn = engine.connect()
     try:
         conn.execute(_SESSION_LOCK, {"owner": owner_id})
+    except BaseException:
+        conn.close()  # not taken: nothing to release
+        raise
+    try:
         conn.commit()
     except BaseException:
+        # Taken, then the commit failed: the session may hold the lock, so it is closed, never
+        # pooled (round 6 L-3).
+        conn.invalidate()
         conn.close()
         raise
     try:

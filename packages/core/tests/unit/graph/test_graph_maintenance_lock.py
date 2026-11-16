@@ -112,9 +112,10 @@ def test_unmerge_holds_the_lock_too() -> None:
 
 
 class _Conn:
-    def __init__(self, log: list[str], *, fail_unlock: bool) -> None:
+    def __init__(self, log: list[str], *, fail_unlock: bool, fail_commit: bool = False) -> None:
         self._log = log
         self._fail_unlock = fail_unlock
+        self._fail_commit = fail_commit
         self.dialect = type("D", (), {"name": "postgresql"})()
 
     def execute(self, stmt: Any, params: dict[str, str]) -> None:  # noqa: ANN401
@@ -127,6 +128,8 @@ class _Conn:
 
     def commit(self) -> None:
         self._log.append("commit")
+        if self._fail_commit:
+            raise RuntimeError("the commit failed")
 
     def invalidate(self) -> None:
         self._log.append("invalidate")
@@ -136,13 +139,14 @@ class _Conn:
 
 
 class _Engine:
-    def __init__(self, *, fail_unlock: bool = False) -> None:
+    def __init__(self, *, fail_unlock: bool = False, fail_commit: bool = False) -> None:
         self.log: list[str] = []
         self._fail_unlock = fail_unlock
+        self._fail_commit = fail_commit
         self.dialect = type("D", (), {"name": "postgresql"})()
 
     def connect(self) -> _Conn:
-        return _Conn(self.log, fail_unlock=self._fail_unlock)
+        return _Conn(self.log, fail_unlock=self._fail_unlock, fail_commit=self._fail_commit)
 
 
 def test_the_session_lock_is_committed_while_held_and_released_on_error() -> None:
@@ -180,3 +184,17 @@ def test_the_transaction_lock_is_one_statement_and_a_no_op_off_postgres() -> Non
             raise AssertionError("no lock off Postgres")
 
     take_graph_maintenance_lock(_Sqlite(), "u1")  # type: ignore[arg-type]
+
+
+def test_a_failed_commit_after_the_lock_never_returns_the_session_to_the_pool() -> None:
+    """Round 6 L-3: the lock may be held by the session, so it is invalidated, not pooled."""
+    engine = _Engine(fail_commit=True)
+
+    def _enter() -> None:
+        with graph_maintenance_held(engine, "u1"):  # type: ignore[arg-type]
+            engine.log.append("body")
+
+    with pytest.raises(RuntimeError, match="the commit failed"):
+        _enter()
+
+    assert engine.log == ["lock u1", "commit", "invalidate", "close"], "and the body never ran"
