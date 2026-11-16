@@ -837,3 +837,52 @@ def test_empty_content_directories_do_not_stop_the_move(tmp_path: Path) -> None:
     result, systemctl = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
     assert result.returncode == 0, result.stderr
     assert systemctl == ["daemon-reload", "restart containerd"]
+
+
+BOM = "\ufeff"
+
+
+@needs_bash
+def test_a_byte_order_mark_is_dropped_above_the_new_root(tmp_path: Path) -> None:
+    """Review L1: the root line must be the file's first, not after an invisible mark."""
+    result = _containerd(tmp_path, BOM + CONTAINERD_DEFAULT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+
+
+@needs_bash
+def test_a_root_set_after_a_byte_order_mark_is_no_change(tmp_path: Path) -> None:
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = BOM + MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=DROPIN)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert systemctl == []
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("config", "said"),
+    [
+        ('"root" = "/var/lib/containerd"\n', "already sets root to /var/lib/containerd"),
+        ("root = '/srv/containerd'\n", "cannot read"),
+        ("root = /srv/containerd\n", "cannot read"),
+        ('root = ""\n', "empty value"),
+    ],
+    ids=["quoted key", "single quotes", "bare value", "empty"],
+)
+def test_a_root_this_cannot_take_as_set_is_refused_never_prepended(
+    tmp_path: Path, config: str, said: str
+) -> None:
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 1
+    assert said in result.stderr
+    assert result.stdout == ""
+
+
+@needs_bash
+def test_a_quoted_root_key_set_to_the_root_is_no_change(tmp_path: Path) -> None:
+    config = '"root" = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == config

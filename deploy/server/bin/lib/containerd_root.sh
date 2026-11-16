@@ -7,37 +7,55 @@
 # boot disk, which the images filled. containerd reads `root` from the top of
 # /etc/containerd/config.toml: a top-level key, so it must come before the first table.
 
+# config_without_bom <config.toml>
+# Prints the config with a leading UTF-8 byte order mark removed (review L1); nothing when the
+# file is missing or unreadable. Never fails, so a caller under `set -e` is not stopped.
+config_without_bom() {
+  if [ -r "$1" ]; then
+    sed '1s/^\xEF\xBB\xBF//' "$1"
+  fi
+}
+
 # containerd_config_with_root <config.toml> <root>
 # Prints the config with `root = "<root>"` as its first line. Prints it unchanged when its
-# top level already sets that root (idempotent). Refuses (status 1, a message on stderr)
-# when its top level sets another root: moving it would orphan what is stored there. A
-# missing file is an empty config.
+# top level already sets that root (idempotent). Refuses (status 1, a message on stderr) when
+# its top level sets another root (moving it would orphan what is stored there), an empty
+# one, or one in a form this cannot read (review L1: never prepend a second root under a
+# first). Any top-level line `root = ...` or `"root" = ...` sets it. A missing file is an
+# empty config; a leading byte order mark is dropped.
 containerd_config_with_root() {
-  local config="$1" root="$2" current
-  # Never fails, so a caller under `set -e` is not stopped by a missing file.
-  current="$(
-    if [ -r "${config}" ]; then
-      awk '
-        /^[[:space:]]*\[/ { exit }
-        /^[[:space:]]*root[[:space:]]*=/ {
-          sub(/^[[:space:]]*root[[:space:]]*=[[:space:]]*/, "")
-          gsub(/^"|"[[:space:]]*(#.*)?$/, "")
-          print
-          exit
-        }
-      ' "${config}"
-    fi
-  )"
-  if [ -n "${current}" ] && [ "${current}" != "${root}" ]; then
-    echo "containerd's config already sets root to ${current}, not ${root}" >&2
-    return 1
-  fi
-  if [ -z "${current}" ]; then
-    printf 'root = "%s"\n' "${root}"
-  fi
-  if [ -r "${config}" ]; then
-    cat "${config}"
-  fi
+  local config="$1" root="$2" found
+  found="$(config_without_bom "${config}" | awk '
+    /^[[:space:]]*\[/ { exit }
+    /^[[:space:]]*"?root"?[[:space:]]*=/ {
+      line = $0
+      if (line ~ /^[[:space:]]*"?root"?[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*(#.*)?$/) {
+        sub(/^[[:space:]]*"?root"?[[:space:]]*=[[:space:]]*"/, "", line)
+        sub(/"[[:space:]]*(#.*)?$/, "", line)
+        print "set:" line
+      } else {
+        print "unreadable"
+      }
+      exit
+    }
+  ')"
+  case "${found}" in
+    "") printf 'root = "%s"\n' "${root}" ;;
+    "set:${root}") ;;
+    unreadable)
+      echo "containerd's config sets root in a form this cannot read; set it by hand" >&2
+      return 1
+      ;;
+    set:)
+      echo "containerd's config sets root to an empty value; set it by hand" >&2
+      return 1
+      ;;
+    *)
+      echo "containerd's config already sets root to ${found#set:}, not ${root}" >&2
+      return 1
+      ;;
+  esac
+  config_without_bom "${config}"
 }
 
 # containerd_holds_nothing
@@ -85,7 +103,8 @@ apply_containerd_root() {
   # bash turns errexit off, so a failing step would otherwise be skipped silently.
   local config="$1" root="$2" mount="$3" dropin="$4" wanted unit config_changed=0 dropin_changed=0
   wanted="$(containerd_config_with_root "${config}" "${root}")" || return 1
-  if [ "${wanted}" != "$(cat "${config}" 2>/dev/null || true)" ]; then
+  # Compared without a byte order mark: dropping one alone is no reason to rewrite.
+  if [ "${wanted}" != "$(config_without_bom "${config}")" ]; then
     containerd_holds_nothing || return 1
     install -d -m 0711 "${root}" || return 1
     install -d -m 0755 "$(dirname "${config}")" || return 1
