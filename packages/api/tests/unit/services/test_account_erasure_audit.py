@@ -184,3 +184,40 @@ def test_events_written_after_a_move_are_moved_by_the_next_run(tmp_path: Path) -
     assert len(target.splitlines()) == 2
     assert not late.exists()
     assert not list(tmp_path.glob("*.tmp")), "no temporary file left"
+
+
+def test_the_persona_log_is_rewritten_under_the_loggers_lock(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Round 3 LOW-3 (the reviewer's M7): no append from this process can land between the
+    read and the replace, because the rewrite happens while the loggers' lock is held."""
+    from contextlib import contextmanager  # noqa: PLC0415
+
+    from persona_api.services import account_erasure_audit as audit  # noqa: PLC0415
+
+    held: list[bool] = [False]
+    seen: list[bool] = []
+
+    @contextmanager
+    def lock(_path: Path) -> object:
+        held[0] = True
+        try:
+            yield
+        finally:
+            held[0] = False
+
+    real_write = audit._fsync_write  # noqa: SLF001
+
+    def write(path: Path, payload: bytes, *, append: bool) -> None:
+        seen.append(held[0])
+        real_write(path, payload, append=append)
+
+    monkeypatch.setattr(audit, "jsonl_file_lock", lock)  # type: ignore[attr-defined]
+    monkeypatch.setattr(audit, "_fsync_write", write)  # type: ignore[attr-defined]
+    log = tmp_path / "persona_x.jsonl"
+    log.write_bytes((json.dumps(_event("persona_x", written_by=_OWNER)) + "\n").encode())
+
+    audit.rekey_persona_audit_files(tmp_path, ["persona_x"], owner_id=_OWNER, erasure_id=_ERASURE)
+
+    assert seen == [True], "the rewrite (fsynced) happened inside the lock"
+    assert _OWNER not in log.read_text(encoding="utf-8")

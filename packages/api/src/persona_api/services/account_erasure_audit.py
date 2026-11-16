@@ -167,7 +167,13 @@ def _payload(lines: list[str]) -> bytes:
 
 
 def _rekey_file_in_place(path: Path, *, owner_id: str, erasure_id: str) -> int:
-    """Rewrite one log with the owner's id replaced, under the loggers' lock; lines changed."""
+    """Rewrite one log with the owner's id replaced, under the loggers' lock; lines changed.
+
+    The lock keeps this process's appends out until the replace (review round 3 LOW-3). A
+    writer in another process does not take it; the size check before the replace catches one
+    that appended meanwhile, and a write landing between that check and the replace is the
+    window the persona scrub (erasure_audit) accepts too (the reviewer's M8).
+    """
     with jsonl_file_lock(path):
         for _ in range(_FILE_ATTEMPTS):
             if not path.exists():
@@ -184,13 +190,12 @@ def _rekey_file_in_place(path: Path, *, owner_id: str, erasure_id: str) -> int:
             if not changed:
                 return 0
             temporary = path.with_name(path.name + ".rekeying")
-            temporary.write_bytes(
-                ("\n".join(clean) + "\n").encode("utf-8", errors="surrogateescape")
-            )
+            _fsync_write(temporary, _payload(clean), append=False)
             if path.read_bytes() != before:  # an event was appended meanwhile: start again
                 temporary.unlink()
                 continue
             temporary.replace(path)
+            _fsync_dir(path.parent)
             return changed
     msg = "a persona's audit log kept growing while it was re-keyed"
     raise OSError(msg)
