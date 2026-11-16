@@ -903,3 +903,57 @@ def test_the_candidates_own_persona_gone_is_not_retried() -> None:
 
     assert b.writes == 1, "the writer itself is gone: nothing to read again for"
     assert b.versions == []
+
+
+class _EveryTargetMergedAway(_MergedAway):
+    """Round 12 LOW-6: each extend target is merged away just before its write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.searches = 0
+
+    def dense_query(
+        self,
+        owner_id: str,
+        query_vector: list[float],
+        top_k: int,
+        **kw: Any,  # noqa: ANN401
+    ) -> list[ConceptNode]:
+        self.searches += 1
+        return super().dense_query(owner_id, query_vector, top_k, **kw)
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
+        self.raced = node.id in self.merged  # race each node once, the first time it is hit
+        return super().update_node(
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
+        )
+
+
+def test_the_re_search_runs_only_once() -> None:
+    """The first target and the re-searched one are both merged away: NodeMergeError, and no
+    third search."""
+    b = _EveryTargetMergedAway()
+    eng = _engine(b, {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)})
+    b.raced = True  # no race while seeding
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+    second = "u1::node::00000009"
+    b.nodes[second] = (_node_for(second), vec(0, 0.90, 3))
+    searches_before = b.searches
+
+    with pytest.raises(NodeMergeError, match="twice"):
+        eng.merge("u1", _cand("loves espresso"))
+
+    assert {first, second} <= b.merged, "both targets were merged away"
+    assert b.searches - searches_before == 2, "the first search and one re-search, no third"
