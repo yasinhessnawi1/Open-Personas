@@ -886,3 +886,14 @@ def test_a_quoted_root_key_set_to_the_root_is_no_change(tmp_path: Path) -> None:
     result = _containerd(tmp_path, config)
     assert result.returncode == 0, result.stderr
     assert result.stdout == config
+
+
+def test_preflight_checks_containerds_root_against_the_profile() -> None:
+    """Review L2: the root the running containerd reads, compared with OP_CONTAINERD_ROOT."""
+    preflight = _text("bin/preflight.sh")
+    block = preflight[preflight.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then') :]
+    block = block[: block.index("\nfi\n")]
+    assert "containerd config dump" in block
+    assert "^root = " in block
+    assert '[ "${containerd_root}" = "${OP_CONTAINERD_ROOT}" ]' in block
+    assert "|| bad " in block

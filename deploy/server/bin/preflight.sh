@@ -113,6 +113,14 @@ docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 [ "${docker_root}" = "${OP_DOCKER_DATA_ROOT:-/var/lib/docker}" ] \
   && ok "Docker's data root is ${docker_root}" \
   || bad "Docker's data root is '${docker_root}', the profile says ${OP_DOCKER_DATA_ROOT:-/var/lib/docker}"
+# containerd's root, as the running containerd reads its config (R9-289, review L2).
+if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then
+  containerd_root="$(sudo containerd config dump 2>/dev/null \
+    | sed -n 's/^root = "\(.*\)"$/\1/p' | head -n 1 || true)"
+  [ "${containerd_root}" = "${OP_CONTAINERD_ROOT}" ] \
+    && ok "containerd's root is ${containerd_root}" \
+    || bad "containerd's root is '${containerd_root}', the profile says ${OP_CONTAINERD_ROOT} (RUNBOOK.md, containerd's root)"
+fi
 data_owner="$(stat -c '%u' "${OP_DATA_DIR:-/srv/open-persona}/persona" 2>/dev/null || true)"
 [ "${data_owner}" = "${OP_DATA_UID:-}" ] \
   && ok "api data owned by the data uid ${OP_DATA_UID}" \
