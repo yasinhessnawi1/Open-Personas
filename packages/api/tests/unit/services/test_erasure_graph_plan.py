@@ -328,3 +328,16 @@ def test_split_alias_list_prefers_known_names_and_falls_back_to_commas() -> None
     assert split_alias_list("a,,b,", []) == ["a", "b"]
     assert split_alias_list('["q"]', []) == ["q"]
     assert split_alias_list("[not json,z", []) == ["[not json", "z"]
+
+
+def test_a_known_name_matches_only_where_it_stands_as_a_whole_name() -> None:
+    """A doomed "Anna" is not read off the front of a surviving "Annas" (orchestrator mutant)."""
+    assert split_alias_list("Annas,Bergen", ["Anna", "Bergen"]) == ["Annas", "Bergen"]
+
+    survivor = {**_consolidation(), "reason": "consolidation:r1 aliases:Annas,Bergen"}
+    assert without_alias_names([survivor], ["Anna"], known=["Bergen"]) is None
+
+    both = {**_consolidation(), "reason": "consolidation:r1 aliases:Annas,Anna,Bergen"}
+    assert without_alias_names([both], ["Anna"], known=["Bergen"]) == [
+        {**both, "reason": 'consolidation:r1 aliases:["Annas", "Bergen"]'}
+    ]
