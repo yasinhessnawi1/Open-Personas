@@ -332,3 +332,51 @@ def test_the_done_write_is_a_compare_and_set_that_rolls_the_links_back() -> None
     assert "graph_nodes.merged_into = :merged_into_1" in update_sql
     assert "(graph_nodes.metadata ->> :metadata_1) = :param_1" in update_sql
     assert len({txn for txn, _ in engine.log}) == 1, "one transaction: the insert rolls back"
+
+
+def _update_metadata(current: object, metadata: dict[str, str]) -> tuple[dict[str, Any], str]:
+    """The metadata and content hash update_node writes, with ``current`` on the row."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    captured: dict[str, Any] = {}
+
+    class _Row(_Conn):
+        def execute(self, stmt: Any, params: dict[str, str] | None = None) -> _Result:  # noqa: ANN401
+            sql = str(stmt)
+            if sql.startswith("SELECT graph_nodes.metadata"):
+                return type("R", (), {"scalar_one_or_none": lambda _s: current})()  # type: ignore[return-value]
+            if sql.startswith("UPDATE graph_nodes"):
+                captured.update(stmt.compile(dialect=postgresql.dialect()).params)
+            return super().execute(stmt, params)
+
+    class _RowEngine(_Engine):
+        def _open(self) -> _Conn:
+            self._next += 1
+            return _Row(self, self._next)
+
+    node = ConceptNode(
+        id="n1",
+        node_kind=NodeKind.FACT,
+        concept_name="n1",
+        content="about n1",
+        metadata=metadata,
+        provenance=(_by(_P),),
+        created_at=_NOW,
+    )
+    _backend(_RowEngine()).update_node("u1", node, _VECTOR)
+    return captured["metadata"], captured["content_hash"]
+
+
+def test_update_node_keeps_the_rows_merge_record() -> None:
+    """Round 9 MEDIUM-1: a whole-metadata write never drops or changes _k7_merge."""
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+
+    row = {"_k7_merge": "the record", "x": "old"}
+
+    kept, content_hash = _update_metadata(row, {"x": "new"})
+    assert kept == {"x": "new", "_k7_merge": "the record"}, "a stale copy did not drop it"
+    assert content_hash == _compute_node_hash("n1", "about n1", kept), "hashed as written"
+
+    assert _update_metadata(row, {"_k7_merge": "forged"})[0] == {"_k7_merge": "the record"}
+    assert _update_metadata({}, {"_k7_merge": "forged", "y": "1"})[0] == {"y": "1"}
+    assert _update_metadata(None, {"_k7_aliases": "[]"})[0] == {"_k7_aliases": "[]"}

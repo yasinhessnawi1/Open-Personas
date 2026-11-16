@@ -1320,3 +1320,138 @@ def test_an_entity_only_doomed_members_carry_leaves_the_canonical(
         ).scalars()
         listing = [r for r in records if r and "p_e" in json.loads(r).get("added_entities", [])]
     assert listing == [], "no record lists the link"
+
+
+def _race_fixture(migrated_engine: Engine, embedder: Any) -> tuple[PostgresGraphBackend, Any]:  # noqa: ANN401
+    """M (P's) with an edge M->X (P's), canonical C (Q's): the round 9 MEDIUM-1 race."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("r_c", _OTHER), vector)
+    backend.insert_node(_OWNER, _node("r_m", _PERSONA), vector)
+    backend.insert_node(_OWNER, _node("r_x", _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("r_m::causal::r_x", "r_m", "r_x", _PERSONA))
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+    return backend, consolidation
+
+
+def _during_the_act(backend: PostgresGraphBackend, then: Any) -> None:  # noqa: ANN401
+    """Run ``then`` once, between the pending record and the done write."""
+    real_close = backend.close_edges_incident
+
+    def _close_then(*args: Any, **kwargs: Any) -> list[str]:  # noqa: ANN401
+        closed = real_close(*args, **kwargs)
+        then()
+        return closed
+
+    backend.close_edges_incident = _close_then  # type: ignore[method-assign]
+
+
+def test_a_stale_whole_metadata_write_keeps_the_merge_record(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 9 MEDIUM-1 (b): an extend read M before the merge and writes it back after."""
+    import json  # noqa: PLC0415
+
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+    stale = backend.get_node(_OWNER, "r_m")
+    assert stale is not None
+    vector = embedder.encode(["x"])[0]
+    _during_the_act(backend, lambda: backend.update_node(_OWNER, stale, vector))
+
+    consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER, backend.get_node(_OWNER, "r_c"), [stale], run_id="rr", now=_NOW, epoch=1
+    )
+
+    member = backend.get_node(_OWNER, "r_m")
+    assert member is not None
+    assert json.loads(member.metadata["_k7_merge"])["state"] == "done", "the record survived"
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+    assert _open_edges(migrated_engine, "r_c") == set(), "the mirror of P's edge went"
+
+
+def test_a_dropped_merge_record_is_given_back_from_the_record_in_hand(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 9 MEDIUM-1 (a): the record is dropped between the writes; the CAS refuses.
+
+    The act gives back from its pending record: M is unmerged, its edge reopened, no mirror
+    is left open, and erasing P then leaves nothing of P.
+    """
+    import json  # noqa: PLC0415
+
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+
+    def _drop_the_record() -> None:
+        member = backend.get_node(_OWNER, "r_m")
+        assert member is not None
+        metadata = {k: v for k, v in member.metadata.items() if k != "_k7_merge"}
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE graph_nodes SET metadata = CAST(:m AS jsonb), content_hash = :h "
+                    "WHERE owner_id = :o AND id = 'r_m'"
+                ),
+                {
+                    "m": json.dumps(metadata),
+                    "h": _compute_node_hash(member.concept_name, member.content, metadata),
+                    "o": _OWNER,
+                },
+            )
+
+    _during_the_act(backend, _drop_the_record)
+    with pytest.raises(GraphMergeConflictError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, "r_c"),
+            [backend.get_node(_OWNER, "r_m")],
+            run_id="rq",
+            now=_NOW,
+            epoch=1,
+        )
+
+    with migrated_engine.connect() as conn:
+        merged_into = conn.execute(
+            text("SELECT merged_into FROM graph_nodes WHERE owner_id = :o AND id = 'r_m'"),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert merged_into is None, "M is unmerged"
+    assert _open_edges(migrated_engine, "r_c") == set(), "no mirror is left open"
+    assert _open_edges(migrated_engine, "r_m") == {"r_m::causal::r_x"}, "M's edge reopened"
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+    with migrated_engine.connect() as conn:
+        left = conn.execute(
+            text(
+                "SELECT count(*) FROM graph_edges WHERE owner_id = :o AND "
+                "(provenance @> jsonb_build_object('persona_id', CAST(:p AS text)) "
+                "OR id LIKE 'r_c::%')"
+            ),
+            {"o": _OWNER, "p": _PERSONA},
+        ).scalar_one()
+    assert left == 0
+    assert backend.get_node(_OWNER, "r_m") is None

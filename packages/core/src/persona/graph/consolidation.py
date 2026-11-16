@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from persona.audit import AuditAction, AuditEvent
+from persona.graph.errors import GraphMergeConflictError
 from persona.graph.models import (
     ConceptNode,
     NodeKind,
@@ -541,23 +542,30 @@ class ConsolidationPass:
             # personas (round 7 HIGH-1). Either both land or neither: a link is never left on
             # the canonical with a record that does not list it. Until then the record stays
             # "pending", lists no links, and the next run gives the member back.
-            self._backend.associate_entities_recording(
-                owner_id,
-                canonical.id,
-                to_copy,
-                member_id=member.id,
-                merged_into=canonical.id,
-                replaces=pending,
-                record=functools.partial(
-                    self._done_metadata,
-                    member,
-                    canonical,
-                    run_id=run_id,
-                    mirrored=made,
-                    sources=made_sources,
-                ),
-                guard_personas=sorted({*personas, *asserters.values()}),
-            )
+            try:
+                self._backend.associate_entities_recording(
+                    owner_id,
+                    canonical.id,
+                    to_copy,
+                    member_id=member.id,
+                    merged_into=canonical.id,
+                    replaces=pending,
+                    record=functools.partial(
+                        self._done_metadata,
+                        member,
+                        canonical,
+                        run_id=run_id,
+                        mirrored=made,
+                        sources=made_sources,
+                    ),
+                    guard_personas=sorted({*personas, *asserters.values()}),
+                )
+            except GraphMergeConflictError:
+                # The member's record is not the one this merge wrote (round 9 MEDIUM-1): it
+                # may be gone, so nothing would find the mirrors and closed edges this act
+                # made. Give them back from the record in hand, then fail the cluster.
+                self._give_back_conflicted(owner_id, member.id, json.loads(pending))
+                raise
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
                 self._index.remove(surrogate)  # leave the dense index (visibility)
@@ -802,12 +810,42 @@ class ConsolidationPass:
         raw = member.metadata.get(_MERGE_KEY)
         if raw is None:
             return False  # not a consolidated member
-        record = json.loads(raw)
+        self._unmerge_with(owner_id, node_id, member, json.loads(raw))
+        return True
+
+    def _give_back_conflicted(
+        self, owner_id: str, node_id: str, pending: dict[str, object]
+    ) -> None:
+        """Undo a merge act whose done write lost the CAS, from its pending record in hand.
+
+        When the row still carries this run's record, the ordinary give back reads it; when
+        it does not (another write dropped it, or the member is gone), this one uses the
+        record the act wrote: its planned mirrors go while they are still this run's, its
+        closed edges reopen by tag, and ``merged_into`` is cleared (round 9 MEDIUM-1).
+        """
+        current = self._backend.get_node(owner_id, node_id)
+        raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+        try:
+            on_row = json.loads(raw) if raw is not None else None
+        except ValueError:
+            on_row = None
+        if isinstance(on_row, dict) and on_row.get("run_id") == pending.get("run_id"):
+            return  # the row's own record: the cluster's give back reads it
+        self._unmerge_with(owner_id, node_id, current, pending)
+
+    def _unmerge_with(
+        self,
+        owner_id: str,
+        node_id: str,
+        member: ConceptNode | None,
+        record: dict[str, object],
+    ) -> None:
         run_id = record["run_id"]
         tag = f"consolidation:{run_id}"
 
         shared = self._mirrors_shared_with(owner_id, node_id, record)
-        for mirror_id in record.get("mirrored_edges", []):
+        listed = record.get("mirrored_edges")
+        for mirror_id in map(str, listed if isinstance(listed, list) else []):
             # Only while it is still this merge's mirror: the record may list one that was
             # never made, if the merge stopped before narrowing it (R9-284 MEDIUM-1). A mirror
             # another member of the same run still shares stays (round 5 MEDIUM-2).
@@ -815,6 +853,8 @@ class ConsolidationPass:
                 self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
         self._give_back_entity_links(owner_id, node_id, record)
         self._backend.reopen_edges_incident(owner_id, node_id, invalidated_by=tag)
+        if member is None:
+            return  # gone: its edges went with it
 
         orig_meta = {k: v for k, v in member.metadata.items() if k != _MERGE_KEY}
         self._backend.set_merged_into(
@@ -831,9 +871,8 @@ class ConsolidationPass:
         self._emit(
             owner_id,
             node_id=node_id,
-            metadata={"action": "consolidation_unmerge", "canonical": record["canonical"]},
+            metadata={"action": "consolidation_unmerge", "canonical": str(record["canonical"])},
         )
-        return True
 
     def _give_back_entity_links(
         self, owner_id: str, node_id: str, record: dict[str, object]

@@ -50,6 +50,7 @@ from persona.graph.models import (
     NodeProvenance,
     NodeVersion,
     TypedLink,
+    _compute_node_hash,
     make_edge_id,
 )
 
@@ -65,6 +66,17 @@ _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
 # R9-284: a graph write holds the persona it names (see PostgresGraphBackend._hold_personas).
 _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
+
+
+def keep_merge_record(metadata: dict[str, str], current: object) -> dict[str, str]:
+    """``metadata`` with the row's merge record in place of the caller's (round 9 MEDIUM-1).
+
+    Only ``_k7_merge``: other ``_k7_*`` keys (the alias list) are the caller's to write.
+    """
+    kept = {k: v for k, v in metadata.items() if k != "_k7_merge"}
+    if isinstance(current, dict) and isinstance(current.get("_k7_merge"), str):
+        kept["_k7_merge"] = current["_k7_merge"]
+    return kept
 
 
 def reopen_statement(owner_id: str, node_id: str, invalidated_by: str) -> Any:  # noqa: ANN401
@@ -189,20 +201,58 @@ class PostgresGraphBackend:
         Keeps ``id``/``owner_id``/``surrogate``/``created_at``; refreshes content,
         embedding, metadata, wellbeing tag, content_hash, and the provenance trail.
         Returns the ``surrogate`` (for index replace) or ``None`` if absent.
+
+        The merge record (``_k7_merge``) is lifecycle state, like ``merged_into``: it is kept
+        as the row has it, whatever the caller's copy of the metadata says (R9-284 round 9
+        MEDIUM-1). A caller that read the node before a merge wrote its record, and writes the
+        whole metadata back after, would otherwise drop it. The row is read ``FOR UPDATE`` in
+        this transaction, so a merge's record write waits, and the content hash is recomputed
+        over the metadata actually written.
         """
         self._check_dim(embedding, node.id)
-        stmt = (
+        with self._engine.begin() as conn:
+            self._hold_personas(
+                conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
+            )
+            current = conn.execute(
+                select(graph_nodes.c.metadata)
+                .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            metadata = keep_merge_record(dict(node.metadata), current)
+            content_hash = (
+                node.content_hash
+                if metadata == dict(node.metadata)
+                else _compute_node_hash(node.concept_name, node.content, metadata)
+            )
+            surrogate = conn.execute(
+                self._update_node_statement(
+                    owner_id, node, embedding, embedding_model, metadata, content_hash
+                )
+            ).scalar_one_or_none()
+        return None if surrogate is None else int(surrogate)
+
+    def _update_node_statement(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        embedding_model: str,
+        metadata: dict[str, str],
+        content_hash: str,
+    ) -> Any:  # noqa: ANN401 - an UPDATE
+        return (
             update(graph_nodes)
             .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
             .values(
                 node_kind=str(node.node_kind),
                 concept_name=node.concept_name,
                 content=node.content,
-                metadata=dict(node.metadata),
+                metadata=metadata,
                 wellbeing_category=node.wellbeing_category,
                 embedding=list(embedding),
                 embedding_model=embedding_model,
-                content_hash=node.content_hash,
+                content_hash=content_hash,
                 provenance=[p.model_dump(mode="json") for p in node.provenance],
                 # Advance the dirty-neighbourhood watermark (K7-D-4). salience /
                 # last_evidence_epoch / merged_into are lifecycle state and are
@@ -211,12 +261,6 @@ class PostgresGraphBackend:
             )
             .returning(graph_nodes.c.surrogate)
         )
-        with self._engine.begin() as conn:
-            self._hold_personas(
-                conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
-            )
-            surrogate = conn.execute(stmt).scalar_one_or_none()
-        return None if surrogate is None else int(surrogate)
 
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
         stmt = select(graph_nodes).where(

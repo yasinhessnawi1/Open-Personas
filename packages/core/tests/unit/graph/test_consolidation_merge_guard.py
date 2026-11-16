@@ -483,3 +483,64 @@ def test_giving_a_member_back_keeps_an_entity_link_another_member_carries(carrie
     else:
         assert backend.removed == [["E"]]
         assert "n" not in backend.rewritten
+
+
+class _ClobberedRecord(_Backend):
+    """Round 9 MEDIUM-1: a stale whole-metadata write dropped m's pending record."""
+
+    def __init__(self, canonical: ConceptNode, member: ConceptNode) -> None:
+        super().__init__(canonical, member)
+        self.given_back: list[str] = []
+
+    def associate_entities_recording(self, *_a: Any, **_k: Any) -> list[str]:  # noqa: ANN401
+        from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+        raise GraphMergeConflictError("the member changed", context={"node_id": "m"})
+
+    def merge_records_listing(self, *_a: Any, **_k: Any) -> dict[str, str]:  # noqa: ANN401
+        return {}
+
+    def existing_edge_keys(self, *_a: Any) -> set[int]:  # noqa: ANN401
+        return set()
+
+    def delete_open_mirror(self, _owner: str, edge_id: str, **kw: Any) -> None:  # noqa: ANN401
+        self.given_back.append(f"delete {edge_id} {kw['tag']}")
+
+    def reopen_edges_incident(self, _owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        self.given_back.append(f"reopen {node_id} {kw['invalidated_by']}")
+
+    def remove_entity_associations(self, *_a: Any) -> None:  # noqa: ANN401
+        return None
+
+    def set_merged_into(self, owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        if kw["merged_into"] is None:
+            self.given_back.append(f"clear {node_id}")
+            return
+        super().set_merged_into(owner, node_id, **kw)
+
+
+def test_a_lost_cas_with_no_record_on_the_row_gives_back_from_the_record_in_hand() -> None:
+    """The planned mirror goes by its run tag, the closed edges reopen, merged_into clears."""
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    canonical = _node("k", _Q)
+    member = _node("m", _P, None, _P)  # get_node gives it back with no _k7_merge
+    backend = _ClobberedRecord(canonical, member)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    with pytest.raises(GraphMergeConflictError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            "u1", canonical, [member], run_id="r1", now=_NOW, epoch=1
+        )
+
+    assert backend.given_back == [
+        "delete k::causal::x consolidation:r1",
+        "reopen m consolidation:r1",
+        "clear m",
+    ]
