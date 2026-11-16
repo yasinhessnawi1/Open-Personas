@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -92,3 +92,83 @@ def test_every_route_that_authenticates_a_user_answers_410_before_401(app: str) 
     generic = source.index("except AuthenticationError:")
     assert erased < generic
     assert "status_code=410" in source[erased:generic]
+
+
+# ---- every adapter build_connectors makes gets the fenced verifier (review L-4) ----------
+
+_PLATFORM_API_RESPONSES = {
+    "getMe": {"ok": True, "result": {"username": "opbot", "id": "1"}},
+    "users/@me": {"id": "999", "username": "opbot"},
+    "auth.test": {"ok": True, "user_id": "U1", "team_id": "T1"},
+}
+
+
+def _platform(request: httpx.Request) -> httpx.Response:
+    for marker, payload in _PLATFORM_API_RESPONSES.items():
+        if marker in str(request.url):
+            return httpx.Response(200, json=payload)
+    return httpx.Response(200, json={"ok": True, "result": {"username": "opbot", "id": "1"}})
+
+
+@pytest.mark.asyncio
+async def test_build_connectors_gives_every_adapter_the_fenced_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drives the real build_connectors: each verifier it hands an adapter refuses an erased
+    id, so no adapter can be wired with the plain one."""
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from persona_api.config import APIConfig, Edition  # noqa: PLC0415
+    from persona_connectors import service  # noqa: PLC0415
+
+    monkeypatch.setattr(service, "account_erased", lambda _engine, user_id: user_id == "user_gone")
+    built: list[Any] = []
+    real = service._build_connector_verifier  # noqa: SLF001
+
+    def _recording(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        verify = real(*args, **kwargs)
+        built.append(verify)
+        return verify
+
+    monkeypatch.setattr(service, "_build_connector_verifier", _recording)
+    config = ConnectorConfig(  # type: ignore[call-arg]
+        edition="cloud",
+        jwt_secret="test-jwt-secret",
+        telegram_bot_token="tg-token",
+        discord_oauth_client_id="discord-client-id",
+        discord_oauth_client_secret="discord-client-secret",
+        discord_oauth_redirect_uri="https://example.test/discord/oauth/callback",
+        discord_bot_token="discord-token",
+        slack_oauth_client_id="slack-client-id",
+        slack_oauth_client_secret="slack-client-secret",
+        slack_oauth_redirect_uri="https://example.test/slack/oauth/callback",
+        slack_bot_token="xoxb-token",
+        slack_app_token="xapp-token",
+    )
+    api_config = APIConfig(
+        edition=Edition.community,
+        community_db_path=str(tmp_path / "community.db"),
+        community_memory_path=str(tmp_path / "memory"),
+        audit_root=str(tmp_path / "audit"),
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_platform)) as http:
+        await service.build_connectors(
+            connector_config=config,
+            api_config=api_config,
+            rls_engine=MagicMock(),
+            dispatch_engine=MagicMock(),
+            runtime_factory=MagicMock(),
+            credits_policy=MagicMock(),
+            job_queue=MagicMock(),
+            stripe_gateway=None,
+            http=http,
+        )
+
+    assert len(built) >= 3, "telegram, discord and slack each built a verifier"
+    gone = jwt.encode(
+        {"sub": "user_gone", "exp": int(time.time()) + 60}, "test-jwt-secret", algorithm="HS256"
+    )
+    for verify in built:
+        with pytest.raises(AccountErasedTokenError):
+            await verify(gone)
