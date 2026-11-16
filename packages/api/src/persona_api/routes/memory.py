@@ -12,6 +12,7 @@ distilled from — a plain ``DELETE`` alone is resurrection-prone (D-K11-4).
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -176,7 +177,10 @@ async def delete_node(
     """
     store = _graph_store(request)
     try:
-        deleted = store is not None and memory_service.delete(store, user.id, node_id)
+        # R9-287 review HIGH-1: the delete may wait on the graph lock; never on the event loop.
+        deleted = store is not None and await asyncio.to_thread(
+            memory_service.delete, store, user.id, node_id
+        )
     except GraphNodeBusyError as exc:
         raise _reorganising(node_id) from exc
     if not deleted:
@@ -250,7 +254,8 @@ async def forget_node(
     """
     store, backend, audit_logger, rls_engine = _forget_composition(request, user, node_id)
     try:
-        memory_service.forget(
+        await asyncio.to_thread(
+            memory_service.forget,
             graph_store=store,
             memory_backend=backend,
             audit_logger=audit_logger,
