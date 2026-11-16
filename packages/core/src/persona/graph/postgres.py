@@ -42,6 +42,7 @@ from persona.graph._schema import (
     graph_nodes,
 )
 from persona.graph.errors import (
+    GraphError,
     GraphIndexError,
     GraphMergeConflictError,
     GraphNodeBusyError,
@@ -68,7 +69,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection, Engine
 
-__all__ = ["DELETE_LOCK_TIMEOUT", "NodeReleaser", "PostgresGraphBackend"]
+__all__ = ["DELETE_LOCK_TIMEOUT", "NodeReleaser", "PostgresGraphBackend", "RefuseNodeDeletes"]
 
 #: How long a node delete waits for a running consolidation's graph lock (R9-287).
 DELETE_LOCK_TIMEOUT = "15s"
@@ -88,6 +89,19 @@ class NodeReleaser(Protocol):
     """
 
     def release(self, conn: Connection, owner_id: str, node_id: str) -> Callable[[], object]: ...
+
+
+class RefuseNodeDeletes:
+    """The releaser of a process that never deletes a node (R9-287 review MEDIUM-1).
+
+    Fail closed: a delete through it is refused in its own transaction, before anything is
+    removed, rather than deleting a node and leaving what consolidation copied from it.
+    """
+
+    def release(self, conn: Connection, owner_id: str, node_id: str) -> Callable[[], object]:
+        del conn, owner_id
+        msg = "this process does not delete graph nodes"
+        raise GraphError(msg, context={"node_id": node_id})
 
 
 _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"

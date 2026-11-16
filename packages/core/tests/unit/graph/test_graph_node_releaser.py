@@ -11,8 +11,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from persona.graph.errors import GraphNodeBusyError
-from persona.graph.postgres import DELETE_LOCK_TIMEOUT, PostgresGraphBackend
+from persona.graph.errors import GraphError, GraphNodeBusyError
+from persona.graph.postgres import DELETE_LOCK_TIMEOUT, PostgresGraphBackend, RefuseNodeDeletes
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 
@@ -133,3 +133,17 @@ def test_the_lock_timeout_can_be_set_and_is_used() -> None:
 def test_a_lock_timeout_of_any_other_shape_is_refused(bad: str) -> None:
     with pytest.raises(ValueError, match="delete_lock_timeout"):
         _backend([], releaser=True, timeout=bad)
+
+
+def test_a_process_that_refuses_node_deletes_deletes_nothing() -> None:
+    log: list[str] = []
+    backend = PostgresGraphBackend(
+        engine=_Engine(log),  # type: ignore[arg-type]
+        persona_guard=False,
+        node_releaser=RefuseNodeDeletes(),
+    )
+
+    with pytest.raises(GraphError, match="does not delete graph nodes"):
+        backend.delete_node("u1", "n1")
+
+    assert "delete" not in log
