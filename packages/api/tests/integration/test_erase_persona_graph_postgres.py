@@ -1643,7 +1643,11 @@ def test_a_superseded_canonicals_versions_lose_the_erased_personas_names(
         epoch=1,
     )
     backend.snapshot_node_version(
-        _OWNER, "r_c", valid_at=_NOW, invalid_at=_NOW, invalidated_by="superseded"
+        _OWNER,
+        "r_c",
+        valid_at=_NOW,
+        invalid_at=_NOW + timedelta(seconds=1),  # a version's window must not be empty
+        invalidated_by="superseded",
     )
     with migrated_engine.begin() as conn:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})

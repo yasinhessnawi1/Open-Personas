@@ -191,7 +191,8 @@ def test_a_record_that_fails_after_the_insert_lands_no_link(app_engine: Engine) 
             ["r_ent"],
             member_id="r_m",
             merged_into="r_k",
-            expected_content_hash="h", expected_provenance=(),
+            expected_content_hash="h",
+            expected_provenance=(),
             record=_broken,
             guard_personas=[_PERSONA],
         )
