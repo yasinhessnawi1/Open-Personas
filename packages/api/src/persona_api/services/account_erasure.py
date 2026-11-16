@@ -64,6 +64,7 @@ __all__ = [
     "AccountErasurePendingError",
     "AccountErasureRaceError",
     "begin_account_erasure",
+    "unready_reason",
     "erase_account",
 ]
 
@@ -131,6 +132,28 @@ def capture_account(conn: Connection, *, owner_id: str, origin: str) -> dict[str
         ),
         "origin": [origin],
     }
+
+
+def unready_reason(deps: AccountEraseDeps, *, owner_id: str, origin: str) -> str | None:
+    """Why this process could not finish this account's erasure, or ``None`` when it can.
+
+    Asked before anything is claimed (review H2), so a deletion is never accepted that the
+    runner would only fail at the Clerk or Stripe step: the Clerk delete is needed when our
+    route started it, and the Stripe eraser when the account has a Stripe customer.
+    """
+    if origin == ORIGIN_ROUTE and deps.clerk is None:
+        return "clerk_not_configured"
+    if deps.stripe is None:
+        sub = subscription_t.c
+        with deps.engine.connect() as conn:
+            customer = conn.execute(
+                select(sub.stripe_customer_id).where(
+                    sub.user_id == owner_id, sub.stripe_customer_id.is_not(None)
+                )
+            ).first()
+        if customer is not None:
+            return "stripe_not_configured"
+    return None
 
 
 def begin_account_erasure(engine: Engine, *, owner_id: str, origin: str) -> Erasure:

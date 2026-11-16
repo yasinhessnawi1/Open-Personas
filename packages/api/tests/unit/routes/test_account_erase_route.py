@@ -18,8 +18,14 @@ _USER = "user_2abc"
 
 
 class _Runner:
-    def __init__(self) -> None:
+    def __init__(self, reason: str | None = None) -> None:
         self.submitted: list[Any] = []
+        self.reason = reason
+        self.asked: list[tuple[str, str]] = []
+
+    def unready_reason(self, *, owner_id: str, origin: str) -> str | None:
+        self.asked.append((owner_id, origin))
+        return self.reason
 
     def submit(self, erasure: Any) -> None:  # noqa: ANN401
         self.submitted.append(erasure)
@@ -124,3 +130,18 @@ def test_without_a_runner_it_is_unavailable_and_claims_nothing(
 
     assert resp.status_code == 503
     assert claims == [], "nothing is claimed that no runner would carry out"
+
+
+def test_a_deletion_the_runner_could_not_finish_is_503_and_claims_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H2: no Clerk key (or no Stripe for a customer) means no deletion is accepted."""
+    runner = _Runner(reason="clerk_not_configured")
+    client, claims = _client(monkeypatch, runner=runner)
+
+    resp = _post(client, "ann@example.test")
+
+    assert resp.status_code == 503
+    assert runner.asked == [(_USER, "route")]
+    assert claims == []
+    assert runner.submitted == []

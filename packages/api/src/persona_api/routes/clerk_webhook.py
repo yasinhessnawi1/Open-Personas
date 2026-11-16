@@ -17,6 +17,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from persona_api.config import Edition
 from persona_api.errors import AccountErasureUnavailableError, ClerkWebhookRejectedError
+from persona_api.services.account_erasure_runner import secret_value
 from persona_api.services.clerk_webhook import MAX_BODY_BYTES, handle_event, verify_signature
 
 router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
@@ -40,7 +41,7 @@ async def clerk_webhook(request: Request) -> dict[str, str]:
     config = state.config
     if config.edition is not Edition.cloud:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-    secret = config.clerk_webhook_secret
+    secret = secret_value(config.clerk_webhook_secret)
     runner = getattr(state, "account_erase_runner", None)
     platform = getattr(state, "platform_engine", None)
     if secret is None or runner is None or platform is None:
@@ -54,13 +55,13 @@ async def clerk_webhook(request: Request) -> dict[str, str]:
     if not msg_id or not timestamp or not signatures:
         raise ClerkWebhookRejectedError("the webhook was rejected", context={"reason": "headers"})
     verify_signature(
-        secret.get_secret_value(),
+        secret,
         msg_id=msg_id,
         timestamp=timestamp,
         signatures=signatures,
         body=body,
     )
-    deletion = await run_in_threadpool(handle_event, platform, body)
+    deletion = await run_in_threadpool(handle_event, platform, body, runner)
     if deletion.erasure is not None:
         runner.submit(deletion.erasure)
     return {"outcome": deletion.outcome}

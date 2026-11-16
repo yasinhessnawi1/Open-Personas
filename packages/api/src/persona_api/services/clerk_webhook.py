@@ -22,13 +22,13 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from persona.logging import get_logger
 from sqlalchemy import select
 
 from persona_api.db.models import users as users_t
-from persona_api.errors import ClerkWebhookRejectedError
+from persona_api.errors import AccountErasureUnavailableError, ClerkWebhookRejectedError
 from persona_api.services.account_erasure import ORIGIN_CLERK, begin_account_erasure
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 
@@ -113,8 +113,16 @@ def _known(engine: Engine, user_id: str) -> bool:
         return conn.execute(select(users_t.c.id).where(users_t.c.id == user_id)).first() is not None
 
 
-def handle_event(engine: Engine, body: bytes) -> ClerkDeletion:
-    """Start (or find) the account's erasure for a verified ``user.deleted`` delivery."""
+class _Readiness(Protocol):
+    def unready_reason(self, *, owner_id: str, origin: str) -> str | None: ...
+
+
+def handle_event(engine: Engine, body: bytes, runner: _Readiness) -> ClerkDeletion:
+    """Start (or find) the account's erasure for a verified ``user.deleted`` delivery.
+
+    Raises :class:`AccountErasureUnavailableError` (503, so Clerk retries) before claiming
+    anything when this process could not finish the erasure (review H2).
+    """
     user_id = _user_id(body)
     if user_id is None:
         return ClerkDeletion(None, "ignored")
@@ -124,6 +132,8 @@ def handle_event(engine: Engine, body: bytes) -> ClerkDeletion:
     if not _known(engine, user_id):
         # Never provisioned here, or already erased: nothing of theirs is left to erase.
         return ClerkDeletion(None, "unknown")
+    if runner.unready_reason(owner_id=user_id, origin=ORIGIN_CLERK) is not None:
+        raise AccountErasureUnavailableError("account deletion is not available", context={})
     erasure = begin_account_erasure(engine, owner_id=user_id, origin=ORIGIN_CLERK)
     _log.info("clerk user.deleted started an account erasure erasure={eid}", eid=erasure.id)
     return ClerkDeletion(erasure, "started")

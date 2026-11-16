@@ -119,6 +119,16 @@ def claims(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
     return seen
 
 
+class _Ready:
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason
+        self.asked: list[tuple[str, str]] = []
+
+    def unready_reason(self, *, owner_id: str, origin: str) -> str | None:
+        self.asked.append((owner_id, origin))
+        return self.reason
+
+
 def _provision(engine: Engine, user_id: str = "user_2abc") -> None:
     with engine.begin() as conn:
         conn.execute(insert(users).values(id=user_id, email=f"{user_id}@x.test"))
@@ -129,7 +139,7 @@ def test_user_deleted_starts_the_erasure_from_clerk(
 ) -> None:
     _provision(engine)
 
-    result = hook.handle_event(engine, _event())
+    result = hook.handle_event(engine, _event(), _Ready())
 
     assert result.outcome == "started"
     assert claims == [{"owner_id": "user_2abc", "origin": "clerk"}]
@@ -138,14 +148,14 @@ def test_user_deleted_starts_the_erasure_from_clerk(
 def test_another_event_type_changes_nothing(engine: Engine, claims: list[dict[str, str]]) -> None:
     _provision(engine)
 
-    assert hook.handle_event(engine, _event("user.updated")).outcome == "ignored"
+    assert hook.handle_event(engine, _event("user.updated"), _Ready()).outcome == "ignored"
     assert claims == []
 
 
 def test_a_user_never_provisioned_changes_nothing(
     engine: Engine, claims: list[dict[str, str]]
 ) -> None:
-    assert hook.handle_event(engine, _event()).outcome == "unknown"
+    assert hook.handle_event(engine, _event(), _Ready()).outcome == "unknown"
     assert claims == []
 
 
@@ -153,9 +163,9 @@ def test_a_redelivery_finds_the_running_erasure(
     engine: Engine, claims: list[dict[str, str]]
 ) -> None:
     _provision(engine)
-    first = hook.handle_event(engine, _event())
+    first = hook.handle_event(engine, _event(), _Ready())
 
-    again = hook.handle_event(engine, _event())
+    again = hook.handle_event(engine, _event(), _Ready())
 
     assert again.outcome == "running"
     assert again.erasure is not None
@@ -167,7 +177,7 @@ def test_a_redelivery_finds_the_running_erasure(
 @pytest.mark.parametrize("bad", [b"not json", _event(user_id="user_a/../b"), _event(user_id="")])
 def test_an_unreadable_delivery_is_rejected(engine: Engine, bad: bytes) -> None:
     with pytest.raises(ClerkWebhookRejectedError):
-        hook.handle_event(engine, bad)
+        hook.handle_event(engine, bad, _Ready())
 
 
 # ---- the route --------------------------------------------------------------------------
@@ -190,6 +200,9 @@ class _Runner:
     def __init__(self) -> None:
         self.submitted: list[Any] = []
 
+    def unready_reason(self, *, owner_id: str, origin: str) -> str | None:  # noqa: ARG002
+        return None
+
     def submit(self, erasure: Any) -> None:  # noqa: ANN401
         self.submitted.append(erasure)
 
@@ -210,7 +223,7 @@ def _client(
     )
     handled: list[bytes] = []
 
-    def _handle(_engine: object, body: bytes) -> SimpleNamespace:
+    def _handle(_engine: object, body: bytes, _runner: object) -> SimpleNamespace:
         handled.append(body)
         return SimpleNamespace(erasure=SimpleNamespace(id="erasure_1"), outcome="started")
 
@@ -325,3 +338,19 @@ def test_a_declared_length_over_the_limit_is_refused_before_reading(
 
     assert resp.status_code == 413, "refused on what it declares, before the stream is read"
     assert handled == []
+
+
+def test_a_deletion_this_process_cannot_finish_is_503_before_anything_is_claimed(
+    engine: Engine, claims: list[dict[str, str]]
+) -> None:
+    """Review H2: Clerk retries a 503, so nothing is accepted that the runner would fail."""
+    from persona_api.errors import AccountErasureUnavailableError  # noqa: PLC0415
+
+    _provision(engine)
+    ready = _Ready("stripe_not_configured")
+
+    with pytest.raises(AccountErasureUnavailableError):
+        hook.handle_event(engine, _event(), ready)
+
+    assert ready.asked == [("user_2abc", "clerk")]
+    assert claims == []

@@ -64,6 +64,9 @@ def erase_account(  # sync: the claim and the profile read block, so it runs in 
         email if isinstance(email, str) else None
     ):
         raise AccountEraseConfirmationError("the confirmation does not match", context={})
+    if runner.unready_reason(owner_id=user.id, origin=ORIGIN_ROUTE) is not None:
+        # Review H2: never accept a deletion the runner would only fail to finish.
+        raise AccountErasureUnavailableError("account deletion is not available", context={})
     erasure = begin_account_erasure(platform, owner_id=user.id, origin=ORIGIN_ROUTE)
     runner.submit(erasure)
     return AccountEraseResponse(erasure_id=erasure.id, state=erasure.state.value)

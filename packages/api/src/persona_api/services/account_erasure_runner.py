@@ -20,7 +20,11 @@ from persona.logging import get_logger
 
 from persona_api.billing.account_erasure import StripeAccountEraser
 from persona_api.config import Edition
-from persona_api.services.account_erasure import AccountEraseDeps, erase_account
+from persona_api.services.account_erasure import (
+    AccountEraseDeps,
+    erase_account,
+    unready_reason,
+)
 from persona_api.services.clerk_users import ClerkUsers
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
 from persona_api.services.erasure_start import erase_deps_from_state
@@ -44,6 +48,31 @@ SWEEP_SECONDS = 300.0
 _DAYS_PER_YEAR = 366
 
 
+def secret_value(secret: Any) -> str | None:  # noqa: ANN401 - a SecretStr or None
+    """The secret's value, or ``None`` when it is unset or empty (an env line left blank)."""
+    value = None if secret is None else secret.get_secret_value()
+    return value or None
+
+
+def warn_missing_secrets(config: Any) -> list[str]:  # noqa: ANN401 - APIConfig
+    """Log, at boot on cloud, each account-deletion secret that is not set; the names."""
+    missing = [
+        name
+        for name, value in (
+            ("PERSONA_CLERK_SECRET_KEY", config.clerk_secret_key),
+            ("PERSONA_CLERK_WEBHOOK_SECRET", config.clerk_webhook_secret),
+        )
+        if secret_value(value) is None
+    ]
+    for name in missing:
+        _log.warning(
+            "account deletion is not fully configured: {name} is unset; deletion requests "
+            "answer 503 until it is",
+            name=name,
+        )
+    return missing
+
+
 def account_erase_deps_from_state(state: Any) -> AccountEraseDeps | None:  # noqa: ANN401 - app.state
     """The account erasure's deps for this process; ``None`` off cloud or without a platform."""
     config = state.config
@@ -53,11 +82,11 @@ def account_erase_deps_from_state(state: Any) -> AccountEraseDeps | None:  # noq
     if persona is None:
         return None
     gateway = getattr(state, "stripe_gateway", None)
-    secret = config.clerk_secret_key
+    secret = secret_value(config.clerk_secret_key)
     return AccountEraseDeps(
         persona=persona,
         stripe=None if gateway is None else StripeAccountEraser(gateway.client),
-        clerk=None if secret is None else ClerkUsers(secret.get_secret_value()),
+        clerk=None if secret is None else ClerkUsers(secret),
         retention=timedelta(days=_DAYS_PER_YEAR * config.billing_retention_years),
     )
 
@@ -69,6 +98,10 @@ class AccountEraseRunner:
         self._deps = deps
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="account-erase")
         self._closed = threading.Event()
+
+    def unready_reason(self, *, owner_id: str, origin: str) -> str | None:
+        """Why this runner could not finish that account's erasure (``None``: it can)."""
+        return unready_reason(self._deps, owner_id=owner_id, origin=origin)
 
     def submit(self, erasure: Erasure) -> None:
         """Hand the erasure to the thread; a no-op once closed (the sweep resumes it later)."""
@@ -116,6 +149,7 @@ def start_account_erasures(
     if deps is None:
         state.account_erase_runner = None
         return None
+    warn_missing_secrets(state.config)
     runner = AccountEraseRunner(deps)
     state.account_erase_runner = runner
 

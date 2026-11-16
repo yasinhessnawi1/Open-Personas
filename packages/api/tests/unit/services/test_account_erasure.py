@@ -337,3 +337,44 @@ def test_the_account_waits_for_an_unfinished_persona_erasure(
 
     with pytest.raises(ae.AccountErasurePendingError):
         ae._erase_one_persona(_deps(engine), _OWNER, "persona_x")  # noqa: SLF001
+
+
+# ---- readiness (review H2) -------------------------------------------------------------
+
+
+@pytest.fixture
+def billing_engine(engine: Engine) -> Engine:
+    from persona_api.db.models import subscription  # noqa: PLC0415
+
+    subscription.create(engine)
+    return engine
+
+
+def _with_customer(engine: Engine) -> None:
+    from persona_api.db.models import subscription  # noqa: PLC0415
+    from sqlalchemy import insert  # noqa: PLC0415
+
+    with engine.begin() as conn:
+        conn.execute(insert(subscription).values(user_id=_OWNER, stripe_customer_id="cus_1"))
+
+
+def test_our_route_needs_clerk(billing_engine: Engine) -> None:
+    deps = _deps(billing_engine, stripe=_Stripe())
+
+    assert ae.unready_reason(deps, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE) == (
+        "clerk_not_configured"
+    )
+    assert ae.unready_reason(deps, owner_id=_OWNER, origin=ae.ORIGIN_CLERK) is None
+
+
+def test_a_stripe_customer_needs_stripe(billing_engine: Engine) -> None:
+    deps = _deps(billing_engine, clerk=_Clerk())
+    assert ae.unready_reason(deps, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE) is None
+
+    _with_customer(billing_engine)
+
+    assert ae.unready_reason(deps, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE) == (
+        "stripe_not_configured"
+    )
+    with_stripe = _deps(billing_engine, clerk=_Clerk(), stripe=_Stripe())
+    assert ae.unready_reason(with_stripe, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE) is None

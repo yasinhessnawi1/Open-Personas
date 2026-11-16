@@ -124,3 +124,16 @@ def test_off_cloud_nothing_is_started() -> None:
 
     assert runner_mod.start_account_erasures(state) is None
     assert state.account_erase_runner is None
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_an_unset_or_empty_secret_is_no_secret(value: str | None) -> None:
+    from pydantic import SecretStr  # noqa: PLC0415
+
+    assert runner_mod.secret_value(None if value is None else SecretStr(value)) is None
+
+
+def test_boot_warns_for_each_missing_account_deletion_secret() -> None:
+    config = APIConfig(edition=Edition.cloud, clerk_secret_key="sk_test_x")
+
+    assert runner_mod.warn_missing_secrets(config) == ["PERSONA_CLERK_WEBHOOK_SECRET"]
