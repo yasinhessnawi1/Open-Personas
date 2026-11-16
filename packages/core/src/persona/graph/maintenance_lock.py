@@ -5,7 +5,9 @@ graph step could land between two of them. So the two never interleave for the s
 both take this Postgres advisory lock. Consolidation holds it for its whole run, on a session
 connection of its own, and reads its candidates only once it holds it; the erasure's graph step
 (and the sweep's, which is the same function) takes it in its own transaction, before any row
-lock, so it is released at commit or rollback.
+lock, so it is released at commit or rollback. A user's forget or delete of a node is the third
+taker (R9-287, D-R9-287-forget-canonical): the node delete takes it the same way, first in its
+transaction, waiting at most its lock timeout.
 
 The key is the two-``int4`` form, ``(GRAPH_MAINTENANCE_CLASS, hashtext('graph-maint:' || owner))``.
 Postgres keeps that key space apart from the single ``bigint`` keys the other advisory locks in
@@ -13,13 +15,17 @@ this codebase use, so no other lock can collide with it. Two owners whose hashes
 wait for each other; nothing is shared but the wait.
 
 Why this adds no deadlock cycle. A waiter for this lock holds nothing when it starts waiting:
-the graph step takes it as the first statement of its transaction, and a consolidation run
-takes it before its first read or write. The holder (a consolidation run) may then wait on row
+the graph step and the node delete take it as the first statement of their transactions (the
+delete's ``SET LOCAL lock_timeout`` before it takes no lock), and a consolidation run takes it
+before its first read or write. The holder (a consolidation run) may then wait on row
 locks: a persona row ``FOR KEY SHARE`` for the write guard, node and edge rows for its writes.
+The graph step and the node delete, once they hold it, wait on row locks the same way.
 Those are held by other writers (synthesis, a direct write, the erasure's persona row delete),
 and none of them ever waits for this lock: the persona row delete runs in its own transaction,
-before the graph step and without this lock. So no cycle passes through it; any cycle among
-row locks alone existed before it and is retried (the job's backoff, the sweep's next pass).
+before the graph step and without this lock. Consolidation never deletes a node, so it never
+calls the node delete while it holds the session lock. So no cycle passes through it; any
+cycle among row locks alone existed before it and is retried (the job's backoff, the sweep's
+next pass, the forget's 409).
 """
 
 from __future__ import annotations
