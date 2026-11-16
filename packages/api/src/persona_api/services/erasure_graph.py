@@ -346,7 +346,7 @@ def _unmerge_members_of(conn: Connection, owner_id: str, doomed: list[str]) -> i
             nodes_t.c.id.not_in(doomed),
         )
         .order_by(nodes_t.c.id)
-        .with_for_update()
+        .with_for_update(key_share=True)
     ).all()
     for member in members:
         tag, metadata = unmerged(member.metadata)
@@ -432,7 +432,7 @@ def _give_back_entity_links(
         select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
         .where(nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, sorted(transfers), Text))
         .order_by(nodes_t.c.id)
-        .with_for_update()
+        .with_for_update(key_share=True)
     ).all():
         record = merge_record(member.metadata)
         if record is None:
@@ -476,7 +476,7 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         canonical = conn.execute(
             select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
             .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         ).first()
         metadata = without_aliases(canonical.metadata or {}, names) if canonical else None
         if canonical is not None and metadata is not None:
@@ -505,7 +505,7 @@ def _drop_alias_names_from_trails(
             select(key, table.c.provenance)
             .where(table.c.owner_id == owner_id, node_column == canonical_id)
             .order_by(key)
-            .with_for_update()
+            .with_for_update(key_share=True)
         ).all()
         for row_key, trail in rows:
             rewritten = without_alias_names(trail or [], names, known=known)
@@ -812,7 +812,7 @@ def _prune_orphans(conn: Connection, owner_id: str, mirrors: _Mirrors) -> dict[s
             select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
             .where(nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, sorted(rewrites), Text))
             .order_by(nodes_t.c.id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         ).all()
         for member in locked:
             record = rewrites[member.id]
@@ -1035,7 +1035,7 @@ def _strip_entity_aliases(conn: Connection, owner_id: str, persona_id: str) -> i
             _naming(graph_entities.c.aliases, persona_id),
         )
         .order_by(graph_entities.c.id)
-        .with_for_update()
+        .with_for_update(key_share=True)
     ).all()
     removed = 0
     for entity_id, aliases in rows:

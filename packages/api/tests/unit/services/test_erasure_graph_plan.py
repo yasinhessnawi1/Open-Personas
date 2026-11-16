@@ -557,3 +557,38 @@ def test_a_link_another_live_member_carries_stays_and_passes_to_it() -> None:
     assert remove == ["e1"]
     assert transfers == {"b": ["e2"]}
     assert entity_link_plan([], {"e": "b"}) == ([], {})
+
+
+def test_a_row_the_step_only_updates_is_locked_for_no_key_update() -> None:
+    """Round 10 LOW-1: FOR UPDATE only where the step deletes the rows (_nodes, _versions).
+
+    FOR NO KEY UPDATE lets a foreign key check (an edge insert's KEY SHARE on its node) through
+    while the step rewrites the row's metadata or trail.
+    """
+    import ast  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    from persona_api.services import erasure_graph  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    tree = ast.parse(inspect.getsource(erasure_graph))
+    deleting = {"_nodes", "_versions"}
+    plain: list[str] = []
+    for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        for call in (n for n in ast.walk(function) if isinstance(n, ast.Call)):
+            if getattr(call.func, "attr", None) != "with_for_update":
+                continue
+            key_share = any(
+                k.arg == "key_share" and getattr(k.value, "value", None) is True
+                for k in call.keywords
+            )
+            if function.name not in deleting and not key_share:
+                plain.append(function.name)
+    assert plain == [], f"FOR UPDATE where no row is deleted: {plain}"
+    compiled = str(
+        select(erasure_graph.nodes_t.c.id)
+        .with_for_update(key_share=True)
+        .compile(dialect=postgresql.dialect())
+    )
+    assert compiled.endswith("FOR NO KEY UPDATE")
