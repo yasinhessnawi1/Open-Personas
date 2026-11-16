@@ -364,6 +364,7 @@ class PersonaEraseSweep:
         self._state = threading.Lock()
         self._tasks: set[asyncio.Future[None]] = set()
         self._executor: ThreadPoolExecutor | None = None
+        self._finished: set[tuple[str, str]] = set()  # done during the current sweep
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
@@ -404,12 +405,20 @@ class PersonaEraseSweep:
             if full:
                 self._last_full_pass = now
         with self._state:
-            todo = sorted(k for k in {*found, *self._retry} if k[0] not in self._waiting)
-        waited_for: set[str] = set()  # owners a wait covered during this sweep
+            self._finished.clear()
+            candidates = sorted({*found, *self._retry})
+            # An owner whose wait is in flight is left to it; a persona found fresh is kept
+            # in the retry set, so the wait or the next sweep does it (round 9 LOW-2).
+            self._retry.update(k for k in candidates if k[0] in self._waiting)
+            todo = [k for k in candidates if k[0] not in self._waiting]
+        waited_for: set[str] = set()  # owners whose wait this sweep spawned
         for key in todo:
             owner_id, persona_id = key
             if owner_id in waited_for:
-                continue  # that owner's wait has every one of its personas
+                with self._state:
+                    if key not in self._finished:
+                        self._retry.add(key)  # not done yet: the wait or the next sweep does it
+                continue
             try:
                 # Never wait here: the sweep runs on the worker's event loop, and a
                 # consolidation run of this owner may hold the graph lock (round 6 M-3).
@@ -435,6 +444,7 @@ class PersonaEraseSweep:
         with self._state:
             self._retry.discard(key)
             self._deferrals.pop(key, None)
+            self._finished.add(key)
         _log.warning(
             "graph backstop removed what an erased persona left persona={pid} counts={counts}",
             pid=key[1],

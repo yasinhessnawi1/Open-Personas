@@ -570,3 +570,46 @@ def test_close_stops_the_waiting_thread(engine: Engine) -> None:
     assert sweep._executor is None  # noqa: SLF001
     with pytest.raises(RuntimeError):
         executor.submit(lambda: None)
+
+
+def test_a_fresh_persona_of_an_owner_whose_wait_runs_is_kept_for_later(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 9 LOW-2: skipped because the owner's wait is in flight, not forgotten."""
+    import asyncio  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+
+    release = threading.Event()
+    calls, erase = _always_busy_then(None)
+
+    def _slow(*args: object, **kwargs: object) -> object:
+        if kwargs.get("wait") is True:
+            release.wait(timeout=10)
+        return erase(*args, **kwargs)  # type: ignore[operator]
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _slow)
+    a, c, d = (_OWNER, _persona("a")), (_OWNER, _persona("c")), (_OWNER, _persona("d"))
+    found = [a, c]
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: list(found),
+    )
+    sweep._deferrals[a] = persona_erase.DEFERRALS_BEFORE_WAIT - 1  # noqa: SLF001
+
+    async def _on_the_loop() -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        sweep()  # a escalates; its wait blocks; c is skipped this sweep
+        spawned_now = set(sweep._retry)  # noqa: SLF001
+        found.append(d)
+        sweep()  # the wait is in flight: d, found fresh, is skipped too
+        in_flight = set(sweep._retry)  # noqa: SLF001
+        release.set()
+        await asyncio.gather(*sweep._tasks)  # noqa: SLF001
+        return spawned_now, in_flight
+
+    spawned_now, in_flight = asyncio.run(_on_the_loop())
+
+    assert c in spawned_now, "skipped while its owner's wait was spawned, kept"
+    assert d in in_flight, "skipped while its owner's wait ran, kept"
+    assert [k for k in calls if k["wait"] is True], "the wait ran"
