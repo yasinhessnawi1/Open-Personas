@@ -353,11 +353,41 @@ def seed_into(engine: Engine, memory: Backend, tmp_path: Path) -> Seeded:
 
 
 def open_files_under(root: Path) -> list[str]:
-    """Files under ``root`` this process still holds open (a leak on Windows, R9-284)."""
+    """Files under ``root`` this process still holds open (a leak on Windows, R9-284).
+
+    psutil lists the process's open files, but on the GitHub Windows runner the listing itself
+    is refused (``AccessDenied`` from a handle under ``C:\\$Extend``). Then the guard falls back to
+    :func:`files_held_open_under`, which finds the same leak another way; it never just passes.
+    """
+    try:
+        listed = psutil.Process().open_files()
+    except (psutil.AccessDenied, PermissionError):
+        return files_held_open_under(root)
     prefix = str(root.resolve()).lower()
-    return sorted(
-        f.path for f in psutil.Process().open_files() if f.path.lower().startswith(prefix)
-    )
+    return sorted(f.path for f in listed if f.path.lower().startswith(prefix))
+
+
+_PROBE = ".leakprobe"
+
+
+def files_held_open_under(root: Path) -> list[str]:
+    """Files under ``root`` that cannot be renamed: on Windows, the ones a handle holds open.
+
+    Python, SQLite and Chroma's index files open without ``FILE_SHARE_DELETE``, so Windows
+    refuses to rename a file while any of them holds it, and allows it once it is closed. Each
+    file is renamed and renamed back. Only meaningful on Windows (POSIX renames open files), which
+    is the only place psutil's listing has been refused.
+    """
+    held: list[str] = []
+    for path in sorted(p for p in root.rglob("*") if p.is_file() and p.suffix != _PROBE):
+        probe = path.with_name(path.name + _PROBE)
+        try:
+            path.rename(probe)
+        except PermissionError:
+            held.append(str(path))
+            continue
+        probe.rename(path)
+    return held
 
 
 @contextmanager
