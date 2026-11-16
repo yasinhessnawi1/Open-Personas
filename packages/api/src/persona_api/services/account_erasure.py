@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from persona.graph.maintenance_lock import take_graph_maintenance_lock
 from persona.logging import get_logger
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import audit_log as audit_log_t
@@ -78,6 +78,10 @@ _log = get_logger("api.erasure")
 #: Who asked: our route (so the Clerk user is deleted too), or Clerk's ``user.deleted``.
 ORIGIN_ROUTE = "route"
 ORIGIN_CLERK = "clerk"
+
+#: How long the row step waits for a lock (review L-7): a consolidation or a writer holding the
+#: owner's rows makes it fail and back off rather than hang the runner's one thread.
+ROW_LOCK_TIMEOUT = "30s"
 
 #: ``credit_transactions`` reasons that record money paid (kept); usage rows go with the account.
 PAID_REASONS = frozenset({"subscription_renewal", "payg_topup", "auto_topup"})
@@ -416,6 +420,8 @@ def _step_row(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
     """
     owner = erasure.owner_id
     with deps.engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text(f"SET LOCAL lock_timeout = '{ROW_LOCK_TIMEOUT}'"))
         take_graph_maintenance_lock(conn, owner)
         held = conn.execute(
             select(users_t.c.id).where(users_t.c.id == owner).with_for_update()
