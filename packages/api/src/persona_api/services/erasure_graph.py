@@ -539,6 +539,9 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         names = names_only_the_doomed_gave(given, survivors)
         if not names:
             continue
+        # FOR NO KEY UPDATE (SQLAlchemy's key_share without read): the lock the metadata write
+        # below takes anyway, held from the read so nothing changes the row in between, while
+        # a writer's FOR KEY SHARE on it (an edge insert) still goes ahead (review LOW-2).
         canonical = conn.execute(
             select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
             .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical_id)
