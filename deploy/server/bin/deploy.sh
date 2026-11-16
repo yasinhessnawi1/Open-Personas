@@ -35,8 +35,8 @@ say() { echo "deploy: $*" >&2; }
 
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
-# Every `compose exec` here reads from /dev/null: it reads stdin otherwise, and would swallow
-# the rest of a script fed to bash on stdin (`ssh host bash -s < deploy.sh`).
+# Every `compose exec` and `compose run` here reads from /dev/null: it reads stdin otherwise,
+# and would swallow the rest of a script fed to bash on stdin (`ssh host bash -s < deploy.sh`).
 # The database, the images and the data live on the block volume: never deploy without it.
 require_data_mount
 
@@ -100,13 +100,14 @@ chmod 600 "${dump}"
 
 # --- 6 ------------------------------------------------------------------------------
 say "migrating"
-compose run --rm migrate || die "migration failed; nothing was restarted (the old containers still serve)"
+compose run --rm migrate </dev/null \
+  || die "migration failed; nothing was restarted (the old containers still serve)"
 
 # --- 7 ------------------------------------------------------------------------------
 # Caddy runs with its admin API off, so a bad Caddyfile is only found at start: check it
 # first, with the same image and env file.
 compose run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
-  >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
+  </dev/null >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
 # The api's HOME (/var/lib/persona/home in the container) must exist and belong to the data
 # uid: the image's own home belongs to uid 1000. Made here rather than by provision.sh,
 # because restore.sh refuses to unpack into a data directory that is not empty.
