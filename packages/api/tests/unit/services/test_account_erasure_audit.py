@@ -246,3 +246,18 @@ def test_a_lost_target_with_a_later_offset_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="gone"):
         rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+
+
+def test_a_fresh_move_clears_a_stale_offset(tmp_path: Path) -> None:
+    """Round 4 LOW-1 (the reviewer's M1): a crash between removing .moving and removing the
+    offset leaves a stale offset; a later move of new events must not cut back to it."""
+    _owner_log(tmp_path, n=2)
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+    (tmp_path / f"{_ERASURE}.jsonl.moving.offset").write_text("0", encoding="ascii")  # stale
+    later = {**_event(_OWNER), "timestamp": "2026-11-16T13:00:00+00:00"}
+    (tmp_path / f"{_OWNER}.jsonl").write_bytes((json.dumps(later) + "\n").encode())
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 1
+
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    assert len(target.read_text(encoding="utf-8").splitlines()) == 3, "all three kept"
