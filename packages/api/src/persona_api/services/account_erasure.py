@@ -321,12 +321,39 @@ def _copy_billing(conn: Connection, erasure: Erasure, retention: timedelta) -> i
     rows = _retained_rows(conn, erasure, datetime.now(UTC) + retention)
     if not rows:
         return 0
-    added = conn.execute(
+    return int(conn.execute(retained_insert(rows)).rowcount or 0)
+
+
+#: Every column a retained row is written with (the table's own id and timestamps aside).
+_RETAINED_COLUMNS = (
+    "erasure_id",
+    "source_table",
+    "source_id",
+    "reason",
+    "credits",
+    "billing_key",
+    "cost_cents",
+    "stripe_customer_id",
+    "stripe_subscription_id",
+    "occurred_at",
+    "retain_until",
+)
+
+
+def retained_insert(rows: list[dict[str, Any]]) -> Any:  # noqa: ANN401 - an Insert
+    """The INSERT for the retained rows, idempotent on (erasure, source table, source id).
+
+    A multi-row VALUES needs every row to name the same columns: the three kinds of row carry
+    different fields (a PAYG grant has no cost, a subscription no credits), so each is given
+    every column, ``None`` where it has none. Without that Postgres refuses the statement at
+    compile time (the CI failure on 030caf43).
+    """
+    full = [{name: row.get(name) for name in _RETAINED_COLUMNS} for row in rows]
+    return (
         pg_insert(retained_t)
-        .values(rows)
+        .values(full)
         .on_conflict_do_nothing(index_elements=["erasure_id", "source_table", "source_id"])
-    ).rowcount
-    return int(added or 0)
+    )
 
 
 def _step_billing(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:

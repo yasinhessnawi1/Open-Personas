@@ -464,3 +464,61 @@ def test_a_paid_row_written_after_the_billing_step_is_copied_before_the_delete()
     delete_at = next(i for i, s in enumerate(conn.sql) if s.startswith("DELETE FROM users"))
     lock_at = next(i for i, s in enumerate(conn.sql) if s.endswith("FOR UPDATE"))
     assert lock_at < insert_at < delete_at, "copied under the lock, before the cascade"
+
+
+# ---- the retained INSERT compiles on Postgres (CI failure on 030caf43) --------------------
+
+
+def test_the_retained_insert_compiles_for_every_kind_of_row_together() -> None:
+    """A credit row, a PAYG grant and the subscription carry different fields; the multi-row
+    INSERT must still compile for Postgres (it did not, and only CI found it)."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    until = datetime(2031, 11, 16, tzinfo=UTC)
+    common = {"erasure_id": "erasure_1", "stripe_customer_id": "cus_1", "retain_until": until}
+    rows = [
+        {
+            **common,
+            "source_table": "credit_transactions",
+            "source_id": "ct_1",
+            "reason": "payg_topup",
+            "credits": 1000,
+            "billing_key": "bk",
+            "cost_cents": 1000.0,
+            "occurred_at": until,
+        },
+        {
+            **common,
+            "source_table": "payg_grants",
+            "source_id": "pg_1",
+            "reason": "payg_grant",
+            "credits": 1000,
+            "billing_key": "bk",
+            "occurred_at": until,
+        },
+        {
+            **common,
+            "source_table": "subscription",
+            "source_id": "subscription",
+            "reason": "pro",
+            "stripe_subscription_id": "sub_1",
+            "occurred_at": None,
+        },
+    ]
+
+    sql = str(ae.retained_insert(rows).compile(dialect=postgresql.dialect()))
+
+    assert sql.startswith("INSERT INTO retained_billing_records")
+    assert "ON CONFLICT (erasure_id, source_table, source_id) DO NOTHING" in sql
+
+
+def test_each_kind_of_row_alone_compiles_too() -> None:
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    for row in (
+        {"erasure_id": "e", "source_table": "subscription", "source_id": "subscription"},
+        {"erasure_id": "e", "source_table": "payg_grants", "source_id": "p", "credits": 1},
+    ):
+        str(ae.retained_insert([row]).compile(dialect=postgresql.dialect()))
