@@ -238,8 +238,8 @@ backup of the block volume, "provisioned, empty".
 `/srv` is the 100 GB block volume (`/dev/oracleoci/oraclevdb`). If it is ever missing
 (detached, or the mount failed at boot), `nofail` lets the host boot, and then:
 
-- Docker does not start (`RequiresMountsFor=/srv`), so no container comes up on an empty
-  data root on the boot disk;
+- neither containerd nor Docker starts (`RequiresMountsFor=/srv` on both), so no container
+  comes up on an empty data root or containerd root on the boot disk;
 - `bin/deploy.sh`, `bin/backup.sh` and `bin/restore.sh` stop with "the block volume is
   missing".
 
@@ -276,17 +276,21 @@ systemctl show -p Result open-persona-backup.service
 
 # 2. stop the app (live-restore would keep it running through step 3)
 cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
+sudo docker ps -q                  # must print nothing; stop any container it lists first
 
 # 3. stop Docker and containerd
 sudo systemctl stop docker.socket docker containerd
+pgrep -a containerd-shim           # must print nothing: no shim may hold the old root
 
-# 4. copy the root
-sudo rsync -aHAX --numeric-ids /var/lib/containerd/ /srv/containerd/
+# 4. copy the root (--delete: a redo after a rollback drops what the first copy left)
+sudo rsync -aHAX --numeric-ids --delete /var/lib/containerd/ /srv/containerd/
 
-# 5. the two trees must be the same size; stop here (and roll back) if they are not
-sudo du -sb /var/lib/containerd /srv/containerd
+# 5. the copy is exact: this dry run must print nothing; stop here (and roll back) if it does
+sudo rsync -aHAXn --numeric-ids --delete -i /var/lib/containerd/ /srv/containerd/
 
-# 6. back up the config, then prepend the root
+# 6. no root set yet (this must print nothing; a root already set is not this procedure's),
+#    then back up the config and prepend the root
+sudo grep -nE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml
 sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289
 sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
 
@@ -300,9 +304,12 @@ sudo systemctl start docker
 # 9. the images are there
 sudo docker images | grep 'open-persona/api' | grep current
 
-# 10. the app, then /healthz 200
+# 10. the app, then /healthz 200 (waited for: the api takes a while to start)
 sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/healthz
+for _ in $(seq 1 60); do
+  curl -fsS -o /dev/null http://127.0.0.1:8000/healthz && { echo "healthz 200"; break; }
+  sleep 5
+done
 
 # 11. preflight
 sudo -u deploy deploy/server/bin/preflight.sh </dev/null
@@ -322,6 +329,7 @@ sudo rm -rf /var/lib/containerd.old
 cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
 sudo docker ps -q                  # must print nothing; stop any container it lists first
 sudo systemctl stop docker.socket docker containerd
+pgrep -a containerd-shim           # must print nothing
 sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml
 sudo mv /var/lib/containerd.old /var/lib/containerd   # after step 7 only
 sudo systemctl start containerd
