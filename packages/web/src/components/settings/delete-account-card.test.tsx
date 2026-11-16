@@ -264,4 +264,23 @@ describe("delete account card", () => {
       false,
     );
   });
+
+  it("leaves for the goodbye page even when sign-out fails", async () => {
+    // Review L-6: the account is gone either way.
+    signOut.mockRejectedValue(new Error("clerk is down"));
+    apiPost.mockResolvedValue({
+      response: new Response(null, { status: 202 }),
+      data: { erasure_id: "erasure_1", state: "pending" },
+    });
+    expects("ann@example.test");
+    renderCard();
+    await openAndType("ann@example.test");
+
+    fireEvent.click(slot("delete-account-submit"));
+
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/account-deleted"),
+    );
+    expect(signOut).toHaveBeenCalledWith({ redirectUrl: "/account-deleted" });
+  });
 });

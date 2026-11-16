@@ -74,7 +74,7 @@ export interface Account {
   /** Whether account actions (sign-out / manage) are available — cloud only. */
   available: boolean;
   /** Sign the user out (cloud); undefined in community. */
-  signOut?: () => void | Promise<void>;
+  signOut?: (options?: { redirectUrl?: string }) => void | Promise<void>;
   /** Open the account-management UI (cloud); undefined in community. */
   manageAccount?: () => void;
 }

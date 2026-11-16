@@ -171,7 +171,10 @@ export function AccountMenu({
         {account.signOut ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={account.signOut}>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => void account.signOut?.()}
+            >
               <LogOut />
               {t("signOut")}
             </DropdownMenuItem>

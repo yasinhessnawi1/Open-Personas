@@ -89,9 +89,17 @@ export function DeleteAccountCard() {
       setBusy(false);
       return;
     }
-    // The session goes first (review L6), so nothing on the next page still holds it.
-    await account.signOut?.();
-    router.replace(ACCOUNT_DELETED_PATH);
+    // The session goes first (review L6), so nothing on the next page still holds it; Clerk
+    // lands on the goodbye page itself. Whatever sign-out does, the account is gone, so the
+    // user is always taken there (review L-6).
+    try {
+      await account.signOut?.({ redirectUrl: ACCOUNT_DELETED_PATH });
+    } catch {
+      // A failed sign-out leaves a session for an account that no longer exists; the API
+      // refuses it (410) and the goodbye page holds nothing of it.
+    } finally {
+      router.replace(ACCOUNT_DELETED_PATH);
+    }
   }
 
   return (
