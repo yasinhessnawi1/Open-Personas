@@ -319,12 +319,15 @@ def test_a_give_back_stuck_five_times_alerts_once_then_daily(
     consolidation = _pass(backend)
     consolidation.run("u1")  # m pending (its in-run give back failed too)
 
+    seen: list[int] = []
     for run in range(1, 7):
         _Clock.now_at = _NOW + timedelta(minutes=run)
         consolidation.run("u1")
         record = json.loads(backend.nodes["m"].metadata["_k7_merge"])
         assert record["give_back_failures"] == run
-    assert len(alerts) == 1, "the fifth failure alerts, the sixth does not"
+        seen.append(len(alerts))
+    # Round 9 LOW-4 (M8, M9): exactly the fifth, not the fourth, and not again at the sixth.
+    assert seen == [0, 0, 0, 0, 1, 1], "the fifth failure alerts, the sixth does not"
     assert alerts[0].startswith("OPERATOR ALERT: consolidation give back stuck")
 
     _Clock.now_at = _NOW + timedelta(hours=25)

@@ -613,3 +613,28 @@ def test_a_fresh_persona_of_an_owner_whose_wait_runs_is_kept_for_later(
     assert c in spawned_now, "skipped while its owner's wait was spawned, kept"
     assert d in in_flight, "skipped while its owner's wait ran, kept"
     assert [k for k in calls if k["wait"] is True], "the wait ran"
+
+
+def test_a_failed_wait_stops_waiting_for_the_rest_of_that_owner(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer's M28: the lock is still held; the next persona would wait just as long."""
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    failure = OperationalError("SELECT pg_advisory_xact_lock", {}, Exception("lock timeout"))
+    calls, erase = _always_busy_then(failure)
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", erase)
+    monkeypatch.setattr(persona_erase._log, "error", lambda _msg, **_k: None)  # noqa: SLF001
+    keys = [(_OWNER, _persona("a")), (_OWNER, _persona("b"))]
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: list(keys),
+    )
+
+    for _ in range(persona_erase.DEFERRALS_BEFORE_WAIT):
+        sweep()
+
+    assert len([c for c in calls if c["wait"] is True]) == 1, "one timed-out wait, then stop"
+    assert sweep._retry == set(keys)  # noqa: SLF001
