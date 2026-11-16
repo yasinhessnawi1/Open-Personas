@@ -52,6 +52,8 @@ containerd_config_with_root() {
 # drop-in alone takes effect at the next start, and restarting containerd under a running app
 # is not what a re-provision should do).
 apply_containerd_root() {
+  # Every step ends in `|| return 1` (review M2): the caller runs this in a `||` list, where
+  # bash turns errexit off, so a failing step would otherwise be skipped silently.
   local config="$1" root="$2" mount="$3" dropin="$4" wanted unit config_changed=0 dropin_changed=0
   wanted="$(containerd_config_with_root "${config}" "${root}")" || return 1
   if [ "${wanted}" != "$(cat "${config}" 2>/dev/null || true)" ]; then
@@ -59,25 +61,32 @@ apply_containerd_root() {
       echo "Docker holds containers or images; move them before putting containerd's root at ${root}" >&2
       return 1
     fi
-    install -d -m 0711 "${root}"
-    install -d -m 0755 "$(dirname "${config}")"
-    printf '%s\n' "${wanted}" > "${config}"
-    chmod 0644 "${config}"
+    install -d -m 0711 "${root}" || return 1
+    install -d -m 0755 "$(dirname "${config}")" || return 1
+    # The first rewrite keeps the package's config beside it; a later one never overwrites it.
+    if [ -e "${config}" ] && [ ! -e "${config}.bak-r9289" ]; then
+      cp -p "${config}" "${config}.bak-r9289" || return 1
+    fi
+    # Written whole, then moved over the config: containerd never reads half of it.
+    printf '%s\n' "${wanted}" > "${config}.tmp" || return 1
+    chmod 0644 "${config}.tmp" || return 1
+    mv -f "${config}.tmp" "${config}" || return 1
     config_changed=1
   fi
   if [ -n "${mount}" ]; then
     unit="$(printf '[Unit]\nRequiresMountsFor=%s' "${mount}")"
     if [ "${unit}" != "$(cat "${dropin}" 2>/dev/null || true)" ]; then
-      install -d -m 0755 "$(dirname "${dropin}")"
-      printf '%s\n' "${unit}" > "${dropin}"
-      chmod 0644 "${dropin}"
+      install -d -m 0755 "$(dirname "${dropin}")" || return 1
+      printf '%s\n' "${unit}" > "${dropin}.tmp" || return 1
+      chmod 0644 "${dropin}.tmp" || return 1
+      mv -f "${dropin}.tmp" "${dropin}" || return 1
       dropin_changed=1
     fi
   fi
   if [ "${config_changed}" = 1 ] || [ "${dropin_changed}" = 1 ]; then
-    systemctl daemon-reload
+    systemctl daemon-reload || return 1
   fi
   if [ "${config_changed}" = 1 ]; then
-    systemctl restart containerd
+    systemctl restart containerd || return 1
   fi
 }

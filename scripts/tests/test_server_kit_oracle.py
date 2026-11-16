@@ -640,8 +640,23 @@ MOVED = 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
 DROPIN = "[Unit]\nRequiresMountsFor=/srv\n"
 
 
+def _failing_stub(name: str, match: str) -> str:
+    """A stub that fails only the call whose arguments contain ``match``.
+
+    Every other call goes on to the real command (the stub's directory leads PATH), or, for
+    install, to the mkdir that STUB_INSTALL does.
+    """
+    rest = 'mkdir -p "${@: -1}"' if name == "install" else f'PATH="${{PATH#*:}}" exec {name} "$@"'
+    return f'#!/usr/bin/env bash\ncase " $* " in *{match}*) exit 1 ;; esac\n{rest}\n'
+
+
 def _apply(
-    tmp_path: Path, *, config: str | None, images: str, dropin: str | None
+    tmp_path: Path,
+    *,
+    config: str | None,
+    images: str,
+    dropin: str | None,
+    failing: tuple[tuple[str, str], ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """apply_containerd_root on files under tmp_path, with docker and systemctl stubbed."""
     stubs = tmp_path / "stubs"
@@ -650,6 +665,7 @@ def _apply(
         ("docker", STUB_DOCKER),
         ("systemctl", STUB_SYSTEMCTL),
         ("install", STUB_INSTALL),
+        *((name, _failing_stub(name, match)) for name, match in failing),
     ):
         (stubs / name).write_text(body, encoding="utf-8", newline="\n")
         (stubs / name).chmod(0o755)
@@ -666,7 +682,10 @@ def _apply(
         f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"; '
         f'. "{(LIB / "containerd_root.sh").as_posix()}"; '
         f'apply_containerd_root "{(etc / "config.toml").as_posix()}" '
-        f'"{(tmp_path / "srv-containerd").as_posix()}" /srv "{(etc / "dropin.conf").as_posix()}"'
+        f'"{(tmp_path / "srv-containerd").as_posix()}" /srv "{(etc / "dropin.conf").as_posix()}" '
+        # As provision.sh calls it, in a `||` list: errexit is off inside, as it is there, so
+        # only the function's own `|| return 1` can stop it (review M2).
+        "|| exit 1"
     )
     log = stubs / "systemctl.log"
     return result, log.read_text(encoding="utf-8").splitlines() if log.exists() else []
@@ -723,3 +742,41 @@ def test_the_live_hosts_first_re_run_reloads_and_never_restarts(tmp_path: Path) 
     assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
     assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
     assert systemctl == ["daemon-reload"], "no restart under the running app"
+
+
+@needs_bash
+def test_the_config_is_moved_into_place_and_the_original_kept(tmp_path: Path) -> None:
+    """Review M2: written whole to config.toml.tmp and moved; the package's config kept."""
+    result, _ = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    etc = tmp_path / "etc"
+    assert (etc / "config.toml.bak-r9289").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert not (etc / "config.toml.tmp").exists()
+    assert not (etc / "dropin.conf.tmp").exists()
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "broken",
+    [
+        ("install", "srv-containerd"),  # the new root
+        ("cp", "bak-r9289"),  # the original's copy
+        ("chmod", "config.toml.tmp"),
+        ("mv", "config.toml.tmp"),
+    ],
+    ids=lambda b: b[0],
+)
+def test_a_step_that_fails_fails_the_whole_and_restarts_nothing(
+    tmp_path: Path, broken: tuple[str, str]
+) -> None:
+    """Review M2: under `|| die` errexit is off, so each step must stop the function itself.
+
+    Each stub fails one call only, so it is that step's own check that stops the function,
+    not a later step's; the drop-in (already in place) adds nothing to restart.
+    """
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=DROPIN, failing=(broken,)
+    )
+    assert result.returncode == 1
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
