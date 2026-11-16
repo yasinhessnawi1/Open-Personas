@@ -278,6 +278,15 @@ class RunRecordEmptyError(PersonaError):
     """
 
 
+class AccountErasedError(PersonaError):
+    """The account this request authenticates as was erased, or is being erased (→ 410).
+
+    D-R9-284-account-erase: an erased account's id is refused for good. Clerk never reuses a
+    user id, so a token issued before the erasure is the only way to arrive with one, and it
+    must not provision the account again. ``context`` is empty: the id is not echoed back.
+    """
+
+
 class MemoryNodeChangedError(PersonaError):
     """A Memory node changed while it was being written, every try (→ 409; R9-284).
 
@@ -630,6 +639,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_body("run_not_found", exc.message or "run not found", exc.context),
+        )
+
+    @app.exception_handler(AccountErasedError)
+    async def _account_erased_410(_: Request, exc: AccountErasedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_410_GONE,
+            content=_body("account_erased", exc.message or "this account was deleted", {}),
         )
 
     @app.exception_handler(MemoryNodeChangedError)
