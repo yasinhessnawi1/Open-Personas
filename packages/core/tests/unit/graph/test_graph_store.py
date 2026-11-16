@@ -271,18 +271,19 @@ def test_delete_removes_from_both_and_audits_once() -> None:
 def test_a_delete_audits_every_node_that_went_once() -> None:
     """Round 2 LOW-2: the members merged into it go too, and each gets its DELETE event."""
     b, idx, audit = _FakeBackend(), _FakeIndex(), MemoryAuditLogger()
-    b.delete_members = {"u1::node::m2": 9, "u1::node::m1": 8}
+    # A member whose id sorts before the node's: the forgotten node is still first (M3).
+    b.delete_members = {"u1::node::m2": 9, "u1::node::00000000": 8}
     store = _store(b, idx, _created_merge(), audit)
 
     assert store.delete_node("u1", "u1::node::00000001") is True
 
     assert [e.chunk_ids for e in audit.events] == [
         ["u1::node::00000001"],
-        ["u1::node::m1"],
+        ["u1::node::00000000"],
         ["u1::node::m2"],
     ]
     assert all(e.action is AuditAction.DELETE for e in audit.events)
-    assert idx.removed == [7], "only the node's own index entry"
+    assert idx.removed == [7, 8, 9], "every entry that went, the node's first"
 
 
 def test_delete_self_node_raises_protected() -> None:

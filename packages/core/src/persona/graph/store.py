@@ -245,10 +245,13 @@ class PostgresGraphStore:
         if node_id not in gone:
             return False
         # One DELETE event per node that went, the forgotten one first (round 2 LOW-2).
-        for deleted in [node_id, *sorted(set(gone) - {node_id})]:
+        order = [node_id, *sorted(set(gone) - {node_id})]
+        for deleted in order:
             self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=deleted)
-        # The node's own entry; a member left the index when it was merged (stale is benign).
-        self._index.remove(gone[node_id])  # same path; raises on failure
+        # Every entry that went (round 3 nit): a member usually left the index when it was
+        # merged, and removing an absent surrogate is a no-op.
+        for deleted in order:
+            self._index.remove(gone[deleted])  # same path; raises on failure
         return True
 
     # ===== the user's self node (Spec K6) =================================

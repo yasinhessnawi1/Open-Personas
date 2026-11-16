@@ -8,6 +8,7 @@ re-distill.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,7 +17,6 @@ from persona_api.app import create_app
 from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig, Edition
 from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimiter
-from persona_api.routes import memory as memory_routes
 from persona_api.services import memory_service
 
 
@@ -29,6 +29,10 @@ class _Store:
     def delete_node(self, owner_id: str, node_id: str) -> bool:  # noqa: ARG002
         was, self.present = self.present, False
         return was
+
+    def get_node(self, owner_id: str, node_id: str) -> Any:  # noqa: ANN401, ARG002
+        """What the preview's node detail reads first: nothing once the node is gone."""
+        return SimpleNamespace(id=node_id) if self.present else None
 
 
 class _Episodic:
@@ -63,13 +67,9 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     _Episodic.fail_next = True
     monkeypatch.setattr(memory_service, "EpisodicStore", _Episodic)
     monkeypatch.setattr(memory_service, "_list_all_owner_personas", lambda _e: [{"id": "p1"}])
-    # The node detail the preview and the delete route read: gone once the first try ran.
+    # The preview reads the node through the real node_detail (round 3 nit): gone once the
+    # first try ran, so its 404 is the route's own.
     store = _Store()
-    monkeypatch.setattr(
-        memory_routes.memory_service,
-        "node_detail",
-        lambda *_a, **_k: {"id": "n1"} if store.present else None,
-    )
     app.state.verify_token = _verify
     app.state.admin_engine = None
     app.state.graph_store = store
