@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FREE_TEXT_FIELDS",
+    "rekey_persona_log_in_place",
     "scrub_persona_log_in_place",
     "scrub_store_audit_files",
     "scrub_store_audit_rows",
@@ -235,6 +236,37 @@ def _contentless_line(
     if clean == event:
         return line
     return json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
+
+
+def _rekeyed_only_line(line: str, *, persona_id: str, rekey: Mapping[str, str]) -> str:
+    """The persona's event with an erased account's id replaced; nothing else changes."""
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return line
+    if not isinstance(event, dict) or event.get("persona_id") != persona_id:
+        return line
+    author = event.get("written_by")
+    if not (isinstance(author, str) and author in rekey):
+        return line
+    return json.dumps(
+        {**event, "written_by": rekey[author]}, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+def rekey_persona_log_in_place(
+    audit_root: Path, *, persona_id: str, rekey: Mapping[str, str]
+) -> int:
+    """Name an erased account by its erasure id in ``{persona}.jsonl``; lines changed.
+
+    For a legacy persona whose erasure is claimed (R9-290 round 2 LOW-4): the erasure scrubs
+    its free text later, and nothing but the author changes here.
+    """
+    path = audit_root / f"{require_path_segment(persona_id, what='audit log')}.jsonl"
+    with jsonl_file_lock(path):
+        return _scrub_held_file(
+            path, lambda line: _rekeyed_only_line(line, persona_id=persona_id, rekey=rekey)
+        )
 
 
 def scrub_persona_log_in_place(

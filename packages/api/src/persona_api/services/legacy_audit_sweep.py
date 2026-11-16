@@ -44,7 +44,10 @@ from sqlalchemy import select, text
 from persona_api.db.models import erasures as erasures_t
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import users as users_t
-from persona_api.services.erasure_audit import scrub_persona_log_in_place
+from persona_api.services.erasure_audit import (
+    rekey_persona_log_in_place,
+    scrub_persona_log_in_place,
+)
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import AUDIT_CONTENT_KEYS, _remove_tool_log
 from persona_api.workspace_paths import is_persona_id
@@ -87,6 +90,7 @@ class LegacySweepCounts:
     """What one sweep did (or, in a dry run, would do). Counts only."""
 
     claimed: int = 0
+    rekeyed: int = 0
     refused: int = 0
     scrubbed_unknown_owner: int = 0
     scrubbed_ambiguous_owner: int = 0
@@ -266,6 +270,26 @@ def _store_log_has_content(audit_root: Path, persona_id: str, rekey: dict[str, s
     return False
 
 
+def _names_an_erased_account(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bool:
+    """Whether the persona's store log has an event an erased account wrote (dry run)."""
+    store_log = audit_root / f"{persona_id}{_STORE}"
+    if not store_log.is_file():
+        return False
+    for line in store_log.read_bytes().decode("utf-8", errors="surrogateescape").split("\n"):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("persona_id") == persona_id
+            and isinstance(author := event.get("written_by"), str)
+            and author in rekey
+        ):
+            return True
+    return False
+
+
 def _clean_in_place(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bool:
     removed = _remove_tool_log(audit_root, persona_id)
     lines = scrub_persona_log_in_place(
@@ -301,7 +325,7 @@ def sweep_legacy_audit_files(
     now = clock()
     counts = {f.name: 0 for f in fields(LegacySweepCounts)}
     counts["kept_known"] = len(ids) - len(leftovers)
-    claims: list[tuple[str, str]] = []
+    claims: list[tuple[str, str, dict[str, str]]] = []
     cleans: list[tuple[str, bool, dict[str, str]]] = []
     for pid in leftovers:  # decide: reads only
         if not _quiet(audit_root, pid, now):
@@ -309,14 +333,15 @@ def sweep_legacy_audit_files(
             continue
         candidates = owner_candidates(audit_root / f"{pid}{_STORE}", pid)
         owners = _users(engine, candidates)
+        # Every candidate that is not a live user may be an erased account (round 2 LOW-4).
+        rekey = _account_erasures(engine, candidates - owners)
         if len(owners) == 1:
-            claims.append((pid, next(iter(owners))))
+            claims.append((pid, next(iter(owners)), rekey))
         else:
-            rekey = {} if owners else _account_erasures(engine, candidates)
             cleans.append((pid, bool(owners), rekey))
     if not dry_run:  # the database first: a claim that fails stops the sweep here
         ledger = ErasureLedger(engine)
-        for pid, owner in claims:
+        for pid, owner, _rekey in claims:
             ledger.claim(
                 owner_id=owner,
                 subject_kind=SubjectKind.PERSONA,
@@ -324,6 +349,15 @@ def sweep_legacy_audit_files(
                 captured=_CAPTURED,
             )
     counts["claimed"] = len(claims)
+    for pid, _owner, rekey in claims:  # a claimed persona's log: the re-key alone
+        if not rekey:
+            continue
+        changed = (
+            _names_an_erased_account(audit_root, pid, rekey)
+            if dry_run
+            else bool(rekey_persona_log_in_place(audit_root, persona_id=pid, rekey=rekey))
+        )
+        counts["rekeyed"] += int(changed)
     for pid in _erased_before(engine, ids):  # the R9-291 backlog (review L1)
         # A tool log that reappeared after the erasure goes too (round 2 LOW-1, ruling 5):
         # the same clean as a leftover's, without a re-key.

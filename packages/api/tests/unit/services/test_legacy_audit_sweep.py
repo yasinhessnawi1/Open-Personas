@@ -643,3 +643,40 @@ def test_an_author_that_is_not_a_string_is_never_a_rekey(engine: Engine, root: P
     assert sweep_legacy_audit_files(engine, root, dry_run=True) == LegacySweepCounts(
         already_clean=1
     )
+
+
+def test_a_claimed_personas_log_names_an_erased_co_author_by_its_erasure(
+    engine: Engine, root: Path
+) -> None:
+    """Round 2 LOW-4: A's account was erased, B is live. B owns it and the erasure is claimed;
+    A's events name A's erasure in place, and nothing else in the log changes yet."""
+    erased = "user_erased"
+    account = ErasureLedger(engine).claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    store, tools = _logs(root, _GONE, erased, _OWNER)
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(claimed=1, rekeyed=1)
+    assert (_OWNER, _GONE, ErasureState.PENDING.value) in _erasures(engine)
+    text = store.read_text(encoding="utf-8")
+    assert erased not in text
+    events = [json.loads(line) for line in text.splitlines()]
+    assert {e["written_by"] for e in events if e["source"] == "user"} == {account.id, _OWNER}
+    assert _SECRET in text, "the claimed erasure scrubs the rest later"
+    assert tools.exists()
+
+
+def test_a_dry_run_counts_a_claimed_personas_rekey(engine: Engine, root: Path) -> None:
+    erased = "user_erased"
+    ErasureLedger(engine).claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    store, _ = _logs(root, _GONE, erased, _OWNER)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root, dry_run=True)
+
+    assert counts == LegacySweepCounts(claimed=1, rekeyed=1)
+    assert store.read_bytes() == before
