@@ -150,10 +150,14 @@ def test_a_persona_the_ledger_knows_is_never_claimed_again(
 
     counts = sweep_legacy_audit_files(engine, root)
 
-    assert counts == LegacySweepCounts(kept_known=1)
-    assert len(_erasures(engine)) == 1
-    assert store.read_bytes() == before
-    assert tools.exists()
+    assert len(_erasures(engine)) == 1, "never claimed again"
+    assert tools.exists(), "never cleaned as a leftover"
+    if state is ErasureState.PENDING:
+        assert counts == LegacySweepCounts(kept_known=1)
+        assert store.read_bytes() == before, "its own files step will clean it"
+    else:  # complete: the R9-291 backlog (review L1) cleans the kept log, nothing else
+        assert counts == LegacySweepCounts(kept_known=1, scrubbed_backlog=1)
+        assert _SECRET not in store.read_text(encoding="utf-8")
 
 
 def test_two_possible_owners_are_refused_and_the_files_cleaned_in_place(
@@ -430,3 +434,52 @@ def test_only_an_account_erasure_rekeys_an_author(engine: Engine, root: Path) ->
 
     events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
     assert {e["written_by"] for e in events if e["source"] == "user"} == {author}
+
+
+def _complete(engine: Engine, persona_id: str) -> None:
+    erasure = ErasureLedger(engine).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=persona_id, captured={}
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            update(erasures_t)
+            .where(erasures_t.c.id == erasure.id)
+            .values(state=ErasureState.COMPLETE.value)
+        )
+
+
+def test_a_completed_erasures_kept_log_loses_its_content_keys(engine: Engine, root: Path) -> None:
+    """Review L1: the R9-291 backlog, erased before the files step dropped content keys."""
+    _complete(engine, _GONE)
+    store, _ = _logs(root, _GONE, _OWNER)
+
+    first = sweep_legacy_audit_files(engine, root)
+    second = sweep_legacy_audit_files(engine, root)
+
+    assert first == LegacySweepCounts(kept_known=1, scrubbed_backlog=1)
+    assert second == LegacySweepCounts(kept_known=1), "nothing left to clean"
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert all(e["metadata"] == {"to_version": "3"} and e["reason"] is None for e in events)
+    assert len(_erasures(engine)) == 1
+
+
+def test_an_open_erasure_is_left_to_its_own_files_step(engine: Engine, root: Path) -> None:
+    ErasureLedger(engine).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=_GONE, captured={}
+    )
+    store, _ = _logs(root, _GONE, _OWNER)
+    before = store.read_bytes()
+
+    assert sweep_legacy_audit_files(engine, root) == LegacySweepCounts(kept_known=1)
+    assert store.read_bytes() == before
+
+
+def test_a_dry_run_counts_the_backlog_and_changes_nothing(engine: Engine, root: Path) -> None:
+    _complete(engine, _GONE)
+    store, _ = _logs(root, _GONE, _OWNER)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root, dry_run=True)
+
+    assert counts == LegacySweepCounts(kept_known=1, scrubbed_backlog=1)
+    assert store.read_bytes() == before

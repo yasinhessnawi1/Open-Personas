@@ -44,7 +44,7 @@ from persona_api.db.models import erasures as erasures_t
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import users as users_t
 from persona_api.services.erasure_audit import scrub_persona_log_in_place
-from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
+from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import AUDIT_CONTENT_KEYS, _remove_tool_log
 from persona_api.workspace_paths import is_persona_id
 
@@ -91,6 +91,7 @@ class LegacySweepCounts:
     already_clean: int = 0
     kept_recent: int = 0
     kept_known: int = 0
+    scrubbed_backlog: int = 0
 
     def lines(self) -> list[str]:
         return [f"{f.name}={getattr(self, f.name)}" for f in fields(self)]
@@ -129,6 +130,29 @@ def _unknown_to_the_database(engine: Engine, ids: list[str]) -> list[str]:
             ).scalars()
         )
     return [pid for pid in ids if pid not in rows and pid not in erased]
+
+
+def _erased_before(engine: Engine, ids: list[str]) -> list[str]:
+    """The ids whose persona erasure completed and none is open, with no persona row (L1).
+
+    Their kept logs predate R9-291 and may still hold content keys; cleaning them again is
+    a no-op once they hold none.
+    """
+    if not ids:
+        return []
+    with engine.connect() as conn:
+        rows = set(conn.execute(select(personas_t.c.id).where(personas_t.c.id.in_(ids))).scalars())
+        states: dict[str, set[str]] = {}
+        for subject, state in conn.execute(
+            select(erasures_t.c.subject_id, erasures_t.c.state).where(
+                erasures_t.c.subject_kind == SubjectKind.PERSONA.value,
+                erasures_t.c.subject_id.in_(ids),
+            )
+        ).all():
+            states.setdefault(str(subject), set()).add(str(state))
+    return [
+        pid for pid in ids if pid not in rows and states.get(pid) == {ErasureState.COMPLETE.value}
+    ]
 
 
 def owner_candidates(store_log: Path, persona_id: str) -> set[str]:
@@ -207,6 +231,10 @@ def _has_content(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bo
     """Whether an in-place clean would change anything (the dry run's question)."""
     if (audit_root / f"{persona_id}{_TOOLS}").is_file():
         return True
+    return _store_log_has_content(audit_root, persona_id, rekey)
+
+
+def _store_log_has_content(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bool:
     store_log = audit_root / f"{persona_id}{_STORE}"
     if not store_log.is_file():
         return False
@@ -285,6 +313,17 @@ def sweep_legacy_audit_files(
                 captured=_CAPTURED,
             )
     counts["claimed"] = len(claims)
+    for pid in _erased_before(engine, ids):  # the R9-291 backlog (review L1)
+        changed = (
+            _store_log_has_content(audit_root, pid, {})
+            if dry_run
+            else bool(
+                scrub_persona_log_in_place(
+                    audit_root, persona_id=pid, content_keys=AUDIT_CONTENT_KEYS
+                )
+            )
+        )
+        counts["scrubbed_backlog"] += int(changed)
     for pid, ambiguous, rekey in cleans:  # then the files
         changed = (
             _has_content(audit_root, pid, rekey)
