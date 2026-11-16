@@ -315,9 +315,12 @@ sudo find /srv/containerd -newer /etc/containerd/config.toml | head
 sudo rm -rf /var/lib/containerd.old
 ```
 
-**Rolling back**, if any check fails before step 13:
+**Rolling back**, if any check fails before step 13. Stop the app first, as in step 2:
+`live-restore` would otherwise keep containers running on the new root while it is put back.
 
 ```bash
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
+sudo docker ps -q                  # must print nothing; stop any container it lists first
 sudo systemctl stop docker.socket docker containerd
 sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml
 sudo mv /var/lib/containerd.old /var/lib/containerd   # after step 7 only
