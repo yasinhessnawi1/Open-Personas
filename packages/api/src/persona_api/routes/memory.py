@@ -253,10 +253,15 @@ async def forget_node(
     body: ForgetRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> None:
-    """Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence
-    (cascading its covering gists, K8-D-14) AND the concept node, one operation — the
-    resurrection guard, since a sleep-time consolidation pass can only re-distill from
-    evidence that still exists. 404 when the node is not the caller's.
+    """Commit a cross-layer forget (Spec K11, D-K11-2): the concept node and every node merged
+    into it, then the confirmed episodic evidence (cascading its covering gists, K8-D-14). That
+    is the resurrection guard, since a sleep-time consolidation pass can only re-distill from
+    evidence that still exists.
+
+    204 also when the node is already gone or is not the caller's (R9-287): the forget is
+    idempotent, so its retry after a failed evidence delete still removes the confirmed
+    evidence, and the two cases read alike, so nothing is disclosed. 409 while a consolidation
+    holds the owner's graph. 404 only when the memory composition is not wired.
     """
     store, backend, audit_logger, rls_engine = _forget_composition(
         request, user, node_id, require_node=False
