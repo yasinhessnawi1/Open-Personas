@@ -98,6 +98,7 @@ def test_reshaped_common_path_is_rls_isolated(migrated_engine: Engine, app_engin
         embedder=_Embedder(),
         audit_logger=MemoryAuditLogger(),
         persona_guard=False,
+        node_releaser=None,
     )
 
     # bound to u1 (as the request/worker does): the no-IN-list common path returns

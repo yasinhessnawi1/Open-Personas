@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
     from persona.graph.models import NodeVersion
+    from persona.graph.postgres import NodeReleaser
     from persona.graph.protocol import GraphIndex, KnowledgeCandidate, MergeOutcome
     from persona.stores.embedder import Embedder
 
@@ -745,6 +746,7 @@ def build_graph_store(
     audit_logger: AuditLogger,
     settings: GraphSettings | None = None,
     persona_guard: bool,
+    node_releaser: NodeReleaser | None,
 ) -> PostgresGraphStore:
     """Composition root: wire the transport, index, merge engine, and store.
 
@@ -758,7 +760,9 @@ def build_graph_store(
     from persona.graph.postgres import PostgresGraphBackend
 
     resolved = settings or _Settings()
-    backend = PostgresGraphBackend(engine=engine, persona_guard=persona_guard)
+    backend = PostgresGraphBackend(
+        engine=engine, persona_guard=persona_guard, node_releaser=node_releaser
+    )
     index = make_graph_index(
         settings=resolved, engine=engine, float32_fetch=backend.embeddings_by_surrogate
     )

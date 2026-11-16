@@ -239,7 +239,9 @@ def _seed(migrated_engine: Engine) -> None:
             ),
             {"p": _PERSONA, "u": _OWNER, "y": _YAML},
         )
-    PostgresGraphBackend(engine=migrated_engine, persona_guard=False).insert_node_if_absent(
+    PostgresGraphBackend(
+        engine=migrated_engine, persona_guard=False, node_releaser=None
+    ).insert_node_if_absent(
         _OWNER,
         ConceptNode(
             id=_NODE,
@@ -290,7 +292,11 @@ def _pipeline(
     app_engine: Engine, executor: InitiativeDeliveryExecutor, sender: _RecordingSender
 ) -> InitiativePipeline:
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     executor._proposal_sender = sender  # the C0 seam; message write proven at T9
     executor._resolve_tag = lambda _p: __import__(
@@ -465,7 +471,11 @@ async def test_dial_verb_flows_through_the_real_loop_service_and_next_scan_cycle
 
     registry = JobRegistry()
     scan_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     scan_gate = __import__(
         "persona_api.initiative.wellbeing_gate", fromlist=["ConversationWellbeingGate"]

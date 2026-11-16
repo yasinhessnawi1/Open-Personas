@@ -108,7 +108,11 @@ def store(_engine: Engine):  # noqa: ANN201 — PostgresGraphStore (concrete)
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
     s = build_graph_store(
-        engine=_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     yield s
     with _engine.begin() as conn:

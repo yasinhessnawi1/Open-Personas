@@ -115,7 +115,7 @@ def merge(_engine: Engine) -> Iterator[tuple[MergeEngine, PostgresGraphBackend]]
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=_engine, persona_guard=False, node_releaser=None)
     yield MergeEngine(backend=backend, embedder=_Embedder()), backend
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)

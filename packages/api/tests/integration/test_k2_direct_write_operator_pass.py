@@ -81,6 +81,7 @@ async def test_record_user_fact_operator_pass(
         embedder=embedder,
         audit_logger=JSONLAuditLogger(tmp_path / "audit"),
         persona_guard=False,
+        node_releaser=None,
     )
     # Bind the owner's RLS scope per the production worker/request wiring.
     token = current_user_id.set(_OWNER)

@@ -81,7 +81,7 @@ def registry(_graph_engine: Engine) -> Iterator[PostgresEntityRegistry]:
     with _graph_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=_graph_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=_graph_engine, persona_guard=False, node_releaser=None)
     yield PostgresEntityRegistry(backend=backend, embedder=_Embedder())
     with _graph_engine.begin() as conn:
         graph_metadata.drop_all(conn)

@@ -280,7 +280,7 @@ def build_worker_registry(
         metered=True,
     )
     # R9-284: every graph write that names a persona holds that persona's row.
-    graph_backend = PostgresGraphBackend(engine=rls_engine, persona_guard=True)
+    graph_backend = PostgresGraphBackend(engine=rls_engine, persona_guard=True, node_releaser=None)
     graph_store = build_graph_store(
         engine=rls_engine,
         embedder=embedder,
@@ -288,6 +288,7 @@ def build_worker_registry(
         # JSONL default (config.audit_root) — the same selection the API makes.
         audit_logger=build_audit_logger(config, rls_engine),
         persona_guard=True,
+        node_releaser=None,
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(

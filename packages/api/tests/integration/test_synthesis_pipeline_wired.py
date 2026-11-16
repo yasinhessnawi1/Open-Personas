@@ -134,12 +134,13 @@ def _build_worker(
     *, dispatch_engine: Engine, app_engine: Engine, embedder: Embedder, audit_root: Path
 ) -> Worker:
     """Compose the worker exactly as ``worker_root.build_worker_registry`` does."""
-    graph_backend = PostgresGraphBackend(engine=app_engine, persona_guard=False)
+    graph_backend = PostgresGraphBackend(engine=app_engine, persona_guard=False, node_releaser=None)
     graph_store = build_graph_store(
         engine=app_engine,
         embedder=embedder,
         audit_logger=JSONLAuditLogger(audit_root),
         persona_guard=False,
+        node_releaser=None,
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     from persona_runtime.extraction.synthesizer import build_synthesizer

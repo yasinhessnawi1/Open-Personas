@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import OperationalError
 
 from persona.graph._schema import (
     EMBEDDING_DIM,
@@ -42,10 +43,11 @@ from persona.graph._schema import (
 from persona.graph.errors import (
     GraphIndexError,
     GraphMergeConflictError,
+    GraphNodeBusyError,
     GraphPersonaGoneError,
     GraphStaleWriteError,
 )
-from persona.graph.maintenance_lock import graph_maintenance_held
+from persona.graph.maintenance_lock import graph_maintenance_held, take_graph_maintenance_lock
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -65,7 +67,25 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection, Engine
 
-__all__ = ["PostgresGraphBackend"]
+__all__ = ["DELETE_LOCK_TIMEOUT", "NodeReleaser", "PostgresGraphBackend"]
+
+#: How long a node delete waits for a running consolidation's graph lock (R9-287).
+DELETE_LOCK_TIMEOUT = "15s"
+
+# Postgres' "lock not available": the lock timeout ran out.
+_LOCK_NOT_AVAILABLE = "55P03"
+
+
+class NodeReleaser(Protocol):
+    """What a node delete releases besides the node: what consolidation copied from it (R9-287).
+
+    Called inside the delete's transaction, after the owner's graph maintenance lock is held:
+    ``release`` before the row goes, and the callable it returns after (the row and its edges
+    gone by cascade). The api supplies it; the graph's own tests pass ``None``.
+    """
+
+    def release(self, conn: Connection, owner_id: str, node_id: str) -> Callable[[], object]: ...
+
 
 _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
@@ -178,8 +198,13 @@ class PostgresGraphBackend:
     statements. Vectors are supplied pre-computed (the store embeds once).
     """
 
-    def __init__(self, *, engine: Engine, persona_guard: bool) -> None:
+    def __init__(
+        self, *, engine: Engine, persona_guard: bool, node_releaser: NodeReleaser | None
+    ) -> None:
         self._engine = engine
+        # R9-287: required like ``persona_guard``, so no construction can forget it. ``None``
+        # only where nothing deletes a node through this backend (the graph's own tests).
+        self._node_releaser = node_releaser
         # R9-284: hold each named persona's row in the write's own transaction. Off where the
         # schema has no ``personas`` table (the graph's own tests); the api turns it on.
         self._persona_guard = persona_guard
@@ -427,14 +452,35 @@ class PostgresGraphBackend:
         return [self._row_to_node(dict(r)) for r in rows]
 
     def delete_node(self, owner_id: str, node_id: str) -> int | None:
-        """Delete a node (edges cascade); return its ``surrogate`` for index removal."""
+        """Delete a node (edges cascade); return its ``surrogate`` for index removal.
+
+        With a node releaser (R9-287) the delete runs under the owner's graph maintenance lock,
+        waiting at most :data:`DELETE_LOCK_TIMEOUT` for a running consolidation
+        (:class:`GraphNodeBusyError` after that), and releases what consolidation copied from
+        the node (its mirrors, entity links and names on the canonical) in the same transaction.
+        """
         stmt = (
             delete(graph_nodes)
             .where(graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id)
             .returning(graph_nodes.c.surrogate)
         )
-        with self._engine.begin() as conn:
-            surrogate = conn.execute(stmt).scalar_one_or_none()
+        try:
+            with self._engine.begin() as conn:
+                after: Callable[[], object] | None = None
+                if self._node_releaser is not None:
+                    if conn.dialect.name == "postgresql":
+                        conn.execute(text(f"SET LOCAL lock_timeout = '{DELETE_LOCK_TIMEOUT}'"))
+                    take_graph_maintenance_lock(conn, owner_id)
+                    after = self._node_releaser.release(conn, owner_id, node_id)
+                surrogate = conn.execute(stmt).scalar_one_or_none()
+                if after is not None:
+                    after()
+        except OperationalError as exc:
+            if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                raise
+            raise GraphNodeBusyError(
+                "the graph is being reorganised", context={"node_id": node_id}
+            ) from exc
         return None if surrogate is None else int(surrogate)
 
     # ===== dense + sparse retrieval (the K1 legs' SQL) =====================

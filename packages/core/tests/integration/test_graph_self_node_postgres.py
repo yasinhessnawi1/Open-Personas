@@ -111,6 +111,7 @@ def store(request: pytest.FixtureRequest, _engine: Engine) -> Iterator[tuple[Gra
         audit_logger=MemoryAuditLogger(),
         settings=settings,
         persona_guard=False,
+        node_releaser=None,
     )
     yield cast("GraphStore", built), _engine
     with _engine.begin() as conn:

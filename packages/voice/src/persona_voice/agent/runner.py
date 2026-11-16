@@ -724,6 +724,7 @@ async def build_agent_session(
             audit_logger=audit.audit_logger,
             # R9-284: a write naming an erased persona is refused in its own transaction.
             persona_guard=True,
+            node_releaser=None,
         )
         if RecallSettings().unified_enabled:
             # K9 (T9): the unified recall REPLACES the separate graph shell (fuse-don't-route,

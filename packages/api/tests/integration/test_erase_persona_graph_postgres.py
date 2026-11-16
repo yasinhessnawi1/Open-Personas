@@ -86,7 +86,7 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node in (
         _node("only", _PERSONA, _PERSONA),
@@ -215,7 +215,7 @@ def consolidated(migrated_engine: Engine, embedder: Any) -> tuple[Engine, Postgr
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node in (
         _node("p_canon", _PERSONA),
@@ -445,7 +445,7 @@ def test_an_erasure_in_the_middle_of_a_merge_leaves_no_mirror(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node in (_node("i_canon", _OTHER), _node("i_member", _PERSONA), _node("i_x", _OTHER)):
         backend.insert_node(_OWNER, node, vector)
@@ -515,7 +515,7 @@ def test_erasing_the_merged_member_leaves_an_edge_another_persona_asserted_first
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node in (_node("b_canon", _OTHER), _node("b_member", _PERSONA), _node("b_x", _OTHER)):
         backend.insert_node(_OWNER, node, vector)
@@ -568,7 +568,7 @@ def test_a_mirror_of_a_mirror_of_the_personas_edge_goes_too(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node_id in ("c_m", "c_1", "c_2", "c_x"):
         backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
@@ -620,7 +620,7 @@ def test_a_doomed_members_mirrors_go_down_the_whole_chain(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("w_a", _PERSONA), vector)
     for node_id in ("w_c", "w_d", "w_x"):
@@ -681,7 +681,7 @@ def test_a_mirror_two_members_share_goes_with_the_last_of_its_sources(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("v_a", _PERSONA), vector)
     backend.insert_node(_OWNER, _node("v_b", _OTHER), vector)
@@ -733,7 +733,7 @@ def test_unmerge_leaves_a_foreign_edge_on_the_mirror_id(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node in (_node("f_c", _OTHER), _node("f_m", _PERSONA), _node("f_x", _OTHER)):
         backend.insert_node(_OWNER, node, vector)
@@ -799,7 +799,7 @@ def test_a_legacy_comma_reason_loses_only_the_doomed_name(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     legacy = NodeProvenance(
         source=WriteSource.SYSTEM,
@@ -858,7 +858,7 @@ def test_a_co_members_stale_listing_does_not_keep_a_mirror(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node_id in ("s_a", "s_b", "s_c", "s_x"):
         backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
@@ -929,7 +929,7 @@ def test_a_mirror_two_clusters_made_survives_one_clusters_give_back(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
             {"p": _OTHER, "o": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node_id in ("t_c1", "t_a1", "t_c2", "t_b2"):
         backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
@@ -984,7 +984,7 @@ def test_a_mirror_whose_sources_went_by_another_path_is_pruned(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node_id in ("o_c", "o_m", "o_x"):
         backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
@@ -1046,7 +1046,7 @@ def test_a_refused_done_write_leaves_no_entity_link_on_the_canonical(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("h_k", _OTHER), vector)
     backend.insert_node(_OWNER, _node("h_m", _PERSONA), vector)
@@ -1116,7 +1116,7 @@ def test_a_reopened_fact_does_not_block_the_erasure(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("d_k", _PERSONA), vector)
     backend.insert_node(_OWNER, _node("d_m", _OTHER), vector)
@@ -1172,7 +1172,7 @@ def test_a_member_deleted_before_the_done_write_lands_no_link(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
             {"p": _OTHER, "o": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("c_k", _OTHER), vector)
     backend.insert_node(_OWNER, _node("c_m", _OTHER), vector)
@@ -1232,7 +1232,7 @@ def test_an_entity_two_members_carry_stays_until_the_last_goes(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("n_a", _PERSONA), vector)
     backend.insert_node(_OWNER, _node("n_b", _OTHER), vector)
@@ -1286,7 +1286,7 @@ def test_an_entity_only_doomed_members_carry_leaves_the_canonical(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
             {"p": _PERSONA, "o": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("p_a", _PERSONA), vector)
     backend.insert_node(_OWNER, _node("p_b", _PERSONA), vector)
@@ -1342,7 +1342,7 @@ def _race_fixture(migrated_engine: Engine, embedder: Any) -> tuple[PostgresGraph
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("r_c", _OTHER), vector)
     backend.insert_node(_OWNER, _node("r_m", _PERSONA), vector)
@@ -1498,7 +1498,7 @@ def test_two_rows_of_a_fact_closed_under_one_tag_reopen_as_one(
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
             {"p": _OTHER, "o": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     for node_id in ("t2_m", "t2_x"):
         backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
@@ -1688,7 +1688,7 @@ def _trail_only_erasure(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     entry = NodeProvenance(
         source=WriteSource.SYSTEM,

@@ -122,7 +122,7 @@ def _seed(super_engine: Engine) -> None:
             ),
             {"t": _NOW},
         )
-    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     nodes = [
         _node(
@@ -163,7 +163,11 @@ def _seed(super_engine: Engine) -> None:
 
 def _source(app_engine: Engine, *, wired: bool = True) -> ApiGroundingSource:
     store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     gate = ConversationWellbeingGate(store, app_engine)
     if not wired:
@@ -236,7 +240,7 @@ def _seed_hub(super_engine: Engine) -> PostgresGraphBackend:
     """A cited hub with twelve older temporal links, created first (so the oldest edges
     are the first ones any created_at-ascending read returns), then the newest note."""
     _seed(super_engine)
-    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     backend.insert_node_if_absent(
         _OWNER,
@@ -278,7 +282,7 @@ def test_the_context_shows_causal_and_entity_links_and_hides_the_rest(
     SELF note, a note learned from a DISCLOSED conversation, and a merged member (its
     edge created after the merge) are never shown."""
     _seed(migrated_engine)
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     hub = f"{_OWNER}::node::00000400"
     causal = f"{_OWNER}::node::00000401"
@@ -353,7 +357,7 @@ def test_a_closed_edge_is_not_followed_and_ties_break_by_id(
     migrated_engine: Engine, app_engine: Engine
 ) -> None:
     _seed(migrated_engine)
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     hub, closed, low, high = (f"{_OWNER}::node::{i:08d}" for i in (500, 501, 502, 503))
     backend.insert_node_if_absent(
@@ -389,7 +393,7 @@ def test_direct_links_rank_ahead_of_entity_siblings(
     the one temporal link, older and contradicting, still comes first, and the entity
     siblings only fill the remaining slots."""
     _seed(migrated_engine)
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     hub = f"{_OWNER}::node::00000600"
     moved = f"{_OWNER}::node::00000601"

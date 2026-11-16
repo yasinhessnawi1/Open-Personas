@@ -80,6 +80,7 @@ def _store(app_engine: object, real_embedder: object, tmp_path: Path) -> GraphSt
         embedder=real_embedder,  # type: ignore[arg-type]
         audit_logger=JSONLAuditLogger(tmp_path / "audit"),
         persona_guard=False,
+        node_releaser=None,
     )
 
 

@@ -388,6 +388,7 @@ class RuntimeFactory:
             audit_logger=self._audit_logger or JSONLAuditLogger(audit_root),
             # R9-284: a write naming an erased persona is refused in its own transaction.
             persona_guard=True,
+            node_releaser=None,
         )
         _logger.info("graph writes enabled (record_user_fact composed into toolboxes)")
 

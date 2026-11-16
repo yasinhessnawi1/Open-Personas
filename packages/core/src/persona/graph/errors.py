@@ -17,6 +17,7 @@ __all__ = [
     "GraphError",
     "GraphPersonaGoneError",
     "GraphIndexError",
+    "GraphNodeBusyError",
     "GraphNodeNotFoundError",
     "GraphProtectedNodeError",
     "GraphRebuildError",
@@ -135,4 +136,12 @@ class GraphRebuildError(GraphError):
     complete (e.g. a read of ``(surrogate, embedding)`` returns an
     inconsistent shape). ``context`` conventionally carries the backend and
     the node count read.
+    """
+
+
+class GraphNodeBusyError(GraphError):
+    """A node delete could not take the owner's graph maintenance lock in time (R9-287).
+
+    A consolidation run holds it; the delete waits up to its lock timeout and then gives up
+    rather than hang the request. The caller tries again. ``context`` carries the node id.
     """

@@ -109,7 +109,7 @@ def backend(pg_engine: Engine) -> Iterator[PostgresGraphBackend]:
     with pg_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    b = PostgresGraphBackend(engine=pg_engine, persona_guard=False)
+    b = PostgresGraphBackend(engine=pg_engine, persona_guard=False, node_releaser=None)
     # two nodes so an edge's composite FK holds.
     b.insert_node("u1", _node("u1::node::00000000"), _vec(0))
     b.insert_node("u1", _node("u1::node::00000001"), _vec(1))
