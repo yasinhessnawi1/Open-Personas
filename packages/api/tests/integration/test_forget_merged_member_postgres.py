@@ -368,3 +368,78 @@ def test_forgetting_the_middle_of_a_chain_takes_everything_below_and_nothing_els
             {"o": _OWNER},
         ).scalar_one()
     assert "b name" not in json.loads((meta or {}).get("_k7_aliases", "[]"))
+
+
+def test_forgetting_the_bottom_of_a_chain_takes_its_entity_up_the_chain(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review MEDIUM-3: A (with E) merged into B, B into C, so B's merge copied E on to C.
+
+    Forgetting A takes E from B and, no other member of C carrying it, from C too; B's record
+    no longer lists E. D, C's other member, keeps C's link to F, which only D carries.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'f@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _PERSONA, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(
+        engine=migrated_engine, persona_guard=True, node_releaser=ForgetReleaser()
+    )
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("up_a", "up_b", "up_c", "up_d"):
+        backend.insert_node(_OWNER, _node(node_id, f"{node_id} name"), vector)
+    for entity_id in ("up_e", "up_f"):
+        backend.insert_entity(
+            _OWNER,
+            CanonicalEntity(
+                id=entity_id, canonical_name=entity_id, provenance=_by(), created_at=_NOW
+            ),
+            vector,
+        )
+    backend.associate_entities(_OWNER, "up_a", ["up_e"])
+    backend.associate_entities(_OWNER, "up_d", ["up_f"])
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+    for run, canonical, members in (("ur1", "up_b", ["up_a"]), ("ur2", "up_c", ["up_b", "up_d"])):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, m) for m in members],
+            run_id=run,
+            now=_NOW,
+            epoch=1,
+        )
+
+    def _links(node_id: str) -> set[str]:
+        with migrated_engine.connect() as conn:
+            return set(
+                conn.execute(
+                    text(
+                        "SELECT entity_id FROM graph_node_entities "
+                        "WHERE owner_id = :o AND node_id = :n"
+                    ),
+                    {"o": _OWNER, "n": node_id},
+                ).scalars()
+            )
+
+    assert _links("up_c") == {"up_e", "up_f"}, "E reached C through B"
+
+    backend.delete_node(_OWNER, "up_a")
+
+    assert "up_e" not in _links("up_b")
+    assert _links("up_c") == {"up_f"}, "E left C too; F, which D carries, stays"
+    b = backend.get_node(_OWNER, "up_b")
+    assert b is not None
+    assert "up_e" not in json.loads(b.metadata["_k7_merge"]).get("added_entities", [])
