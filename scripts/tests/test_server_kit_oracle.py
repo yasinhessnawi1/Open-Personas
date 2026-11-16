@@ -554,3 +554,79 @@ def test_a_removed_netfilter_persistent_does_not_fail_the_script() -> None:
     branch = provision[provision.index(check) : provision.index("\n  fi\n", provision.index(check))]
     assert "systemctl mask netfilter-persistent" in branch
     assert "else" in branch
+
+
+# --- containerd's root on the block volume (R9-289) ------------------------------------------
+
+
+def test_the_oracle_profile_puts_containerds_root_on_the_block_volume() -> None:
+    assert _profile()["OP_CONTAINERD_ROOT"] == "/srv/containerd"
+
+
+def _containerd(tmp_path: Path, config: str | None) -> subprocess.CompletedProcess[str]:
+    path = tmp_path / "config.toml"
+    if config is not None:
+        path.write_text(config, encoding="utf-8", newline="\n")
+    return _bash(
+        f'set -eu; . "{(LIB / "containerd_root.sh").as_posix()}"; '
+        f'containerd_config_with_root "{path.as_posix()}" /srv/containerd'
+    )
+
+
+# The containerd.io package's config, abridged: comments and the one top-level key.
+CONTAINERD_DEFAULT = (
+    "#   Copyright 2018-2022 Docker Inc.\n"
+    "\n"
+    'disabled_plugins = ["cri"]\n'
+    "\n"
+    '#root = "/var/lib/containerd"\n'
+)
+
+
+@needs_bash
+def test_containerds_root_is_prepended_above_the_packages_config(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, CONTAINERD_DEFAULT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+
+
+@needs_bash
+def test_setting_containerds_root_twice_changes_nothing(tmp_path: Path) -> None:
+    once = _containerd(tmp_path, CONTAINERD_DEFAULT)
+    twice = _containerd(tmp_path, once.stdout)
+    assert twice.returncode == 0, twice.stderr
+    assert twice.stdout == once.stdout
+
+
+@needs_bash
+def test_another_root_already_set_is_refused(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, 'root = "/var/lib/containerd"\n')
+    assert result.returncode == 1
+    assert "already sets root to /var/lib/containerd" in result.stderr
+    assert result.stdout == ""
+
+
+@needs_bash
+def test_a_root_inside_a_table_is_not_containerds_root(tmp_path: Path) -> None:
+    config = 'version = 2\n\n[plugins."io.containerd.grpc.v1.cri"]\n  root = "/x"\n'
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + config
+
+
+@needs_bash
+def test_a_missing_config_becomes_just_the_root(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, None)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n'
+
+
+def test_provision_moves_containerd_before_docker_restarts_and_never_under_images() -> None:
+    provision = _text("bin/provision.sh")
+    containerd = provision.index("systemctl restart containerd")
+    assert provision.index('. "${SCRIPT_DIR}/lib/containerd_root.sh"') < containerd
+    assert containerd < provision.index("systemctl restart docker")
+    block = provision[provision.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then') : containerd]
+    assert "$(docker ps -aq 2>/dev/null)$(docker images -q 2>/dev/null)" in block
+    assert "containerd.service.d/10-open-persona.conf" in block
+    assert "RequiresMountsFor=${OP_DATA_MOUNT}" in block
