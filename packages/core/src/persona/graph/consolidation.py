@@ -353,9 +353,29 @@ class ConsolidationPass:
             if not isinstance(record, dict) or record.get("run_id") != run_id:
                 continue
             try:
+                if current is not None and record.get("state") != _PENDING:
+                    # A done member is marked pending first, so a give back that fails part
+                    # way is retried by the next run instead of left half done (round 6 L-2).
+                    self._mark_pending(owner_id, current, record)
                 self._unmerge(owner_id, member.id)
             except Exception:  # noqa: BLE001, S112 - still pending: the next run gives it back
                 continue
+
+    def _mark_pending(self, owner_id: str, current: ConceptNode, record: dict[str, object]) -> None:
+        canonical = record.get("canonical")
+        if not isinstance(canonical, str):
+            return
+        metadata = {
+            **current.metadata,
+            _MERGE_KEY: json.dumps({**record, "state": _PENDING}, sort_keys=True),
+        }
+        self._backend.set_merged_into(
+            owner_id,
+            current.id,
+            merged_into=canonical,
+            metadata=metadata,
+            content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+        )
 
     def _cluster_members(
         self, owner_id: str, seed: ConceptNode, *, floor: float, ceil: float, seen: set[str]

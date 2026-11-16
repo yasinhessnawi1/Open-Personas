@@ -42,12 +42,15 @@ def _node(node_id: str) -> ConceptNode:
 
 
 class _Backend:
-    def __init__(self, *, deadlocks: int, broken_reopens: int = 0) -> None:
+    def __init__(
+        self, *, deadlocks: int, broken_reopens: int = 0, broken_accretions: int = 0
+    ) -> None:
         self.nodes = {"k": _node("k"), "m": _node("m")}
         self.merged: dict[str, str | None] = {"k": None, "m": None}
         self.events: list[str] = []
         self._deadlocks = deadlocks
         self._broken_reopens = broken_reopens
+        self._broken_accretions = broken_accretions
 
     @contextmanager
     def maintenance_lock(self, _owner: str) -> Iterator[None]:
@@ -128,6 +131,9 @@ class _Backend:
         return None
 
     def update_node(self, _owner: str, node: ConceptNode, *_a: Any, **_k: Any) -> int:  # noqa: ANN401
+        if self._broken_accretions:
+            self._broken_accretions -= 1
+            raise _Deadlock("the alias accretion deadlocked")
         self.nodes[node.id] = node
         return 1
 
@@ -217,3 +223,13 @@ def test_one_pending_member_that_cannot_be_given_back_does_not_stop_the_others()
 
     assert backend.events[:2] == ["reopen m", "record m cleared"], "m is given back anyway"
     assert report.clusters_formed == 1
+
+
+def test_a_done_member_is_marked_pending_before_its_give_back() -> None:
+    """Round 6 L-2: the act finished, the cluster then failed, and the give back failed too."""
+    backend = _Backend(deadlocks=0, broken_reopens=1, broken_accretions=1)
+
+    _pass(backend).run("u1")
+
+    assert backend.events[-3:] == ["close m", "record m done", "record m pending"]
+    assert _state(backend) == "pending", "so the next run gives it back"
