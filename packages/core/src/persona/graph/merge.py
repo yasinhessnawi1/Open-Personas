@@ -332,7 +332,9 @@ class MergeEngine:
         owner_id: str,
         target: ConceptNode,
         candidate: KnowledgeCandidate,
-        candidate_vec: Sequence[float],  # noqa: ARG002 — re-embedded from accumulated content
+        candidate_vec: Sequence[float],
+        *,
+        searched_again: bool = False,
     ) -> MergeOutcome:
         for attempt in range(STALE_WRITE_ATTEMPTS):
             try:
@@ -342,12 +344,25 @@ class MergeEngine:
                     raise
                 fresh = self._backend.get_node(owner_id, target.id)
                 if fresh is None or self._backend.is_merged(owner_id, target.id):
-                    raise NodeMergeError(
-                        "extend target merged or removed meanwhile",
-                        context={"target_node_id": target.id, "owner_id": owner_id},
-                    ) from None
+                    if searched_again:
+                        raise NodeMergeError(
+                            "extend target merged or removed meanwhile, twice",
+                            context={"target_node_id": target.id, "owner_id": owner_id},
+                        ) from None
+                    # The target was merged or deleted meanwhile (round 11 LOW-1): search for
+                    # the nearest node again, once (merged nodes are excluded), and extend it
+                    # or create one.
+                    return self._extend_or_create(owner_id, candidate, candidate_vec)
                 target = fresh
         raise AssertionError  # pragma: no cover - the loop returns or raises
+
+    def _extend_or_create(
+        self, owner_id: str, candidate: KnowledgeCandidate, vec: Sequence[float]
+    ) -> MergeOutcome:
+        nearest = self._backend.dense_query(owner_id, vec, 1, exclude_self=True)
+        if nearest and _similarity(nearest[0]) >= self._settings.merge_extend_threshold:
+            return self._extend(owner_id, nearest[0], candidate, vec, searched_again=True)
+        return self._create(owner_id, candidate, vec)
 
     def _extend_once(
         self, owner_id: str, target: ConceptNode, candidate: KnowledgeCandidate

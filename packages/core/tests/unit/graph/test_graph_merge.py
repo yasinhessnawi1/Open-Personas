@@ -654,3 +654,68 @@ def test_a_supersede_retry_leaves_no_orphan_version_and_decides_on_the_fresh_row
     assert node.content == "left Acme"
     assert len(b.versions) == 1, "no orphan version from the lost attempt"
     assert b.versions[0][2].content == "works at Acme and also likes walks", "the fresh row"
+
+
+class _MergedAway(_FakeBackend):
+    """Round 11 LOW-1: just before the first write, consolidation merges the target away."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raced = False
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
+        if not self.raced:
+            self.raced = True
+            self.merged.add(node.id)  # consolidation merged it, and wrote its record
+            current, vector = self.nodes[node.id]
+            moved = current.model_dump(exclude={"content_hash"})
+            moved["metadata"] = {"_k7_merge": "{}"}
+            self.nodes[node.id] = (ConceptNode.model_validate(moved), vector)
+        return super().update_node(
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
+        )
+
+
+@pytest.mark.parametrize("another", [True, False])
+def test_an_extend_whose_target_was_merged_away_searches_once_more(another: bool) -> None:
+    """It extends the next nearest node that is not merged, or creates one; never the merged."""
+    b = _MergedAway()
+    mapping = {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)}
+    eng = _engine(b, mapping)
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+    if another:  # close enough to extend (cos 0.891 >= 0.88), but not the first choice
+        b.nodes["u1::node::00000009"] = (_node_for("u1::node::00000009"), vec(0, 0.90, 3))
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    merged_node, _ = b.nodes[first]
+    assert merged_node.content == "likes coffee", "the merged member is never extended"
+    if another:
+        assert out.action is MergeAction.EXTENDED
+        assert out.node_id == "u1::node::00000009"
+    else:
+        assert out.action is MergeAction.CREATED
+        assert out.node_id != first
+
+
+def _node_for(node_id: str) -> ConceptNode:
+    return ConceptNode(
+        id=node_id,
+        node_kind=NodeKind.FACT,
+        concept_name="coffee too",
+        content="drinks coffee",
+        provenance=(NodeProvenance(source=WriteSource.PERSONA_SELF, written_at=NOW),),
+        created_at=NOW,
+    )
