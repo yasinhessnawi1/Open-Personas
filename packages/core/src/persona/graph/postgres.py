@@ -667,66 +667,6 @@ class PostgresGraphBackend:
 
     # ===== node versions (Spec K7, K7-D-1) ================================
 
-    def snapshot_node_version(
-        self,
-        owner_id: str,
-        node_id: str,
-        *,
-        valid_at: datetime,
-        invalid_at: datetime,
-        invalidated_by: str | None,
-    ) -> int | None:
-        """Preserve the node's CURRENT state as a window-closed version row (K7-D-1).
-
-        Reads the live ``graph_nodes`` row (content + **embedding** + metadata +
-        wellbeing + content_hash + provenance-trail snapshot) and inserts an immutable
-        version row window-closed at ``[valid_at, invalid_at]`` — the §0-honest
-        preservation the caller runs BEFORE overwriting the node with the superseding
-        account. Nothing is destroyed; the prior embedding is byte-exact for restore.
-        ``invalidated_at`` (bookkeeping, K7-D-10) records the SYSTEM close moment.
-        Returns the assigned ``version_key`` (the ``superseded_version_id`` source),
-        or ``None`` if the node vanished.
-        """
-        with self._engine.begin() as conn:
-            row = (
-                conn.execute(
-                    select(graph_nodes).where(
-                        graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-            if row is None:
-                return None
-            self._hold_personas(
-                conn,
-                owner_id,
-                (e.get("persona_id") for e in (row["provenance"] or []) if isinstance(e, dict)),
-            )
-            ins = (
-                pg_insert(graph_node_versions)
-                .values(
-                    owner_id=owner_id,
-                    node_id=node_id,
-                    node_kind=row["node_kind"],
-                    concept_name=row["concept_name"],
-                    content=row["content"],
-                    metadata=dict(row["metadata"]),
-                    wellbeing_category=row["wellbeing_category"],
-                    embedding=list(row["embedding"]),
-                    embedding_model=row["embedding_model"],
-                    content_hash=row["content_hash"],
-                    provenance=row["provenance"],
-                    valid_at=valid_at,
-                    invalid_at=invalid_at,
-                    invalidated_by=invalidated_by,
-                    invalidated_at=datetime.now(UTC),
-                )
-                .returning(graph_node_versions.c.version_key)
-            )
-            return int(conn.execute(ins).scalar_one())
-
     def supersede_node(
         self,
         owner_id: str,

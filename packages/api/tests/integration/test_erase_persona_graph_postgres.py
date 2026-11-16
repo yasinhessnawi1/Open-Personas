@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from _graph_versions import snapshot_node_version
 from persona.audit import MemoryAuditLogger
 from persona.graph.config import GraphSettings
 from persona.graph.consolidation import ConsolidationPass
@@ -96,8 +97,8 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
     ):
         backend.insert_node(_OWNER, node, vector)
     for node_id in ("only", "shared", "edited", _SELF):
-        backend.snapshot_node_version(
-            _OWNER, node_id, valid_at=_NOW, invalid_at=_NOW, invalidated_by=None
+        snapshot_node_version(
+            migrated_engine, _OWNER, node_id, valid_at=_NOW, invalid_at=_NOW, invalidated_by=None
         )
     # The user then edits a node only the persona had written: it is the user's now, and its
     # earlier version (the persona's alone) is not.
@@ -1642,7 +1643,8 @@ def test_a_superseded_canonicals_versions_lose_the_erased_personas_names(
         now=_NOW,
         epoch=1,
     )
-    backend.snapshot_node_version(
+    snapshot_node_version(
+        migrated_engine,
         _OWNER,
         "r_c",
         valid_at=_NOW,

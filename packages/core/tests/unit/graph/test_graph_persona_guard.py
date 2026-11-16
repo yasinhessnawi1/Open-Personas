@@ -39,7 +39,7 @@ _VECTOR = [0.0] * 384
 
 
 def _node_row() -> dict[str, Any]:
-    """A ``graph_nodes`` row as snapshot_node_version reads it."""
+    """A ``graph_nodes`` row as supersede_node reads it."""
     return {
         "node_kind": "fact",
         "concept_name": "n1",
@@ -198,12 +198,6 @@ _WRITES = {
             "u1",
             CanonicalEntity(id="x", canonical_name="x", provenance=_by(_P), created_at=_NOW),
             _VECTOR,
-        ),
-        "insert",
-    ),
-    "snapshot_node_version": (
-        lambda b: b.snapshot_node_version(
-            "u1", "n1", valid_at=_NOW, invalid_at=_NOW, invalidated_by=None
         ),
         "insert",
     ),

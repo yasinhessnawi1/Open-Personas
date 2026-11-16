@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from _graph_versions import snapshot_node_version
 from persona.audit import MemoryAuditLogger
 from persona.graph.config import GraphSettings
 from persona.graph.consolidation import ConsolidationPass
@@ -218,8 +219,8 @@ def test_a_merge_from_a_canonical_read_before_an_erasure_leaves_nothing_of_it(
     for node in (_node("s_k", _P, _Q), _node("s_m", _Q), _node("s_x", _Q)):
         backend.insert_node(_OWNER, node, vector)
     backend.upsert_edge(_OWNER, _edge("s_m", "s_x", _Q))
-    backend.snapshot_node_version(
-        _OWNER, "s_k", valid_at=_NOW, invalid_at=_NOW, invalidated_by=None
+    snapshot_node_version(
+        migrated_engine, _OWNER, "s_k", valid_at=_NOW, invalid_at=_NOW, invalidated_by=None
     )
     consolidation = _pass(migrated_engine, backend, embedder)
 
