@@ -7,7 +7,8 @@
 #      migrating an empty database would create a fresh schema that the restore then
 #      refuses to overwrite
 #   3. keep the images the running containers use as :previous (the rollback)
-#   4. build natively on the host (it competes with live traffic: deploy off-hours)
+#   4. build natively on the host (it competes with live traffic: deploy off-hours), then
+#      prune the build cache
 #   5. a pg_dump BEFORE migrating (migrations are not reversible by image rollback)
 #   6. migrate: the `migrate` service runs packages/api/release.py once
 #   7. up -d, then wait for api /livez and /healthz
@@ -81,6 +82,9 @@ fi
 if [ "${SKIP_BUILD}" = 0 ]; then
   say "building $(git -C "${KIT_DIR}" rev-parse --short HEAD)"
   compose build
+  # The build succeeded (set -e): drop BuildKit's cache, which grows by every build and is
+  # not needed to run or roll back (R9-289). A prune that fails never fails the deploy.
+  docker builder prune -f >/dev/null || say "WARNING: could not prune the build cache"
 fi
 
 # --- 5 ------------------------------------------------------------------------------

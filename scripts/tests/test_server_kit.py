@@ -1006,3 +1006,13 @@ def test_every_kit_timer_is_installed_enabled_and_checked() -> None:
     assert "systemctl is-active --quiet" in preflight
     for timer in (KIT / "systemd").glob("*.timer"):
         assert timer.name in enabled, f"provision.sh never enables {timer.name}"
+
+
+def test_deploy_prunes_the_build_cache_after_a_successful_build() -> None:
+    """R9-289: BuildKit's cache grows by every build; it goes once the build succeeded."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    build_block = deploy[deploy.index('if [ "${SKIP_BUILD}" = 0 ]; then\n  say "building') :]
+    build_block = build_block[: build_block.index("\nfi\n")]
+    assert build_block.index("compose build") < build_block.index("docker builder prune -f")
+    prune = next(line for line in build_block.splitlines() if "docker builder prune" in line)
+    assert '|| say "WARNING' in prune, "a prune that fails never fails the deploy"
