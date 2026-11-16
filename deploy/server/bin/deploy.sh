@@ -35,6 +35,8 @@ say() { echo "deploy: $*" >&2; }
 
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
+# Every `compose exec` here reads from /dev/null: it reads stdin otherwise, and would swallow
+# the rest of a script fed to bash on stdin (`ssh host bash -s < deploy.sh`).
 # The database, the images and the data live on the block volume: never deploy without it.
 require_data_mount
 
@@ -46,18 +48,19 @@ say "host profile: ${OP_HOST_PROFILE}"
 compose up -d postgres
 ready=0
 for _ in $(seq 1 60); do
-  if compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona >/dev/null 2>&1; then
+  if compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona </dev/null >/dev/null 2>&1; then
     ready=1; break
   fi
   sleep 2
 done
 [ "${ready}" = 1 ] || die "postgres did not become ready"
 tables="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
-  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" || die "could not query the database"
+  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'" </dev/null)" \
+  || die "could not query the database"
 [ "${tables}" != "0" ] || die "the database is empty: run bin/restore.sh first (RUNBOOK.md step 5)"
 # The api's DATABASE_URL is persona_platform: it must exist and must not be a superuser.
 platform_super="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
-  -c "SELECT rolsuper::text FROM pg_roles WHERE rolname = 'persona_platform'")" \
+  -c "SELECT rolsuper::text FROM pg_roles WHERE rolname = 'persona_platform'" </dev/null)" \
   || die "could not query the database"
 [ "${platform_super}" = "false" ] \
   || die "persona_platform is missing or a superuser: run bin/restore.sh --roles-only"
@@ -92,7 +95,7 @@ umask 077
 mkdir -p "${OP_DATA_DIR}/backups"
 dump="${OP_DATA_DIR}/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
 say "pre-migrate dump: ${dump}"
-compose exec -T postgres pg_dump -U persona -Fc persona > "${dump}" || die "pre-migrate dump"
+compose exec -T postgres pg_dump -U persona -Fc persona </dev/null > "${dump}" || die "pre-migrate dump"
 chmod 600 "${dump}"
 
 # --- 6 ------------------------------------------------------------------------------

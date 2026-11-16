@@ -1016,3 +1016,13 @@ def test_deploy_prunes_the_build_cache_after_a_successful_build() -> None:
     assert build_block.index("compose build") < build_block.index("docker builder prune -f")
     prune = next(line for line in build_block.splitlines() if "docker builder prune" in line)
     assert '|| say "WARNING' in prune, "a prune that fails never fails the deploy"
+
+
+def test_every_compose_exec_in_deploy_reads_from_dev_null() -> None:
+    """R9-289: `compose exec` reads stdin; fed a script on stdin, it would swallow the rest."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    # One logical command per entry: backslash continuations joined.
+    commands = deploy.replace("\\\n", " ").splitlines()
+    execs = [c for c in commands if "compose exec" in c and not c.lstrip().startswith("#")]
+    assert len(execs) == 4
+    assert all("</dev/null" in c for c in execs), [c for c in execs if "</dev/null" not in c]
