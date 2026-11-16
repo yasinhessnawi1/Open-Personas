@@ -2230,6 +2230,69 @@
         }
       }
     },
+    "/v1/me/erase": {
+      "post": {
+        "tags": ["me"],
+        "summary": "Erase Account",
+        "description": "Delete the caller's account and everything in it. 202; the work runs in the background.",
+        "operationId": "erase_account_v1_me_erase_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountEraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountEraseResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhooks/clerk": {
+      "post": {
+        "tags": ["webhooks"],
+        "summary": "Clerk Webhook",
+        "operationId": "clerk_webhook_v1_webhooks_clerk_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Clerk Webhook V1 Webhooks Clerk Post"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": ["health"],
@@ -5174,6 +5237,35 @@
         "type": "object",
         "required": ["id", "statement", "status"],
         "title": "AcceptanceCriterionOut"
+      },
+      "AccountEraseRequest": {
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Confirm"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["confirm"],
+        "title": "AccountEraseRequest"
+      },
+      "AccountEraseResponse": {
+        "properties": {
+          "erasure_id": {
+            "type": "string",
+            "title": "Erasure Id"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          }
+        },
+        "type": "object",
+        "required": ["erasure_id", "state"],
+        "title": "AccountEraseResponse"
       },
       "ActiveTurnResponse": {
         "properties": {

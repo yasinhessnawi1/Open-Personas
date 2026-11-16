@@ -1216,6 +1216,43 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/me/erase": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Erase Account
+     * @description Delete the caller's account and everything in it. 202; the work runs in the background.
+     */
+    post: operations["erase_account_v1_me_erase_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/webhooks/clerk": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Clerk Webhook */
+    post: operations["clerk_webhook_v1_webhooks_clerk_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/healthz": {
     parameters: {
       query?: never;
@@ -2793,6 +2830,18 @@ export interface components {
       statement: string;
       /** Status */
       status: string;
+    };
+    /** AccountEraseRequest */
+    AccountEraseRequest: {
+      /** Confirm */
+      confirm: string;
+    };
+    /** AccountEraseResponse */
+    AccountEraseResponse: {
+      /** Erasure Id */
+      erasure_id: string;
+      /** State */
+      state: string;
     };
     /**
      * ActiveTurnResponse
@@ -7737,6 +7786,61 @@ export interface operations {
         };
         content: {
           "application/json": unknown;
+        };
+      };
+    };
+  };
+  erase_account_v1_me_erase_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AccountEraseRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AccountEraseResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  clerk_webhook_v1_webhooks_clerk_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: string;
+          };
         };
       };
     };

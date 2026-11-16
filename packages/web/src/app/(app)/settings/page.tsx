@@ -4,6 +4,7 @@ import { getFormatter, getTranslations } from "next-intl/server";
 import { currentUser, EDITION } from "@/auth/server";
 import { PageBody, PageHeader, Stack } from "@/components/layout";
 import { ErrorState } from "@/components/patterns/error-state";
+import { DeleteAccountCard } from "@/components/settings/delete-account-card";
 import { LowBalanceWarningCard } from "@/components/settings/low-balance-warning-card";
 import { PreferencesCard } from "@/components/settings/preferences-card";
 import { UsageBreakdown } from "@/components/settings/usage-breakdown";
@@ -355,6 +356,10 @@ export default async function SettingsPage() {
               <p className="type-ui text-muted-foreground">{t("usageEmpty")}</p>
             ) : null}
           </Card>
+
+          {/* R9-284 T9: account deletion, cloud only (the community edition has one
+              local owner and deletes personas one by one). */}
+          {EDITION === "cloud" ? <DeleteAccountCard /> : null}
 
           <Card
             id="about"
