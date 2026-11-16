@@ -6,6 +6,14 @@ by the erasure id. Every call is safe to repeat: a resumed erasure reads before 
 ended subscription is not cancelled again, a detached method is no longer listed), each write
 carries an idempotency key derived from the erasure id, and Stripe answering that the object is
 already gone counts as done. The SDK stays lazily imported, as in :mod:`.gateway`.
+
+Only the Customer is relabelled (review L1). The other Stripe objects we stamped at checkout
+(the Subscription, Checkout Sessions, Invoices, PaymentIntents) keep ``metadata.user_id`` with
+the old user id: they are kept records Stripe holds for the retention period anyway, rewriting
+each would be one API call per object for every past invoice, and the id reveals nothing the
+retention does not already keep, since our ``erasures`` ledger maps the erasure id to the user
+id by design (D-R9-284-erase ruling 7). What matters, that no live user row resolves from them,
+holds: the customer resolves to no user once the account is gone.
 """
 
 from __future__ import annotations
