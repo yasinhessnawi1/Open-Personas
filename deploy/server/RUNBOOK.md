@@ -334,7 +334,7 @@ cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </
 sudo docker ps -q                  # must print nothing; stop any container it lists first
 sudo systemctl stop docker.socket docker containerd
 pgrep -a containerd-shim           # must print nothing
-sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml
+sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml   # after step 6 only
 sudo mv /var/lib/containerd.old /var/lib/containerd   # after step 7 only
 sudo systemctl start containerd
 sudo systemctl start docker
