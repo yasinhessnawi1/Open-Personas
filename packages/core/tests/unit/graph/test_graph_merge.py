@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from persona.graph import merge as merge_module
 from persona.graph.config import GraphSettings
-from persona.graph.errors import GraphStaleWriteError, NodeMergeError
+from persona.graph.errors import GraphPersonaGoneError, GraphStaleWriteError, NodeMergeError
 from persona.graph.merge import MergeEngine, accumulate
 from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, UpdateIntent
@@ -795,4 +795,111 @@ def test_a_supersede_whose_target_was_deleted_is_refused_before_any_link() -> No
 
     assert node_id not in b.nodes
     assert b.edges == edges_before, "no link formed for the deleted node"
+    assert b.versions == []
+
+
+_P_ERASED = "persona_p"
+_Q_WRITES = "persona_q"
+
+
+class _PersonaErasedMeanwhile(_FakeBackend):
+    """Round 12 LOW-4: ``erased`` is erased between the merge's read and its write. The write
+    holds every persona in the read trail and the new one, so it is refused; the erasure
+    strips the persona from the node, so a fresh read no longer names it."""
+
+    def __init__(self, erased: str) -> None:
+        super().__init__()
+        self.erased = erased
+        self.writes = 0
+
+    def _hold(self, node: ConceptNode, expected: object) -> None:
+        self.writes += 1
+        named = {p.persona_id for p in (*node.provenance, *expected)}  # type: ignore[misc]
+        if self.erased not in named:
+            return
+        current, vector = self.nodes[node.id]
+        stripped = current.model_dump(exclude={"content_hash"})
+        stripped["provenance"] = [p for p in current.provenance if p.persona_id != self.erased]
+        self.nodes[node.id] = (ConceptNode.model_validate(stripped), vector)
+        raise GraphPersonaGoneError("gone", context={"persona_id": self.erased})
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._hold(node, kw.get("expected_provenance", ()))
+        return super().update_node(owner_id, node, embedding, **kw)
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._hold(node, kw.get("expected_provenance", ()))
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+def _trail_q_then_p(b: _FakeBackend) -> str:
+    node = ConceptNode(
+        id="u1::node::00000000",
+        node_kind=NodeKind.FACT,
+        concept_name="concept",
+        content="works at Acme",
+        provenance=(
+            NodeProvenance(source=WriteSource.PERSONA_SELF, persona_id=_Q_WRITES, written_at=NOW),
+            NodeProvenance(source=WriteSource.PERSONA_SELF, persona_id=_P_ERASED, written_at=NOW),
+        ),
+        created_at=NOW,
+    )
+    b.nodes[node.id] = (node, vec(0))
+    return node.id
+
+
+def _contradiction_by(persona_id: str, node_id: str) -> KnowledgeCandidate:
+    from datetime import timedelta  # noqa: PLC0415
+
+    return _cand(
+        "left Acme",
+        update_intent=UpdateIntent.CONTRADICT,
+        target_node_id=node_id,
+        provenance=NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            persona_id=persona_id,
+            written_at=NOW + timedelta(days=1),
+        ),
+    )
+
+
+def test_a_persona_erased_meanwhile_that_the_candidate_does_not_name_is_read_again() -> None:
+    """Trail [Q, P]; P is erased between the read and the write; Q's contradiction lands on
+    the retry, against the trail without P."""
+    b = _PersonaErasedMeanwhile(_P_ERASED)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = _trail_q_then_p(b)
+
+    out = eng.merge("u1", _contradiction_by(_Q_WRITES, node_id))
+
+    node, _ = b.nodes[node_id]
+    assert b.writes == 2, "refused once, then written on a fresh read"
+    assert out.action is MergeAction.EVOLVED
+    assert node.content == "left Acme"
+    assert _P_ERASED not in {p.persona_id for p in node.provenance}
+    assert len(b.versions) == 1
+    assert _P_ERASED not in {p.persona_id for p in b.versions[0][2].provenance}
+
+
+def test_the_candidates_own_persona_gone_is_not_retried() -> None:
+    b = _PersonaErasedMeanwhile(_Q_WRITES)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = _trail_q_then_p(b)
+
+    with pytest.raises(GraphPersonaGoneError):
+        eng.merge("u1", _contradiction_by(_Q_WRITES, node_id))
+
+    assert b.writes == 1, "the writer itself is gone: nothing to read again for"
     assert b.versions == []

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Protocol
 from persona.graph.errors import (
     STALE_WRITE_ATTEMPTS,
     GraphNodeNotFoundError,
+    GraphPersonaGoneError,
     GraphProtectedNodeError,
     GraphStaleWriteError,
     NodeMergeError,
@@ -73,6 +74,23 @@ _TRUST_RANK: dict[WriteSource, int] = {
 
 def _trust(source: WriteSource) -> int:
     return _TRUST_RANK.get(source, 0)
+
+
+#: What a merge retry loop catches: a stale write, or a persona gone between read and write.
+_RETRIED = (GraphStaleWriteError, GraphPersonaGoneError)
+
+
+def _read_again(exc: Exception, own_persona: str | None) -> bool:
+    """Whether a write refused with ``exc`` is retried on a fresh read (round 12 LOW-4).
+
+    A stale write always is. A persona gone between the read and the write is, when the
+    candidate does not name it: the erasure is stripping that persona from the node, and the
+    fresh read carries the trail without it. The candidate's own persona gone propagates.
+    """
+    if isinstance(exc, GraphPersonaGoneError):
+        gone = exc.context.get("persona_id")
+        return gone is not None and gone != (own_persona or "")[:80]
+    return isinstance(exc, GraphStaleWriteError)
 
 
 def accumulate(existing: str, addition: str) -> str:
@@ -196,11 +214,12 @@ class MergeEngine:
         supersede is one transaction (``supersede_node``), so one that lost the CAS wrote
         nothing, no version included, and the retry decides again on the fresh row.
         """
+        own = candidate.provenance.persona_id
         for attempt in range(STALE_WRITE_ATTEMPTS):
             try:
                 return self._evolve(owner_id, candidate, vec)
-            except GraphStaleWriteError:
-                if attempt == STALE_WRITE_ATTEMPTS - 1:
+            except _RETRIED as exc:
+                if not _read_again(exc, own) or attempt == STALE_WRITE_ATTEMPTS - 1:
                     raise
         raise AssertionError  # pragma: no cover - the loop returns or raises
 
@@ -256,8 +275,10 @@ class MergeEngine:
             try:
                 self._correct_once(owner_id, node_id, new_content, interaction_id)
                 return
-            except GraphStaleWriteError:  # changed meanwhile: read afresh (node CAS)
-                if attempt == STALE_WRITE_ATTEMPTS - 1:
+            except _RETRIED as exc:  # changed meanwhile: read afresh (node CAS)
+                # A user's correction names no persona, so any persona gone is one being
+                # stripped from the node: read afresh too.
+                if not _read_again(exc, None) or attempt == STALE_WRITE_ATTEMPTS - 1:
                     raise
 
     def _correct_once(
@@ -336,11 +357,12 @@ class MergeEngine:
         *,
         searched_again: bool = False,
     ) -> MergeOutcome:
+        own = candidate.provenance.persona_id
         for attempt in range(STALE_WRITE_ATTEMPTS):
             try:
                 return self._extend_once(owner_id, target, candidate)
-            except GraphStaleWriteError:  # changed meanwhile: read afresh (node CAS)
-                if attempt == STALE_WRITE_ATTEMPTS - 1:
+            except _RETRIED as exc:  # changed meanwhile: read afresh (node CAS)
+                if not _read_again(exc, own) or attempt == STALE_WRITE_ATTEMPTS - 1:
                     raise
                 fresh = self._backend.get_node(owner_id, target.id)
                 if fresh is None or self._backend.is_merged(owner_id, target.id):
