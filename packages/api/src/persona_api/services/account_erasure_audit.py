@@ -141,6 +141,8 @@ def _land(moving: Path, target: Path, offset: Path, *, owner_id: str, erasure_id
     if offset.exists():  # a run died after recording it: cut back to where it started
         start = int(offset.read_text(encoding="ascii"))
         if target.exists():
+            # Never past the end (round 4 LOW-3): truncate would pad the file with NUL bytes.
+            start = min(start, target.stat().st_size)
             with target.open("r+b") as out:
                 out.truncate(start)
                 out.flush()

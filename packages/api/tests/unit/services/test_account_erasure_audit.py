@@ -298,3 +298,20 @@ def test_each_removal_and_rename_is_synced_before_the_next(
     ]
     assert order[:4] == [f"unlink {offset}", "sync", f"replace {_OWNER}.jsonl", "sync"]
     assert order[-4:] == [f"unlink {moving}", "sync", f"unlink {offset}", "sync"]
+
+
+def test_an_offset_past_the_end_never_pads_the_log(tmp_path: Path) -> None:
+    """Round 4 LOW-3: an offset larger than the target (it was cut shorter meanwhile) must not
+    make truncate grow the file with NUL bytes."""
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    kept = (json.dumps({"persona_id": _ERASURE, "action": "earlier"}) + "\n").encode()
+    target.write_bytes(kept)
+    offset = tmp_path / f"{_ERASURE}.jsonl.moving.offset"
+    offset.write_text(str(len(kept) + 500), encoding="ascii")
+    _owner_log(tmp_path, n=1).replace(tmp_path / f"{_ERASURE}.jsonl.moving")
+
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+
+    data = target.read_bytes()
+    assert b"\x00" not in data, "no NUL padding"
+    assert len(data.decode("utf-8").splitlines()) == 2
