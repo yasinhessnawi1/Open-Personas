@@ -115,7 +115,21 @@ class _Backend:
             raise _Deadlock("the connection went too")
         self.events.append(f"reopen {node_id}")
 
-    def associate_entities_returning(self, *_a: Any, **_k: Any) -> list[str]:  # noqa: ANN401
+    def associate_entities_recording(
+        self,
+        owner: str,
+        _node: str,
+        _ids: Any,  # noqa: ANN401
+        **kw: Any,  # noqa: ANN401
+    ) -> list[str]:
+        metadata, content_hash = kw["record"]([])
+        self.set_merged_into(
+            owner,
+            kw["member_id"],
+            merged_into=kw["merged_into"],
+            metadata=metadata,
+            content_hash=content_hash,
+        )
         return []
 
     def remove_entity_associations(self, *_a: Any) -> None:  # noqa: ANN401

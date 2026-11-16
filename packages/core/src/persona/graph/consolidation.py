@@ -29,6 +29,7 @@ This module imports NO chat/LLM backend — the guardrail test asserts it struct
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 from datetime import UTC, datetime
@@ -50,7 +51,7 @@ from persona.logging import get_logger
 from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from persona.audit import AuditLogger
@@ -156,12 +157,15 @@ class _ConsolidationBackend(Protocol):
     ) -> bool: ...
     def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None: ...
     def entities_for_node(self, owner_id: str, node_id: str) -> list[str]: ...
-    def associate_entities_returning(
+    def associate_entities_recording(
         self,
         owner_id: str,
         node_id: str,
         entity_ids: Sequence[str],
         *,
+        member_id: str,
+        merged_into: str,
+        record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]: ...
     def remove_entity_associations(
@@ -445,21 +449,27 @@ class ConsolidationPass:
                 )
             ]
             self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
-            added = self._backend.associate_entities_returning(
-                owner_id, canonical.id, to_copy, guard_personas=personas
-            )
-            # The act is whole: the record says so, listing only the mirrors made. Until this
-            # write it stays "pending", and the next run gives the member back.
-            self._mark_merged(
+            made_sources = {m: sources[m] for m in made if m in sources}
+            # The act is whole: the entity links and the done record (listing exactly the links
+            # the insert made, and the mirrors made) commit in one transaction holding the
+            # personas (round 7 HIGH-1). Either both land or neither: a link is never left on
+            # the canonical with a record that does not list it. Until then the record stays
+            # "pending", lists no links, and the next run gives the member back.
+            self._backend.associate_entities_recording(
                 owner_id,
-                member,
-                canonical,
-                run_id=run_id,
-                mirrored=made,
-                added=added,
-                personas=sorted({*personas, *asserters.values()}),
-                sources={m: sources[m] for m in made if m in sources},
-                state=_DONE,
+                canonical.id,
+                to_copy,
+                member_id=member.id,
+                merged_into=canonical.id,
+                record=functools.partial(
+                    self._done_metadata,
+                    member,
+                    canonical,
+                    run_id=run_id,
+                    mirrored=made,
+                    sources=made_sources,
+                ),
+                guard_personas=sorted({*personas, *asserters.values()}),
             )
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
@@ -565,6 +575,57 @@ class ConsolidationPass:
         sources: dict[str, list[int]] | None = None,
         state: str = _DONE,
     ) -> None:
+        metadata, content_hash = self._merge_metadata(
+            member,
+            canonical,
+            run_id=run_id,
+            mirrored=mirrored,
+            added=added,
+            sources=sources,
+            state=state,
+        )
+        self._backend.set_merged_into(
+            owner_id,
+            member.id,
+            merged_into=canonical.id,
+            metadata=metadata,
+            content_hash=content_hash,
+            guard_personas=personas,
+        )
+
+    def _done_metadata(
+        self,
+        member: ConceptNode,
+        canonical: ConceptNode,
+        added: list[str],
+        *,
+        run_id: str,
+        mirrored: list[str],
+        sources: dict[str, list[int]],
+    ) -> tuple[dict[str, str], str]:
+        """The done record's metadata, given the entity links the insert made (round 7)."""
+        return self._merge_metadata(
+            member,
+            canonical,
+            run_id=run_id,
+            mirrored=mirrored,
+            added=added,
+            sources=sources,
+            state=_DONE,
+        )
+
+    def _merge_metadata(
+        self,
+        member: ConceptNode,
+        canonical: ConceptNode,
+        *,
+        run_id: str,
+        mirrored: list[str],
+        added: list[str],
+        sources: dict[str, list[int]] | None,
+        state: str,
+    ) -> tuple[dict[str, str], str]:
+        """The member's metadata carrying this merge record, and its content hash."""
         record = {
             # "pending" while the member's merge act runs, "done" at its end; a record from
             # before this has no state and is done (D-R9-284-graph-mutex).
@@ -580,14 +641,7 @@ class ConsolidationPass:
         }
         new_meta = {**member.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
         # content byte-untouched → content_hash recomputes over the new metadata only.
-        self._backend.set_merged_into(
-            owner_id,
-            member.id,
-            merged_into=canonical.id,
-            metadata=new_meta,
-            content_hash=_compute_node_hash(member.concept_name, member.content, new_meta),
-            guard_personas=personas,
-        )
+        return new_meta, _compute_node_hash(member.concept_name, member.content, new_meta)
 
     def _accrete_aliases(
         self,

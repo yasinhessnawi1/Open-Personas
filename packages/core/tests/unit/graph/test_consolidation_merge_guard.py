@@ -52,6 +52,7 @@ class _Backend:
         self.record: dict[str, Any] | None = None
         self.records: list[dict[str, Any]] = []
         self.already_linked: set[str] = set()
+        self.linked: set[tuple[str, str]] = set()
 
     def open_assertion_edges_keyed(self, _owner: str, node_id: str) -> list[tuple[TypedLink, int]]:
         if node_id != "m":
@@ -90,7 +91,32 @@ class _Backend:
         **kw: Any,  # noqa: ANN401
     ) -> list[str]:
         self.calls.append((f"associate_entities {list(ids)}", tuple(kw.get("guard_personas", ()))))
-        return [i for i in ids if i not in self.already_linked]
+        added = [i for i in ids if i not in self.already_linked]
+        self.linked |= {(_node, i) for i in added}  # its own commit: not atomic with the record
+        return added
+
+    def associate_entities_recording(
+        self,
+        owner: str,
+        node: str,
+        ids: Any,  # noqa: ANN401
+        **kw: Any,  # noqa: ANN401
+    ) -> list[str]:
+        """One transaction: the links land only if the record write after them does."""
+        guard = tuple(kw.get("guard_personas", ()))
+        self.calls.append((f"associate_entities {list(ids)}", guard))
+        added = [i for i in ids if i not in self.already_linked]
+        metadata, content_hash = kw["record"](added)
+        self.set_merged_into(
+            owner,
+            kw["member_id"],
+            merged_into=kw["merged_into"],
+            metadata=metadata,
+            content_hash=content_hash,
+            guard_personas=guard,
+        )
+        self.linked |= {(node, i) for i in added}
+        return added
 
     def surrogate_for(self, *_a: Any) -> None:  # noqa: ANN401
         return None
@@ -153,7 +179,8 @@ def test_every_write_the_merge_makes_holds_the_members_personas() -> None:
     # The record and the mirror also hold the source edge's asserter, _Q (round 5 H1).
     assert held["set_merged_into"] == (_P, _Q)
     assert held["mirror k::causal::x"] == (_P, _Q)
-    assert held["associate_entities ['ent_m']"] == (_P,)
+    # Round 7 HIGH-1: the links commit with the done record, which holds the asserter too.
+    assert held["associate_entities ['ent_m']"] == (_P, _Q)
     assert held["update_node k"] == (_P,)
 
 
@@ -325,3 +352,70 @@ def test_both_record_writes_hold_the_sources_asserter() -> None:
     held = [personas for name, personas in backend.calls if name == "set_merged_into"]
 
     assert held == [(_P, _Q), (_P, _Q)], "the pending write and the done write"
+
+
+class _GoneError(Exception):
+    """The guard refused: the persona's row was deleted."""
+
+
+class _RefusedDone(_Backend):
+    """Round 7 HIGH-1, the reviewer's probe: the done record write is refused.
+
+    The persona row goes between the pending record and the done one. The record is kept per
+    node so the give back reads it, and removed links are tracked.
+    """
+
+    def __init__(self, canonical: ConceptNode, member: ConceptNode) -> None:
+        super().__init__(canonical, member)
+        self.meta: dict[str, dict[str, str]] = {}
+        self.removed: list[tuple[str, list[str]]] = []
+
+    def set_merged_into(self, owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        if json.loads(kw["metadata"]["_k7_merge"])["state"] == "done":
+            raise _GoneError("persona row deleted before the done write")
+        super().set_merged_into(owner, node_id, **kw)
+        self.meta[node_id] = kw["metadata"]
+
+    def get_node(self, owner: str, node_id: str) -> ConceptNode | None:
+        node = super().get_node(owner, node_id)
+        if node is not None and node_id in self.meta:
+            node = node.model_copy(update={"metadata": self.meta[node_id]})
+        return node
+
+    def merge_records_listing(self, *_a: Any, **_k: Any) -> dict[str, str]:  # noqa: ANN401
+        return {}
+
+    def existing_edge_keys(self, *_a: Any) -> set[int]:  # noqa: ANN401
+        return set()
+
+    def delete_open_mirror(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def reopen_edges_incident(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def remove_entity_associations(self, _owner: str, node: str, ids: Any) -> None:  # noqa: ANN401
+        self.removed.append((node, list(ids)))
+        self.linked -= {(node, i) for i in ids}
+
+
+def test_a_refused_done_write_leaves_no_entity_link_behind() -> None:
+    """The links and the done record are one commit, so a refusal takes both back."""
+    canonical = _node("k", _Q)
+    member = _node("m", _P, None, _P)
+    backend = _RefusedDone(canonical, member)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    with pytest.raises(_GoneError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            "u1", canonical, [member], run_id="r1", now=_NOW, epoch=1
+        )
+    consolidation._give_back_cluster("u1", [member], run_id="r1")  # noqa: SLF001
+
+    assert backend.linked == set(), f"a copied link was left on the canonical: {backend.linked}"

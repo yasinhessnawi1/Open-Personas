@@ -1015,3 +1015,75 @@ def test_a_mirror_whose_sources_went_by_another_path_is_pruned(
     assert record["mirror_sources"] == {}
     assert counts["orphan_mirrors_deleted"] == 1
     assert counts["merge_records_pruned"] == 1
+
+
+def test_a_refused_done_write_leaves_no_entity_link_on_the_canonical(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 7 HIGH-1: P's row goes between the pending record and the done one.
+
+    The done write holds P and is refused; the entity links commit with it, so none lands on
+    the canonical, and erasing P leaves no link to the entity only P's member carried.
+    """
+    from persona.graph.errors import GraphPersonaGoneError  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("h_k", _OTHER), vector)
+    backend.insert_node(_OWNER, _node("h_m", _PERSONA), vector)
+    backend.insert_entity(
+        _OWNER,
+        CanonicalEntity(
+            id="h_ent", canonical_name="h_ent", provenance=_by(_PERSONA), created_at=_NOW
+        ),
+        vector,
+    )
+    backend.associate_entities(_OWNER, "h_m", ["h_ent"])
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+    real_close = backend.close_edges_incident
+
+    def _close_then_delete_p(*args: Any, **kwargs: Any) -> list[str]:  # noqa: ANN401
+        closed = real_close(*args, **kwargs)
+        with migrated_engine.begin() as conn:
+            conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+        return closed
+
+    backend.close_edges_incident = _close_then_delete_p  # type: ignore[method-assign]
+    with pytest.raises(GraphPersonaGoneError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, "h_k"),
+            [backend.get_node(_OWNER, "h_m")],
+            run_id="rh",
+            now=_NOW,
+            epoch=1,
+        )
+    backend.close_edges_incident = real_close  # type: ignore[method-assign]
+
+    assert backend.entities_for_node(_OWNER, "h_k") == [], "no link landed with the refusal"
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    with migrated_engine.connect() as conn:
+        links = conn.execute(
+            text("SELECT node_id FROM graph_node_entities WHERE owner_id = :o"), {"o": _OWNER}
+        ).all()
+    assert links == []

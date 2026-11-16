@@ -54,7 +54,7 @@ from persona.graph.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from contextlib import AbstractContextManager
 
     from sqlalchemy import Connection, Engine
@@ -984,6 +984,55 @@ class PostgresGraphBackend:
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, guard_personas)
             return [str(e) for e in conn.execute(stmt).scalars()]
+
+    def associate_entities_recording(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        member_id: str,
+        merged_into: str,
+        record: Callable[[list[str]], tuple[dict[str, str], str]],
+        guard_personas: Sequence[str] = (),
+    ) -> list[str]:
+        """Link ``node_id`` to the entities and write ``member_id``'s record, in one commit.
+
+        Consolidation's done write (R9-284 round 7 HIGH-1): ``record`` is given the links
+        the insert actually made and returns the member's metadata and content hash, so the
+        record lists exactly those. One transaction holding ``guard_personas``: if the guard
+        refuses, or anything fails, neither the links nor the record land.
+        """
+        now = datetime.now(UTC)
+        rows = [
+            {"owner_id": owner_id, "node_id": node_id, "entity_id": eid, "created_at": now}
+            for eid in dict.fromkeys(entity_ids)
+        ]
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, guard_personas)
+            added: list[str] = []
+            if rows:
+                added = [
+                    str(e)
+                    for e in conn.execute(
+                        pg_insert(graph_node_entities)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
+                        .returning(graph_node_entities.c.entity_id)
+                    ).scalars()
+                ]
+            metadata, content_hash = record(added)
+            conn.execute(
+                update(graph_nodes)
+                .where(graph_nodes.c.id == member_id, graph_nodes.c.owner_id == owner_id)
+                .values(
+                    merged_into=merged_into,
+                    metadata=metadata,
+                    content_hash=content_hash,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        return added
 
     def nodes_for_entity(self, owner_id: str, entity_id: str) -> list[ConceptNode]:
         """All nodes that concern ``entity_id`` (criterion 2 — the entity thread)."""
