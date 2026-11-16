@@ -10,6 +10,8 @@ ride the owner's id in their ``persona_id`` slot (CSA-1) and name the persona in
 from __future__ import annotations
 
 import json
+import os
+import secrets
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -96,8 +98,13 @@ def _scrub_held_file(path: Path, clean_line: Callable[[str], str]) -> int:
         changed = sum(a != b for a, b in zip(lines, clean, strict=True))
         if not changed:
             return 0
-        temporary = path.with_name(path.name + ".erasing")
-        temporary.write_bytes(("\n".join(clean) + "\n").encode("utf-8", errors="surrogateescape"))
+        # A name of its own (review L7): two processes rewriting the same log never share a
+        # temporary file, and it is on disk before it replaces the log.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.erasing")
+        with temporary.open("wb") as out:
+            out.write(("\n".join(clean) + "\n").encode("utf-8", errors="surrogateescape"))
+            out.flush()
+            os.fsync(out.fileno())
         if path.read_bytes() != before:  # an event was appended meanwhile: start again
             temporary.unlink()
             continue

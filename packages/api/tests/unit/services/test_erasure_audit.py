@@ -133,3 +133,33 @@ def test_an_event_without_metadata_is_cleaned_and_stays_a_valid_event(tmp_path: 
     assert "metadata" not in cleaned
     assert cleaned["reason"] is None
     AuditEvent.model_validate(cleaned)
+
+
+def test_each_rewrite_has_its_own_temporary_and_syncs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L7: a unique temporary per rewrite, on disk before it replaces the log."""
+    import os  # noqa: PLC0415
+
+    from persona_api.services import erasure_audit  # noqa: PLC0415
+
+    synced: list[int] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(erasure_audit.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    names: list[str] = []
+    real_replace = Path.replace
+
+    def _replace(self: Path, target: Path) -> Path:
+        names.append(self.name)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _replace)
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    for said in ("first", "second"):
+        log.write_text(json.dumps({"persona_id": _PERSONA, "reason": said}) + "\n", "utf-8")
+        scrub_store_audit_files(tmp_path, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert len(synced) == 2
+    assert len(set(names)) == 2, "never the same temporary twice"
+    assert all(n.startswith(f"{_PERSONA}.jsonl.{os.getpid()}.") for n in names)
+    assert not list(tmp_path.glob("*.erasing"))
