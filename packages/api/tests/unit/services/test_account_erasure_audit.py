@@ -121,22 +121,54 @@ def test_a_crash_after_the_rename_is_finished_on_resume(tmp_path: Path) -> None:
 
 
 def test_a_crash_after_the_append_appends_nothing_twice(tmp_path: Path) -> None:
-    """The run died after landing the lines but before removing .moving."""
-    import shutil  # noqa: PLC0415
-
-    source = _owner_log(tmp_path)
+    """The run died after appending but before removing .moving and its offset: the resume
+    cuts the target back to the offset and lands the lines once."""
+    _owner_log(tmp_path)
     rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
     target = tmp_path / f"{_ERASURE}.jsonl"
     landed = target.read_bytes()
-    # Rebuild the crash: the same events back in a .moving file next to the landed target.
-    _owner_log(tmp_path)
-    shutil.copyfile(source, tmp_path / f"{_ERASURE}.jsonl.moving")
-    source.unlink()
+    # Rebuild the crash: the same events still in .moving, the offset (0) still recorded.
+    source = _owner_log(tmp_path)
+    source.replace(tmp_path / f"{_ERASURE}.jsonl.moving")
+    (tmp_path / f"{_ERASURE}.jsonl.moving.offset").write_text("0", encoding="ascii")
 
-    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 0
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 2
 
     assert target.read_bytes() == landed, "nothing appended twice"
     assert not (tmp_path / f"{_ERASURE}.jsonl.moving").exists()
+    assert not (tmp_path / f"{_ERASURE}.jsonl.moving.offset").exists()
+
+
+def test_a_crash_mid_append_resumes_to_a_clean_file(tmp_path: Path) -> None:
+    """A torn tail after the recorded offset is cut away before the lines land again."""
+    target = tmp_path / f"{_ERASURE}.jsonl"
+    kept = (json.dumps({"persona_id": _ERASURE, "action": "earlier"}) + "\n").encode()
+    target.write_bytes(kept + b'{"persona_id": "erasure_0123", "act')  # the torn tail
+    (tmp_path / f"{_ERASURE}.jsonl.moving.offset").write_text(str(len(kept)), encoding="ascii")
+    source = _owner_log(tmp_path)
+    source.replace(tmp_path / f"{_ERASURE}.jsonl.moving")
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 2
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == kept.decode().rstrip("\n"), "what was there before is kept"
+    assert len(lines) == 3
+    assert all(json.loads(line) for line in lines), "no torn line survives"
+
+
+def test_two_events_identical_after_rekeying_are_both_kept(tmp_path: Path) -> None:
+    """Round 3 LOW-1: re-keying clears free text, so two genuine events can become equal
+    lines; the second, moved later, lands next to its twin (a line dedupe dropped it)."""
+    source = tmp_path / f"{_OWNER}.jsonl"
+    source.write_bytes((json.dumps(_event(_OWNER, reason="first")) + "\n").encode())
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+    source.write_bytes((json.dumps(_event(_OWNER, reason="second")) + "\n").encode())
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 1
+
+    lines = (tmp_path / f"{_ERASURE}.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0] == lines[1], "equal after re-keying, and both kept"
 
 
 def test_events_written_after_a_move_are_moved_by_the_next_run(tmp_path: Path) -> None:

@@ -86,56 +86,80 @@ def _fsync_write(path: Path, payload: bytes, *, append: bool) -> None:
 def rekey_store_audit_file(audit_root: Path | None, *, owner_id: str, erasure_id: str) -> int:
     """Move ``{owner}.jsonl`` to ``{erasure_id}.jsonl``, each event re-keyed; the lines moved.
 
-    Crash safe (review L-1), under the loggers' lock on the owner's file:
+    Crash safe and exact (review L-1, round 3 LOW-1/2), under the loggers' lock:
 
     1. ``{owner}.jsonl`` is renamed to ``{erasure_id}.jsonl.moving`` in the same directory
        (atomic: the owner's name is gone at once, and new events start a new file);
-    2. the ``.moving`` file is re-keyed into a temporary file, fsynced, and renamed onto
-       ``{erasure_id}.jsonl``; if that already exists (an earlier run, or a second move of
-       events written meanwhile) the re-keyed lines it does not hold yet are appended, fsynced;
-    3. the ``.moving`` file is removed.
+    2. before anything is appended, the target's current size is written to
+       ``{erasure_id}.jsonl.moving.offset`` (temporary file, fsync, rename);
+    3. the re-keyed lines are appended to ``{erasure_id}.jsonl`` and fsynced;
+    4. the ``.moving`` file is removed, then the offset file.
 
-    A resume that finds a ``.moving`` file finishes it before looking at the owner's name
-    again, and a crash between the append and the removal appends nothing twice.
+    A resume that finds a ``.moving`` file finishes it before looking at the owner's name: if
+    its offset file exists the target is first cut back to that size, so a torn or repeated
+    tail never survives and every event lands exactly once, identical lines included. A
+    ``.moving`` file freshly made from the owner's log starts with no offset file (a stale one,
+    left by a crash between the two removals, is dropped).
     """
     if audit_root is None:
         return 0
     source = audit_root / f"{require_path_segment(owner_id, what='audit log')}.jsonl"
     target = audit_root / f"{require_path_segment(erasure_id, what='audit log')}.jsonl"
     moving = target.with_name(target.name + ".moving")
+    offset = target.with_name(target.name + ".moving.offset")
     moved = 0
     with jsonl_file_lock(source):
         for _ in range(_FILE_ATTEMPTS):
             if not moving.exists():
                 if not source.exists():
+                    offset.unlink(missing_ok=True)  # stale: its .moving is already gone
                     return moved
+                offset.unlink(missing_ok=True)
                 source.replace(moving)
-            moved += _land(moving, target, owner_id=owner_id, erasure_id=erasure_id)
+                _fsync_dir(audit_root)
+            moved += _land(moving, target, offset, owner_id=owner_id, erasure_id=erasure_id)
             moving.unlink()
+            offset.unlink(missing_ok=True)
+            _fsync_dir(audit_root)
             if not source.exists():
                 return moved
     msg = "the owner's audit log kept being written while it was moved"
     raise OSError(msg)
 
 
-def _land(moving: Path, target: Path, *, owner_id: str, erasure_id: str) -> int:
-    """Re-key the ``.moving`` lines into the target; how many lines were new there."""
+def _land(moving: Path, target: Path, offset: Path, *, owner_id: str, erasure_id: str) -> int:
+    """Append the ``.moving`` lines, re-keyed, to the target from its recorded offset."""
     text = moving.read_bytes().decode("utf-8", errors="surrogateescape")
     lines = [
         _rekeyed_line(line, owner_id=owner_id, erasure_id=erasure_id)
         for line in text.split("\n")
         if line != ""
     ]
-    if not target.exists():
-        temporary = target.with_name(target.name + ".tmp")
-        _fsync_write(temporary, _payload(lines), append=False)
-        temporary.replace(target)
-        return len(lines)
-    held = set(target.read_bytes().decode("utf-8", errors="surrogateescape").split("\n"))
-    fresh = [line for line in lines if line not in held]
-    if fresh:
-        _fsync_write(target, _payload(fresh), append=True)
-    return len(fresh)
+    if offset.exists():  # a run died after recording it: cut back to where it started
+        start = int(offset.read_text(encoding="ascii"))
+        with target.open("r+b") as out:
+            out.truncate(start)
+            out.flush()
+            os.fsync(out.fileno())
+    else:
+        start = target.stat().st_size if target.exists() else 0
+        temporary = offset.with_name(offset.name + ".tmp")
+        _fsync_write(temporary, str(start).encode("ascii"), append=False)
+        temporary.replace(offset)
+        _fsync_dir(offset.parent)
+    _fsync_write(target, _payload(lines), append=True)
+    return len(lines)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in ``directory`` durable; a no-op where the OS cannot (Windows)."""
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _payload(lines: list[str]) -> bytes:
