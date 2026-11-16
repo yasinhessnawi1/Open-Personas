@@ -265,3 +265,56 @@ def test_a_payment_method_already_detached_counts_as_done() -> None:
 
     assert counts["payment_methods_detached"] == 0
     assert counts["customers_relabelled"] == 1, "the erasure carried on past it"
+
+
+def test_customer_subscription_created_is_routed() -> None:
+    """Review M-2: the guard only runs for events the dispatcher routes."""
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    registry = handlers.lifecycle_handlers()
+
+    assert registry["customer.subscription.created"] is handlers.handle_subscription_created
+
+
+def _erased_context(monkeypatch: pytest.MonkeyPatch, fake: _Customers) -> SimpleNamespace:
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        handlers.subscription_service, "resolve_user_by_customer", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(handlers, "_apply_scoped", lambda *_a: pytest.fail("wrote for it"))
+    return SimpleNamespace(admin_engine=None, stripe_client=fake.client(), config=None)
+
+
+def test_a_completed_checkout_for_an_erased_customer_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M-2: checkout.session.completed names the new subscription; it is cancelled."""
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    fake = _Customers({"user_id": _ERASURE})
+    context = _erased_context(monkeypatch, fake)
+    session = {"customer": "cus_1", "subscription": "sub_from_checkout"}
+
+    handlers.handle_checkout_completed(
+        SimpleNamespace(data=SimpleNamespace(object=session)),  # type: ignore[arg-type]
+        context,  # type: ignore[arg-type]
+    )
+
+    assert [c[0] for c in fake.cancelled] == ["sub_from_checkout"]
+
+
+def test_an_updated_subscription_for_an_erased_customer_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    fake = _Customers({"user_id": _ERASURE})
+    context = _erased_context(monkeypatch, fake)
+
+    handlers.handle_subscription_updated(
+        SimpleNamespace(data=SimpleNamespace(object={"id": "sub_upd", "customer": "cus_1"})),  # type: ignore[arg-type]
+        context,  # type: ignore[arg-type]
+    )
+
+    assert [c[0] for c in fake.cancelled] == ["sub_upd"]
