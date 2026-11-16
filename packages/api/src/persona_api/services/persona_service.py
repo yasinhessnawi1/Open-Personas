@@ -43,6 +43,7 @@ from persona_api.services import notifications_service
 from persona_api.workspace_paths import is_persona_id, new_persona_id, persona_root
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from persona.stores.backend import Backend
@@ -365,6 +366,7 @@ def create_persona(
     avatar_url: str | None = None,
     memory_backend: Backend | None = None,
     audit_logger: AuditLogger | None = None,
+    compensate: Callable[[str], object] | None = None,
 ) -> str:
     """Create a persona: insert the row + populate memory stores (D-08-8).
 
@@ -377,6 +379,11 @@ def create_persona(
     ``memory_chunks.persona_id`` FK (a separate connection can't see an
     uncommitted row; verified in research). Both transactions carry the tenant
     GUC, so RLS holds throughout.
+
+    R9-293: a failure after the row commits leaves a half-made persona (in the owner's list,
+    without its identity memory). ``compensate`` is then called with the new persona's id
+    (the route erases it through the persona erasure) before the original error is raised
+    again; an undo that fails itself is logged and never hides that error.
     """
     persona_id = new_persona_id()
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
@@ -403,9 +410,28 @@ def create_persona(
             )
         )
     # Persona row committed → its FK target is visible to the store connections.
-    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
-    registry.load_persona(persona)
+    try:
+        registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
+        registry.load_persona(persona)
+    except Exception:
+        _undo_create(compensate, persona_id)
+        raise
     return persona_id
+
+
+def _undo_create(compensate: Callable[[str], object] | None, persona_id: str) -> None:
+    """Undo a create that failed after its row committed (R9-293); never raises."""
+    if compensate is None:
+        _LOG.error("persona create failed after its row committed persona={pid}", pid=persona_id)
+        return
+    try:
+        compensate(persona_id)
+    except Exception as exc:  # noqa: BLE001 - the create's own error is the one to raise
+        _LOG.error(
+            "persona create failed and undoing it failed too persona={pid} error={err}",
+            pid=persona_id,
+            err=type(exc).__name__,
+        )
 
 
 def update_persona(
