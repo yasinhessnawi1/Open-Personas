@@ -17,6 +17,7 @@ from persona_api.services.erasure_graph import (
     mirror_id_for,
     mirrors_to_remove,
     names_only_the_doomed_gave,
+    orphaned_mirrors,
     plan_trails,
     source_keys,
     split_alias_list,
@@ -419,3 +420,34 @@ def test_a_chain_is_resolved_whatever_order_the_records_come_in(order: tuple[int
     rows = {(m, r): [key + 1] for m, r, key in chain}
 
     assert mirrors_to_remove([10], [chain[i] for i in order], rows) == [11, 12, 13, 14]
+
+
+_M = ("m", "r")
+
+
+def test_the_reviewers_two_calls_the_seed_rule_alone_keeps_a_stale_mirror() -> None:
+    """Round 6 M-1: A (key 1, P's) and B (key 2) share M; B is pending, P is erased, then Q.
+
+    The seed rule keeps M while B's source lives, which is right; but once B is given back
+    and A's stale listing is all that names M, erasing Q finds no source of M going, so the
+    seed rule alone would keep M for ever. ``orphaned_mirrors`` is what removes it.
+    """
+    assert mirrors_to_remove({1}, [("m", "r", 1), ("m", "r", 2)], {_M: {9}}, {1, 2, 9}) == []
+    assert mirrors_to_remove({2}, [("m", "r", 1)], {_M: {9}}, {2, 9}) == []
+
+    stale = {"run_id": "r", "mirrored_edges": ["m"], "mirror_sources": {"m": [1]}}
+    doomed, rewrites = orphaned_mirrors({"a": stale}, {_M: {9}}, existing={2, 9})
+
+    assert doomed == [9]
+    assert rewrites == {"a": {**stale, "mirrored_edges": [], "mirror_sources": {}}}
+
+
+def test_a_listing_keeps_only_its_live_sources_and_a_backed_mirror_stays() -> None:
+    a = {"run_id": "r", "mirrored_edges": ["m", "old"], "mirror_sources": {"m": [1, 3]}}
+    b = {"run_id": "r", "mirrored_edges": ["m"], "mirror_sources": {"m": 2}}
+
+    doomed, rewrites = orphaned_mirrors({"a": a, "b": b}, {_M: {9}}, existing={2, 3, 9})
+
+    assert doomed == [], "B's source and A's key 3 still back m"
+    assert rewrites == {"a": {**a, "mirror_sources": {"m": [3]}}}, "old (no sources) is kept"
+    assert orphaned_mirrors({"b": b}, {_M: {9}}, existing={2, 9}) == ([], {}), "nothing stale"

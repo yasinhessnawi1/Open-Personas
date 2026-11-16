@@ -122,6 +122,7 @@ class _ConsolidationBackend(Protocol):
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
     def pending_merges(self, owner_id: str) -> list[str]: ...
     def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]: ...
+    def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
         self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
@@ -659,11 +660,17 @@ class ConsolidationPass:
     def _mirrors_shared_with(
         self, owner_id: str, node_id: str, record: dict[str, object]
     ) -> set[str]:
-        """Mirrors another member of the same run, still merged, also lists."""
-        shared: set[str] = set()
+        """Mirrors another member of the same run, still merged, also backs.
+
+        It backs one only while one of the sources it lists for it is still a row (round 6
+        M-1): a stale listing, whose source an erasure or a forget removed, keeps nothing. A
+        mirror it lists without sources (a record before LOW-3) is taken as backed.
+        """
         canonical = record.get("canonical")
         if not isinstance(canonical, str):
-            return shared
+            return set()
+        claims: dict[str, set[int]] = {}
+        unsourced: set[str] = set()
         for other_id, raw in self._backend.merge_records_into(owner_id, canonical).items():
             if other_id == node_id:
                 continue
@@ -671,9 +678,19 @@ class ConsolidationPass:
                 other = json.loads(raw)
             except ValueError:
                 continue
-            if isinstance(other, dict) and other.get("run_id") == record.get("run_id"):
-                shared.update(str(m) for m in other.get("mirrored_edges", []))
-        return shared
+            if not isinstance(other, dict) or other.get("run_id") != record.get("run_id"):
+                continue
+            sources = other.get("mirror_sources") or {}
+            for mirror in map(str, other.get("mirrored_edges", [])):
+                if mirror not in sources:
+                    unsourced.add(mirror)  # no sources listed: taken as backed
+                    continue
+                listed = sources[mirror]
+                keys = listed if isinstance(listed, list) else [listed]
+                claims.setdefault(mirror, set()).update(k for k in keys if isinstance(k, int))
+        wanted = sorted({k for keys in claims.values() for k in keys})
+        alive = self._backend.existing_edge_keys(owner_id, wanted) if wanted else set()
+        return unsourced | {mirror for mirror, keys in claims.items() if keys & alive}
 
     # ===== helpers ========================================================
 

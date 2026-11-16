@@ -63,6 +63,7 @@ __all__ = [
     "names_only_the_doomed_gave",
     "mirror_id_for",
     "mirrors_to_remove",
+    "orphaned_mirrors",
     "source_keys",
     "unsourced_mirrors",
     "split_alias_list",
@@ -591,6 +592,99 @@ def mirrors_to_remove(
     return sorted(found)
 
 
+def orphaned_mirrors(
+    records: Mapping[str, Mapping[str, Any]],
+    mirror_rows: Mapping[tuple[str, str], Iterable[int]],
+    existing: Iterable[int],
+) -> tuple[list[int], dict[str, dict[str, Any]]]:
+    """Mirrors no live source backs, and the records' stale listings (round 6 M-1).
+
+    ``records`` is every surviving member's merge record, ``mirror_rows`` the owner's mirror
+    rows by ``(mirror id, run id)``, ``existing`` the edge keys that are still rows. A mirror
+    some record lists sources for, none of which is a row any more, has lost every source: its
+    rows go (whatever removed the sources: an erasure, a forget, a stale co-member's listing).
+    Each record drops the source keys that are no longer rows, and a mirror id once it has no
+    sources left; a mirror it lists without sources (before LOW-3) is left as it is.
+    Returns the edge keys to delete and ``{member id: its rewritten record}``.
+    """
+    alive = set(existing)
+    listed: dict[tuple[str, str], set[int]] = {}
+    for record in records.values():
+        run_id = str(record.get("run_id"))
+        for mirror, raw in (record.get("mirror_sources") or {}).items():
+            listed.setdefault((str(mirror), run_id), set()).update(source_keys(raw))
+    doomed = sorted(
+        {
+            key
+            for mirror, sources in listed.items()
+            if sources and not sources & alive
+            for key in mirror_rows.get(mirror, ())
+        }
+    )
+    rewrites: dict[str, dict[str, Any]] = {}
+    for member_id, record in records.items():
+        sources = record.get("mirror_sources") or {}
+        kept = {m: [k for k in source_keys(raw) if k in alive] for m, raw in sources.items()}
+        emptied = {m for m, keys in kept.items() if not keys}
+        if all(source_keys(sources[m]) == keys for m, keys in kept.items()):
+            continue
+        rewrites[member_id] = {
+            **record,
+            "mirror_sources": {m: keys for m, keys in kept.items() if keys},
+            "mirrored_edges": [
+                e for e in record.get("mirrored_edges", []) if str(e) not in emptied
+            ],
+        }
+    return doomed, rewrites
+
+
+def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
+    """Apply :func:`orphaned_mirrors` to the owner's graph, after the rest of the step."""
+    members = conn.execute(
+        select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
+        .where(nodes_t.c.owner_id == owner_id, nodes_t.c.merged_into.is_not(None))
+        .order_by(nodes_t.c.id)
+        .with_for_update()
+    ).all()
+    records = {m.id: r for m in members if (r := merge_record(m.metadata)) is not None}
+    rows = _mirror_rows(conn, owner_id)
+    named = sorted(
+        {
+            k
+            for r in records.values()
+            for raw in (r.get("mirror_sources") or {}).values()
+            for k in source_keys(raw)
+        }
+    )
+    existing = (
+        set(
+            conn.execute(
+                select(graph_edges.c.edge_key).where(
+                    graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(named)
+                )
+            ).scalars()
+        )
+        if named
+        else set()
+    )
+    doomed, rewrites = orphaned_mirrors(records, rows, existing)
+    deleted = 0
+    if doomed:
+        deleted = conn.execute(
+            delete(graph_edges).where(
+                graph_edges.c.owner_id == owner_id,
+                graph_edges.c.edge_key.in_(doomed),
+                cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
+            )
+        ).rowcount
+    by_id = {m.id: m for m in members}
+    for member_id, record in rewrites.items():
+        member = by_id[member_id]
+        metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        _set_metadata(conn, owner_id, member, metadata)
+    return {"orphan_mirrors_deleted": deleted, "merge_records_pruned": len(rewrites)}
+
+
 def _mirror_rows(conn: Connection, owner_id: str) -> dict[tuple[str, str], set[int]]:
     """Every consolidation mirror row of the owner: ``{(edge id, run id): {edge_key}}``."""
     rows = conn.execute(
@@ -851,4 +945,6 @@ def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> di
             **_nodes(conn, owner_id, persona_id, mirrors),
             **_versions(conn, owner_id, persona_id),
             **_edges_and_entities(conn, owner_id, persona_id, mirrors),
+            # Last: whatever lost its every source, here or by another path (round 6 M-1).
+            **_prune_orphans(conn, owner_id),
         }

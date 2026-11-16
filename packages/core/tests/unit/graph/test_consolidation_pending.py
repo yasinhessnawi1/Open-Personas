@@ -68,6 +68,9 @@ class _Backend:
             if self.merged[i] == canonical_id and "_k7_merge" in n.metadata
         }
 
+    def existing_edge_keys(self, _owner: str, keys: Any) -> set[int]:  # noqa: ANN401
+        return set(keys)
+
     def get_marker(self, _owner: str) -> tuple[int, None]:
         return 0, None
 

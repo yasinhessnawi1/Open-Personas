@@ -825,3 +825,75 @@ def test_a_legacy_comma_reason_loses_only_the_doomed_name(
     reasons = [p.reason for p in kept.provenance if p.reason]
     assert reasons == ['consolidation:r1 aliases:["Tromso"]']
     assert json.loads(kept.metadata["_k7_aliases"]) == ["Tromso"]
+
+
+def test_a_co_members_stale_listing_does_not_keep_a_mirror(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 6 M-1: A (edge eA, P's) and B (edge eB, Q's) share C->X; B is left pending.
+
+    Erasing P deletes eA and drops C->X from A's record; giving B back then removes C->X,
+    which nothing backs any more.
+    """
+    import json  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("s_a", "s_b", "s_c", "s_x"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("s_a::causal::s_x", "s_a", "s_x", _PERSONA))
+    backend.upsert_edge(_OWNER, _edge("s_b::causal::s_x", "s_b", "s_x", _OTHER))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+    consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "s_c"),
+        [backend.get_node(_OWNER, "s_a"), backend.get_node(_OWNER, "s_b")],
+        run_id="rs",
+        now=_NOW,
+        epoch=1,
+    )
+    b = backend.get_node(_OWNER, "s_b")
+    assert b is not None
+    crashed = {**json.loads(b.metadata["_k7_merge"]), "state": "pending"}
+    backend.set_merged_into(
+        _OWNER,
+        "s_b",
+        merged_into="s_c",
+        metadata={**b.metadata, "_k7_merge": json.dumps(crashed, sort_keys=True)},
+        content_hash="h",
+    )
+    assert _open_edges(migrated_engine, "s_c") == {"s_c::causal::s_x"}
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert _open_edges(migrated_engine, "s_c") == {"s_c::causal::s_x"}, "B's source backs it"
+    a = backend.get_node(_OWNER, "s_a")
+    assert a is not None
+    record = json.loads(a.metadata["_k7_merge"])
+    assert "s_c::causal::s_x" not in record["mirrored_edges"], "A's stale listing is dropped"
+
+    assert backend.pending_merges(_OWNER) == ["s_b"]
+    assert consolidation.unmerge(_OWNER, "s_b") is True
+
+    assert _open_edges(migrated_engine, "s_c") == set(), "nothing backs C->X any more"

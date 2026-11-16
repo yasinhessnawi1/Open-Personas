@@ -186,7 +186,9 @@ def test_the_accreted_alias_names_are_recorded_as_json() -> None:
 class _UnmergeBackend:
     """Two members of run r1 merged into k; both list the mirror k::causal::x."""
 
-    def __init__(self, other_run: str) -> None:
+    def __init__(self, other_run: str, alive: frozenset[int] = frozenset({7})) -> None:
+        self._alive = set(alive)
+
         def record(run: str) -> str:
             return json.dumps(
                 {
@@ -209,6 +211,9 @@ class _UnmergeBackend:
     def merge_records_into(self, _owner: str, _canonical: str) -> dict[str, str]:
         return dict(self.records)
 
+    def existing_edge_keys(self, _owner: str, keys: Any) -> set[int]:  # noqa: ANN401
+        return set(keys) & self._alive
+
     def delete_open_mirror(self, _owner: str, edge_id: str, **_k: Any) -> None:  # noqa: ANN401
         self.deleted.append(edge_id)
 
@@ -228,12 +233,23 @@ class _UnmergeBackend:
         return {}
 
 
-@pytest.mark.parametrize(("other_run", "deleted"), [("r1", []), ("r0", ["k::causal::x"])])
+@pytest.mark.parametrize(
+    ("other_run", "alive", "deleted"),
+    [
+        ("r1", frozenset({7}), []),
+        ("r0", frozenset({7}), ["k::causal::x"]),
+        ("r1", frozenset(), ["k::causal::x"]),
+    ],
+    ids=["shared", "another_run", "stale_listing"],
+)
 def test_unmerge_keeps_a_mirror_another_member_of_the_run_shares(
-    other_run: str, deleted: list[str]
+    other_run: str, alive: frozenset[int], deleted: list[str]
 ) -> None:
-    """Round 5 MEDIUM-2: giving m back must not take n's share of the mirror."""
-    backend = _UnmergeBackend(other_run)
+    """Round 5 MEDIUM-2: giving m back must not take n's share of the mirror.
+
+    Round 6 M-1: n backs it only while a source n lists for it is still a row.
+    """
+    backend = _UnmergeBackend(other_run, alive)
     consolidation = ConsolidationPass(
         backend=backend,  # type: ignore[arg-type]
         index=_Index(),  # type: ignore[arg-type]

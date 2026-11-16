@@ -1245,6 +1245,16 @@ class PostgresGraphBackend:
                 return True
             return reason is not None and conn.execute(same_mirror).first() is not None
 
+    def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]:
+        """Which of ``edge_keys`` are still rows of the owner's edges."""
+        if not edge_keys:
+            return set()
+        stmt = select(graph_edges.c.edge_key).where(
+            graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(list(edge_keys))
+        )
+        with self._engine.connect() as conn:
+            return {int(k) for k in conn.execute(stmt).scalars()}
+
     def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]:
         """``{member id: its raw merge record}`` for every member merged into ``canonical_id``."""
         record = graph_nodes.c.metadata["_k7_merge"].astext
