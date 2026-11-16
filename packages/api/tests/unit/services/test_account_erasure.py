@@ -345,8 +345,11 @@ def test_the_account_waits_for_an_unfinished_persona_erasure(
 @pytest.fixture
 def billing_engine(engine: Engine) -> Engine:
     from persona_api.db.models import subscription  # noqa: PLC0415
+    from sqlalchemy import text  # noqa: PLC0415
 
     subscription.create(engine)
+    with engine.begin() as conn:  # the capture reads only these two (the real one is Postgres)
+        conn.execute(text("CREATE TABLE personas (id TEXT PRIMARY KEY, owner_id TEXT)"))
     return engine
 
 
@@ -378,3 +381,43 @@ def test_a_stripe_customer_needs_stripe(billing_engine: Engine) -> None:
     )
     with_stripe = _deps(billing_engine, clerk=_Clerk(), stripe=_Stripe())
     assert ae.unready_reason(with_stripe, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE) is None
+
+
+# ---- the retained subscription (review M2) ---------------------------------------------
+
+
+def test_the_retained_subscription_is_the_claims_snapshot(billing_engine: Engine) -> None:
+    """Our cancel's webhook rewrites the live row to free between the stripe and billing steps;
+    the retained record still shows the paid plan, under a fixed id (so it is copied once)."""
+    from persona_api.db.models import subscription  # noqa: PLC0415
+    from sqlalchemy import insert, update  # noqa: PLC0415
+
+    with billing_engine.begin() as conn:
+        conn.execute(
+            insert(subscription).values(
+                user_id=_OWNER,
+                plan_code="pro",
+                stripe_customer_id="cus_1",
+                stripe_subscription_id="sub_1",
+            )
+        )
+    erasure = ae.begin_account_erasure(billing_engine, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE)
+    with billing_engine.begin() as conn:  # the webhook's mark_canceled, after our cancel
+        conn.execute(update(subscription).values(plan_code="free", status="canceled"))
+
+    first = ae.retained_subscription(erasure)
+    again = ae.retained_subscription(
+        ErasureLedger(billing_engine).get(SubjectKind.ACCOUNT, _OWNER)  # type: ignore[arg-type]
+    )
+
+    assert first is not None
+    assert first["reason"] == "pro", "the plan that was paid for, not the canceled row's"
+    assert first["source_id"] == "subscription"
+    assert first["stripe_subscription_id"] == "sub_1"
+    assert again == first, "a resume builds the same record, which ON CONFLICT keeps once"
+
+
+def test_no_paid_subscription_retains_nothing(billing_engine: Engine) -> None:
+    erasure = ae.begin_account_erasure(billing_engine, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE)
+
+    assert ae.retained_subscription(erasure) is None

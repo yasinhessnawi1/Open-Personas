@@ -124,8 +124,19 @@ def _ids(conn: Connection, stmt: Any) -> list[str]:  # noqa: ANN401 - a select
 
 
 def capture_account(conn: Connection, *, owner_id: str, origin: str) -> dict[str, list[str]]:
-    """The ids later steps need, read while the rows exist."""
+    """The ids later steps need, read while the rows exist.
+
+    The subscription is snapshotted here, plan and start included (review M2): our own cancel
+    makes Stripe send a webhook that rewrites the live row to the free plan, and the retained
+    record must show what was paid for, so it is built from this snapshot, never the live row.
+    """
     sub = subscription_t.c
+    snapshot = conn.execute(
+        select(sub.plan_code, sub.created_at).where(
+            sub.user_id == owner_id,
+            (sub.stripe_customer_id.is_not(None)) | (sub.stripe_subscription_id.is_not(None)),
+        )
+    ).first()
     return {
         "personas": _ids(conn, select(personas_t.c.id).where(personas_t.c.owner_id == owner_id)),
         "stripe_customers": _ids(
@@ -134,7 +145,34 @@ def capture_account(conn: Connection, *, owner_id: str, origin: str) -> dict[str
         "stripe_subscriptions": _ids(
             conn, select(sub.stripe_subscription_id).where(sub.user_id == owner_id)
         ),
+        "subscription_plan": [] if snapshot is None else [str(snapshot.plan_code)],
+        "subscription_started": (
+            []
+            if snapshot is None or snapshot.created_at is None
+            else [snapshot.created_at.isoformat()]
+        ),
         "origin": [origin],
+    }
+
+
+def retained_subscription(erasure: Erasure) -> dict[str, Any] | None:
+    """The paid subscription as it stood at the claim, or ``None`` when there was none.
+
+    Its ``source_id`` is the fixed ``"subscription"``, so a resumed copy finds it and adds
+    nothing, and nothing a later webhook writes to the live row can change it (review M2).
+    """
+    plan = erasure.captured.get("subscription_plan", [])
+    if not plan:
+        return None
+    started = erasure.captured.get("subscription_started", [])
+    return {
+        "source_table": "subscription",
+        "source_id": "subscription",
+        "reason": plan[0],
+        "stripe_subscription_id": next(
+            iter(erasure.captured.get("stripe_subscriptions", [])), None
+        ),
+        "occurred_at": datetime.fromisoformat(started[0]) if started else None,
     }
 
 
@@ -234,7 +272,7 @@ def _step_personas(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
 def _retained_rows(conn: Connection, erasure: Erasure, until: datetime) -> list[dict[str, Any]]:
     owner = erasure.owner_id
     customer = next(iter(erasure.captured.get("stripe_customers", [])), None)
-    ct, pg, sub = credit_transactions_t.c, payg_grants_t.c, subscription_t.c
+    ct, pg = credit_transactions_t.c, payg_grants_t.c
     rows: list[dict[str, Any]] = [
         {
             "source_table": "credit_transactions",
@@ -266,21 +304,9 @@ def _retained_rows(conn: Connection, erasure: Erasure, until: datetime) -> list[
             )
         )
     ]
-    rows += [
-        {
-            "source_table": "subscription",
-            "source_id": r.stripe_subscription_id or r.stripe_customer_id,
-            "reason": r.plan_code,
-            "stripe_subscription_id": r.stripe_subscription_id,
-            "occurred_at": r.created_at,
-        }
-        for r in conn.execute(
-            select(
-                sub.plan_code, sub.stripe_customer_id, sub.stripe_subscription_id, sub.created_at
-            ).where(sub.user_id == owner)
-        )
-        if r.stripe_subscription_id or r.stripe_customer_id
-    ]
+    subscription = retained_subscription(erasure)
+    if subscription is not None:
+        rows.append(subscription)
     return [
         {**row, "erasure_id": erasure.id, "stripe_customer_id": customer, "retain_until": until}
         for row in rows
