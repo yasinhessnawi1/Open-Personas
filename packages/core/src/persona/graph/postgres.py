@@ -25,7 +25,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import BigInteger, delete, func, or_, select, text, update
+from sqlalchemy import BigInteger, cast, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona.graph._schema import (
@@ -1145,6 +1146,40 @@ class PostgresGraphBackend:
                 or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
             )
             .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def insert_edge_if_absent(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> bool:
+        """Open ``link`` unless an open edge with its id exists; return whether it was inserted.
+
+        Consolidation's mirror (R9-284 review MEDIUM-1): an id is ``src::type::dst``, so an
+        edge another persona (or the user) already asserted on the canonical has the mirror's
+        id, and upserting the mirror would overwrite it with SYSTEM provenance.
+        """
+        row = self._link_to_row(owner_id, link)
+        stmt = (
+            pg_insert(graph_edges)
+            .values(**row)
+            .on_conflict_do_nothing(
+                index_elements=["id"], index_where=graph_edges.c.invalid_at.is_(None)
+            )
+            .returning(graph_edges.c.id)
+        )
+        asserted_by = link.provenance.persona_id if link.provenance is not None else None
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
+            return conn.execute(stmt).first() is not None
+
+    def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None:
+        """Remove the OPEN row for ``edge_id`` only while it is still the merge's mirror."""
+        stmt = delete(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.id == edge_id,
+            graph_edges.c.invalid_at.is_(None),
+            cast(graph_edges.c.provenance, JSONB).contains({"source": "system", "reason": tag}),
         )
         with self._engine.begin() as conn:
             conn.execute(stmt)

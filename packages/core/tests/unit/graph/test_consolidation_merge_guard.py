@@ -42,10 +42,14 @@ def _node(node_id: str, *by: str | None) -> ConceptNode:
 class _Backend:
     """Records each write with the personas it was asked to hold."""
 
-    def __init__(self, canonical: ConceptNode, member: ConceptNode) -> None:
+    def __init__(
+        self, canonical: ConceptNode, member: ConceptNode, *, open_ids: frozenset[str] = frozenset()
+    ) -> None:
         self._nodes = {canonical.id: canonical, member.id: member}
+        self._open = set(open_ids)
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.record: dict[str, Any] | None = None
+        self.records: list[dict[str, Any]] = []
 
     def open_assertion_edges(self, _owner: str, node_id: str) -> list[TypedLink]:
         if node_id != "m":
@@ -68,10 +72,12 @@ class _Backend:
 
     def set_merged_into(self, _owner: str, _node_id: str, **kw: Any) -> None:  # noqa: ANN401
         self.record = json.loads(kw["metadata"]["_k7_merge"])
+        self.records.append(self.record)
         self.calls.append(("set_merged_into", tuple(kw.get("guard_personas", ()))))
 
-    def upsert_edge(self, _owner: str, link: TypedLink, **kw: Any) -> None:  # noqa: ANN401
-        self.calls.append((f"upsert_edge {link.id}", tuple(kw.get("guard_personas", ()))))
+    def insert_edge_if_absent(self, _owner: str, link: TypedLink, **kw: Any) -> bool:  # noqa: ANN401
+        self.calls.append((f"mirror {link.id}", tuple(kw.get("guard_personas", ()))))
+        return link.id not in self._open
 
     def close_edges_incident(self, *_a: Any, **_k: Any) -> list[str]:  # noqa: ANN401
         self.calls.append(("close_edges_incident", ()))
@@ -102,10 +108,10 @@ class _Index:
         return True
 
 
-def _merge() -> _Backend:
+def _merge(open_ids: frozenset[str] = frozenset()) -> _Backend:
     canonical = _node("k", _Q)
     member = _node("m", _P, None, _P)
-    backend = _Backend(canonical, member)
+    backend = _Backend(canonical, member, open_ids=open_ids)
     consolidation = ConsolidationPass(
         backend=backend,  # type: ignore[arg-type]
         index=_Index(),  # type: ignore[arg-type]
@@ -127,7 +133,7 @@ def test_the_merge_record_is_written_before_any_mirror_or_entity_link() -> None:
     assert backend.record is not None
     assert backend.record["mirrored_edges"] == ["k::causal::x"], "precomputed in the record"
     assert backend.record["added_entities"] == ["ent_m"]
-    assert names.index("upsert_edge k::causal::x") > 0
+    assert names.index("mirror k::causal::x") > 0
     assert names.index("associate_entities ['ent_m']") > 0
 
 
@@ -137,6 +143,20 @@ def test_every_write_the_merge_makes_holds_the_members_personas() -> None:
 
     held = dict(backend.calls)
     assert held["set_merged_into"] == (_P,)
-    assert held["upsert_edge k::causal::x"] == (_P,)
+    assert held["mirror k::causal::x"] == (_P,)
     assert held["associate_entities ['ent_m']"] == (_P,)
     assert held["update_node k"] == (_P,)
+
+
+def test_a_mirror_never_overwrites_an_edge_the_canonical_already_has() -> None:
+    """Review MEDIUM-1: another persona asserted k->x first; the record then keeps no mirror."""
+    backend = _merge(open_ids=frozenset({"k::causal::x"}))
+
+    assert backend.records[0]["mirrored_edges"] == ["k::causal::x"], "planned first"
+    assert backend.records[-1]["mirrored_edges"] == [], "narrowed to the mirrors made"
+
+
+def test_a_record_with_nothing_to_narrow_is_written_once() -> None:
+    backend = _merge()
+
+    assert len(backend.records) == 1

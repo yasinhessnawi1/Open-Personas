@@ -130,6 +130,10 @@ class _ConsolidationBackend(Protocol):
         self, owner_id: str, node_id: str, *, invalidated_by: str
     ) -> None: ...
     def delete_open_edge(self, owner_id: str, edge_id: str) -> None: ...
+    def insert_edge_if_absent(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> bool: ...
+    def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None: ...
     def entities_for_node(self, owner_id: str, node_id: str) -> list[str]: ...
     def associate_entities(
         self,
@@ -337,10 +341,25 @@ class ConsolidationPass:
                 added=added,
                 personas=personas,
             )
-            for mirror in mirrors:
-                self._backend.upsert_edge(owner_id, mirror, guard_personas=personas)
+            # A mirror never overwrites an edge the canonical already has open (review
+            # MEDIUM-1); the record then keeps only the mirrors actually made.
+            made = [
+                m.id
+                for m in mirrors
+                if self._backend.insert_edge_if_absent(owner_id, m, guard_personas=personas)
+            ]
             self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
             self._backend.associate_entities(owner_id, canonical.id, added, guard_personas=personas)
+            if made != [m.id for m in mirrors]:
+                self._mark_merged(
+                    owner_id,
+                    member,
+                    canonical,
+                    run_id=run_id,
+                    mirrored=made,
+                    added=added,
+                    personas=personas,
+                )
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
                 self._index.remove(surrogate)  # leave the dense index (visibility)
@@ -517,7 +536,9 @@ class ConsolidationPass:
         tag = f"consolidation:{run_id}"
 
         for mirror_id in record.get("mirrored_edges", []):
-            self._backend.delete_open_edge(owner_id, mirror_id)
+            # Only while it is still this merge's mirror: the record may list one that was
+            # never made, if the merge stopped before narrowing it (R9-284 MEDIUM-1).
+            self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
         self._backend.remove_entity_associations(
             owner_id, record["canonical"], record.get("added_entities", [])
         )

@@ -399,7 +399,7 @@ def test_the_mirror_of_an_edge_the_persona_asserted_on_a_kept_member_goes(
 # --- HIGH-1: an erasure interleaved with a merge act (D-R9-284-write-guard) ----------------
 
 
-@pytest.mark.parametrize("after", ["set_merged_into", "upsert_edge"])
+@pytest.mark.parametrize("after", ["set_merged_into", "insert_edge_if_absent"])
 def test_an_erasure_in_the_middle_of_a_merge_leaves_no_mirror(
     migrated_engine: Engine,
     embedder: Any,  # noqa: ANN401
@@ -468,3 +468,60 @@ def test_an_erasure_in_the_middle_of_a_merge_leaves_no_mirror(
             {"o": _OWNER},
         ).all()
     assert mirrors == [], "no mirror of the erased persona's member survives"
+
+
+def test_erasing_the_merged_member_leaves_an_edge_another_persona_asserted_first(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review MEDIUM-1: the mirror's id was already another persona's open edge on the canonical.
+
+    The merge does not overwrite it, so it never becomes a mirror, and erasing the member's
+    persona leaves it.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node in (_node("b_canon", _OTHER), _node("b_member", _PERSONA), _node("b_x", _OTHER)):
+        backend.insert_node(_OWNER, node, vector)
+    backend.upsert_edge(_OWNER, _edge("b_canon::causal::b_x", "b_canon", "b_x", _OTHER))
+    backend.upsert_edge(_OWNER, _edge("e_bm", "b_member", "b_x", _OTHER))
+    settings = GraphSettings()
+    ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "b_canon"),
+        [backend.get_node(_OWNER, "b_member")],
+        run_id="rb",
+        now=_NOW,
+        epoch=1,
+    )
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    with migrated_engine.connect() as conn:
+        kept = conn.execute(
+            text(
+                "SELECT provenance->>'persona_id' FROM graph_edges "
+                "WHERE owner_id = :o AND id = 'b_canon::causal::b_x' AND invalid_at IS NULL"
+            ),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert kept == _OTHER
