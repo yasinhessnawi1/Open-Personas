@@ -28,8 +28,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, text, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    BigInteger,
+    Text,
+    any_,
+    cast,
+    delete,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError
 
@@ -537,7 +549,11 @@ class PostgresGraphBackend:
                     str(row[0]): int(row[1])
                     for row in conn.execute(
                         delete(graph_nodes)
-                        .where(graph_nodes.c.owner_id == owner_id, graph_nodes.c.id.in_(ids))
+                        .where(
+                            graph_nodes.c.owner_id == owner_id,
+                            # One array parameter, however many members (review nit).
+                            graph_nodes.c.id == any_(literal(ids, ARRAY(Text))),
+                        )
                         .returning(graph_nodes.c.id, graph_nodes.c.surrogate)
                     ).all()
                 }
