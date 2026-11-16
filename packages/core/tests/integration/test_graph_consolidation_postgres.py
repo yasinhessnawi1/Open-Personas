@@ -401,3 +401,21 @@ def test_associate_entities_returning_names_only_the_links_it_inserted(
     assert backend.associate_entities_returning("u1", member, [E]) == [], "already linked"
     assert backend.associate_entities_returning("u1", C, [E, E]) == [E]
     assert backend.associate_entities_returning("u1", C, [E]) == []
+
+
+def test_a_member_given_back_is_not_its_own_entity_carrier(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 8 LOW-4: the member being given back still links E itself; that must not
+    keep the canonical's copy of the link."""
+    backend, _, pass_ = env
+    _seed_cluster(backend)
+    member = "u1::node::00000001"
+    pass_.run("u1")
+    assert E in backend.entities_for_node("u1", C), "the merge copied E onto the canonical"
+
+    assert backend.entity_carriers("u1", C, [E], excluding=member) == {}, "only M carries E"
+    assert pass_.unmerge("u1", member) is True
+
+    assert E not in backend.entities_for_node("u1", C), "the copy went with the give back"
+    assert E in backend.entities_for_node("u1", member), "M keeps its own link"

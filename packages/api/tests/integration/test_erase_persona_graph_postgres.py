@@ -1256,3 +1256,67 @@ def test_an_entity_two_members_carry_stays_until_the_last_goes(
             conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": persona})
         erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=persona)
         assert backend.entities_for_node(_OWNER, "n_c") == left, persona
+
+
+def test_an_entity_only_doomed_members_carry_leaves_the_canonical(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 8 LOW-4: A and B are both P's, both carry E, both merged into C.
+
+    Erasing P dooms both, so neither may count as the other's carrier: E leaves C, and no
+    surviving record lists it.
+    """
+    import json  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _PERSONA, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("p_a", _PERSONA), vector)
+    backend.insert_node(_OWNER, _node("p_b", _PERSONA), vector)
+    backend.insert_node(_OWNER, _node("p_c", None), vector)
+    backend.insert_entity(
+        _OWNER, CanonicalEntity(id="p_e", canonical_name="p_e", created_at=_NOW), vector
+    )
+    for member in ("p_a", "p_b"):
+        backend.associate_entities(_OWNER, member, ["p_e"])
+    ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "p_c"),
+        [backend.get_node(_OWNER, "p_a"), backend.get_node(_OWNER, "p_b")],
+        run_id="rp",
+        now=_NOW,
+        epoch=1,
+    )
+    assert backend.entities_for_node(_OWNER, "p_c") == ["p_e"]
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert backend.entities_for_node(_OWNER, "p_c") == [], "no doomed member kept it"
+    with migrated_engine.connect() as conn:
+        records = conn.execute(
+            text(
+                "SELECT metadata->>'_k7_merge' FROM graph_nodes "
+                "WHERE owner_id = :o AND merged_into IS NOT NULL"
+            ),
+            {"o": _OWNER},
+        ).scalars()
+        listing = [r for r in records if r and "p_e" in json.loads(r).get("added_entities", [])]
+    assert listing == [], "no record lists the link"
