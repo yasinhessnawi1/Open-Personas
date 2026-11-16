@@ -128,6 +128,18 @@ def seeded(migrated_engine: Engine, embedder: object, tmp_path: Path) -> Seeded:
             timestamp=datetime.now(UTC),
             metadata={"verbatim_ask": "typed", "label": "kept"},
         )
+        row(
+            conn,
+            "store_audit_events",
+            id="sa_author",
+            persona_id=PERSONA,
+            action="write",
+            store="identity",
+            source="user",
+            written_by=OWNER,
+            reason="initial persona load",
+            timestamp=datetime.now(UTC),
+        )
     return seeded
 
 
@@ -456,3 +468,23 @@ def test_a_paid_row_written_between_billing_and_row_is_retained(
     kept = {(r["source_table"], r["source_id"]) for r in _retained(seeded.engine)}
     assert ("credit_transactions", "ct_late") in kept
     assert _naming(seeded.engine, OWNER) == {}
+
+
+def test_no_store_audit_column_names_the_account(
+    seeded: Seeded,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review M-1: the owner as written_by (an initial persona load, a tool consent)."""
+    erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
+
+    ae.erase_account(_deps(seeded, platform, embedder), erasure)
+
+    with seeded.engine.connect() as conn:
+        naming = conn.execute(
+            text(
+                "SELECT count(*) FROM store_audit_events WHERE persona_id = :o OR written_by = :o"
+            ),
+            {"o": OWNER},
+        ).scalar_one()
+    assert naming == 0

@@ -44,6 +44,7 @@ from persona_api.errors import ErasureRecordError
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services import audit_service
 from persona_api.services.account_erasure_audit import (
+    rekey_persona_audit_files,
     rekey_store_audit_file,
     rekey_store_audit_rows,
 )
@@ -382,6 +383,11 @@ def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
         )
     store_lines = rekey_store_audit_file(
         deps.persona.audit_root, owner_id=erasure.owner_id, erasure_id=erasure.id
+    ) + rekey_persona_audit_files(
+        deps.persona.audit_root,
+        list(erasure.captured.get("personas", [])),
+        owner_id=erasure.owner_id,
+        erasure_id=erasure.id,
     )
     return {
         "rekeyed": int(rekeyed or 0),

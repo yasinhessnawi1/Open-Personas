@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Connection
 
-__all__ = ["rekey_store_audit_file", "rekey_store_audit_rows"]
+__all__ = ["rekey_persona_audit_files", "rekey_store_audit_file", "rekey_store_audit_rows"]
 
 _FILE_ATTEMPTS = 3
 
@@ -47,7 +47,12 @@ def rekey_store_audit_rows(conn: Connection, *, owner_id: str, erasure_id: str) 
         .where(audit.persona_id == owner_id)
         .values(persona_id=erasure_id, **dict.fromkeys(FREE_TEXT_FIELDS))
     )
-    return int(result.rowcount or 0)
+    # Review M-1: events the owner wrote into a persona's log (the initial persona load, a
+    # tool consent) name the owner in ``written_by``.
+    authored = conn.execute(
+        update(store_audit_t).where(audit.written_by == owner_id).values(written_by=erasure_id)
+    )
+    return int(result.rowcount or 0) + int(authored.rowcount or 0)
 
 
 def _rekeyed_line(line: str, *, owner_id: str, erasure_id: str) -> str:
@@ -59,6 +64,8 @@ def _rekeyed_line(line: str, *, owner_id: str, erasure_id: str) -> str:
         return line
     if event.get("persona_id") == owner_id:
         event = {**event, "persona_id": erasure_id, **dict.fromkeys(FREE_TEXT_FIELDS)}
+    if event.get("written_by") == owner_id:  # review M-1
+        event = {**event, "written_by": erasure_id}
     meta = event.get("metadata")
     if isinstance(meta, dict):
         event = {
@@ -99,3 +106,53 @@ def rekey_store_audit_file(audit_root: Path | None, *, owner_id: str, erasure_id
             return len(moved)
     msg = "the owner's audit log kept growing while it was moved"
     raise OSError(msg)
+
+
+def _rekey_file_in_place(path: Path, *, owner_id: str, erasure_id: str) -> int:
+    """Rewrite one log with the owner's id replaced, under the loggers' lock; lines changed."""
+    with jsonl_file_lock(path):
+        for _ in range(_FILE_ATTEMPTS):
+            if not path.exists():
+                return 0
+            before = path.read_bytes()
+            text = before.decode("utf-8", errors="surrogateescape")
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
+            clean = [
+                _rekeyed_line(line, owner_id=owner_id, erasure_id=erasure_id) for line in lines
+            ]
+            changed = sum(a != b for a, b in zip(lines, clean, strict=True))
+            if not changed:
+                return 0
+            temporary = path.with_name(path.name + ".rekeying")
+            temporary.write_bytes(
+                ("\n".join(clean) + "\n").encode("utf-8", errors="surrogateescape")
+            )
+            if path.read_bytes() != before:  # an event was appended meanwhile: start again
+                temporary.unlink()
+                continue
+            temporary.replace(path)
+            return changed
+    msg = "a persona's audit log kept growing while it was re-keyed"
+    raise OSError(msg)
+
+
+def rekey_persona_audit_files(
+    audit_root: Path | None, persona_ids: list[str], *, owner_id: str, erasure_id: str
+) -> int:
+    """The owner's id in the account's ``{persona}.jsonl`` logs, replaced (review M-1).
+
+    The persona erasure keeps those logs (ids and labels, ruling 5), and an event the owner
+    wrote there names the owner in ``written_by``.
+    """
+    if audit_root is None:
+        return 0
+    return sum(
+        _rekey_file_in_place(
+            audit_root / f"{require_path_segment(pid, what='audit log')}.jsonl",
+            owner_id=owner_id,
+            erasure_id=erasure_id,
+        )
+        for pid in persona_ids
+    )

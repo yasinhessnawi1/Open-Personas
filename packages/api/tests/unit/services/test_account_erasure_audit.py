@@ -57,3 +57,40 @@ def test_the_owners_file_moves_to_the_erasure_id_rekeyed(tmp_path: Path) -> None
 def test_a_resumed_move_finds_nothing_to_move(tmp_path: Path) -> None:
     assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 0
     assert rekey_store_audit_file(None, owner_id=_OWNER, erasure_id=_ERASURE) == 0
+
+
+def test_the_owner_as_author_in_a_persona_log_is_rekeyed(tmp_path: Path) -> None:
+    """Review M-1: the owner's id as ``written_by`` in the persona's own log."""
+    from persona_api.services.account_erasure_audit import (  # noqa: PLC0415
+        rekey_persona_audit_files,
+    )
+
+    log = tmp_path / "persona_x.jsonl"
+    events = [
+        _event("persona_x", written_by=_OWNER, reason="initial persona load"),
+        _event("persona_x", written_by="persona_x"),
+    ]
+    log.write_bytes(("\n".join(json.dumps(e) for e in events) + "\n").encode())
+
+    changed = rekey_persona_audit_files(
+        tmp_path, ["persona_x", "persona_gone"], owner_id=_OWNER, erasure_id=_ERASURE
+    )
+
+    assert changed == 2, "every line is rewritten (content keys scrubbed), two in all"
+    text = log.read_text(encoding="utf-8")
+    assert _OWNER not in text
+    first, second = (json.loads(line) for line in text.splitlines())
+    assert first["written_by"] == _ERASURE
+    assert first["persona_id"] == "persona_x", "the persona's own id is kept"
+    assert second["written_by"] == "persona_x"
+    assert not list(tmp_path.glob("*.rekeying")), "no temporary file left"
+
+
+def test_the_moved_owner_file_rekeys_the_author_too(tmp_path: Path) -> None:
+    source = tmp_path / f"{_OWNER}.jsonl"
+    source.write_bytes((json.dumps(_event(_OWNER, written_by=_OWNER)) + "\n").encode())
+
+    rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+
+    moved = (tmp_path / f"{_ERASURE}.jsonl").read_text(encoding="utf-8")
+    assert _OWNER not in moved
