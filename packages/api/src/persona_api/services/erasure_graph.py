@@ -496,6 +496,7 @@ def _pass_entity_links_up(
     row = conn.execute(
         select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
         .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical)
+        .order_by(nodes_t.c.id)  # one row; ordered like every lock here (fixed lock order)
         .with_for_update(key_share=True)
     ).first()
     passed = entity_links_passed_up(
