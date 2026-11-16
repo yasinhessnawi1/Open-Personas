@@ -150,7 +150,9 @@ export function DeleteAccountCard() {
             <Button
               type="submit"
               variant="destructive"
-              disabled={!matches || busy}
+              // Review L-5: not before the wallet answer is in, so the refund line (or its
+              // absence) is settled before the user can confirm.
+              disabled={!matches || busy || paid === null}
               data-slot="delete-account-submit"
             >
               {busy ? t("deleteAccountWorking") : t("deleteAccountConfirm")}

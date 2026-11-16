@@ -215,4 +215,53 @@ describe("delete account card", () => {
       expect(replace).toHaveBeenCalledWith("/account-deleted"),
     );
   });
+
+  it("keeps the delete off until the wallet has answered", async () => {
+    // Review L-5: the refund line must be settled before anyone can confirm.
+    let answerWallet: (value: unknown) => void = () => undefined;
+    apiGet.mockImplementation((path: string) =>
+      path === "/v1/me/wallet"
+        ? new Promise((resolve) => {
+            answerWallet = resolve;
+          })
+        : Promise.resolve({
+            response: new Response(null, { status: 200 }),
+            data: { confirm: "ann@example.test" },
+          }),
+    );
+    renderCard();
+    await openAndType("ann@example.test");
+
+    expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    answerWallet({
+      response: new Response(null, { status: 200 }),
+      data: { plan_code: "free", payg_lots: [] },
+    });
+
+    await waitFor(() =>
+      expect(
+        (slot("delete-account-submit") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+  });
+
+  it("shows the line and allows the delete when the wallet cannot be read", async () => {
+    apiGet.mockImplementation((path: string) =>
+      path === "/v1/me/wallet"
+        ? Promise.reject(new Error("wallet down"))
+        : Promise.resolve({
+            response: new Response(null, { status: 200 }),
+            data: { confirm: "ann@example.test" },
+          }),
+    );
+    renderCard();
+    await openAndType("ann@example.test");
+
+    await waitFor(() => expect(slot("delete-account-refund")).not.toBeNull());
+    expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
 });
