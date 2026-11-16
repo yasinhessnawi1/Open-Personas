@@ -587,3 +587,65 @@ def test_a_mirror_of_a_mirror_of_the_personas_edge_goes_too(
 
     assert _open_edges(migrated_engine, "c_2") == set()
     assert counts["mirrors_of_asserted_deleted"] >= 1
+
+
+def test_a_doomed_members_mirrors_go_down_the_whole_chain(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 5 HIGH-2: doomed A merged into C, C merged into D, then P (A's only persona) goes.
+
+    A's record and A's edge A->X go with A (the edge by cascade), so the erasure reads them
+    first: D keeps no open mirror of P's assertion, and C's closed mirror row goes too.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("w_a", _PERSONA), vector)
+    for node_id in ("w_c", "w_d", "w_x"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("w_a::causal::w_x", "w_a", "w_x", _PERSONA))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+    for run, canonical, member in (("rw1", "w_c", "w_a"), ("rw2", "w_d", "w_c")):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, member)],
+            run_id=run,
+            now=_NOW,
+            epoch=1,
+        )
+    assert _open_edges(migrated_engine, "w_d") == {"w_d::causal::w_x"}
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert backend.get_node(_OWNER, "w_a") is None
+    assert _open_edges(migrated_engine, "w_d") == set()
+    with migrated_engine.connect() as conn:
+        left = conn.execute(
+            text(
+                "SELECT id FROM graph_edges WHERE owner_id = :o "
+                "AND id IN ('w_c::causal::w_x', 'w_d::causal::w_x')"
+            ),
+            {"o": _OWNER},
+        ).all()
+    assert left == [], "the closed mirror on C and the open one on D both go"

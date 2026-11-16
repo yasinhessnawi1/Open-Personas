@@ -340,7 +340,10 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         canonical = record.get("canonical") if record else None
         if record is None or not isinstance(canonical, str) or canonical in doomed:
             continue
-        mirrored = [str(e) for e in record.get("mirrored_edges", [])]
+        # A mirror whose source the record names is found from the seeds after the node step
+        # (round 5 HIGH-2); only one it does not name is removed by id here, while still open.
+        sourced = record.get("mirror_sources") or {}
+        mirrored = [str(e) for e in record.get("mirrored_edges", []) if str(e) not in sourced]
         if mirrored:
             conn.execute(delete_mirrors(owner_id, mirrored, run_id=str(record.get("run_id"))))
         added = [str(e) for e in record.get("added_entities", [])]
@@ -409,7 +412,7 @@ def _drop_alias_names_from_trails(
                 )
 
 
-def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
+def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) -> dict[str, int]:
     rows = conn.execute(
         select(
             nodes_t.c.id,
@@ -445,6 +448,7 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         )
     cleaned = unmerged_members = 0
     if doomed:
+        _seed_incident(conn, owner_id, sorted(doomed), mirrors)
         unmerged_members = _unmerge_members_of(conn, owner_id, sorted(doomed))
         cleaned = _give_back(conn, owner_id, [r for r in rows if r.id in doomed], doomed)
         conn.execute(
@@ -553,15 +557,22 @@ def _mirror_rows(conn: Connection, owner_id: str) -> dict[tuple[str, str], set[i
     return out
 
 
-def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> int:
-    """The mirrors on a canonical of edges the persona asserted on a member that stays.
+@dataclass
+class _Mirrors:
+    """What the erasure needs to find mirrors, read before any node goes (round 5 HIGH-2).
 
-    The persona's edge goes by the edge rule, but consolidation copied it onto the canonical as
-    a SYSTEM mirror, which would survive unattributed (review M-3). A record written since
-    LOW-3 names each mirror's source row, so the mirror rows are found by that, chains and
-    history rows included, and deleted by edge_key; an older record is matched by recomputing
-    the open mirror's id. Either way a row goes only while it carries the merge's provenance.
+    A doomed node's merge record and its incident edges go with it (the edges by cascade), so
+    the seed edge keys and every record's sources are collected first. ``seeds`` grows in
+    ``_nodes`` by the edges incident to each doomed node.
     """
+
+    seeds: set[int]
+    sources: list[tuple[str, str, int]]
+    legacy: dict[str, dict[str, Any]]
+    asserted: list[Any]
+
+
+def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
     asserted = conn.execute(
         select(
             graph_edges.c.edge_key,
@@ -578,17 +589,41 @@ def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> in
         )
     ).all()
     records = {m.id: merge_record(m.metadata) for m in merged}
-    current = [r for r in records.values() if r is not None and "mirror_sources" in r]
-    legacy = {i: r for i, r in records.items() if r is not None and "mirror_sources" not in r}
-    keys = mirrors_to_remove(
-        (int(e.edge_key) for e in asserted),
-        (
+    return _Mirrors(
+        seeds={int(e.edge_key) for e in asserted},
+        sources=[
             (str(mirror), str(record.get("run_id")), int(key))
-            for record in current
+            for record in records.values()
+            if record is not None
             for mirror, key in (record.get("mirror_sources") or {}).items()
-        ),
-        _mirror_rows(conn, owner_id),
+        ],
+        legacy={i: r for i, r in records.items() if r is not None and "mirror_sources" not in r},
+        asserted=list(asserted),
     )
+
+
+def _seed_incident(conn: Connection, owner_id: str, doomed: list[str], mirrors: _Mirrors) -> None:
+    """Every edge incident to a doomed node is a seed: it goes with the node (round 5 HIGH-2)."""
+    rows = conn.execute(
+        select(graph_edges.c.edge_key).where(
+            graph_edges.c.owner_id == owner_id,
+            or_(graph_edges.c.src_node_id.in_(doomed), graph_edges.c.dst_node_id.in_(doomed)),
+        )
+    ).scalars()
+    mirrors.seeds.update(int(k) for k in rows)
+
+
+def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
+    """The mirrors descended from the seed edges, after the node step (review M-3, HIGH-2).
+
+    The persona's edge goes by the edge rule, and a doomed node's edges by cascade, but
+    consolidation copied them onto canonicals as SYSTEM mirrors, which would survive
+    unattributed. A record written since LOW-3 names each mirror's source row, so the mirror
+    rows are found by that, chains and history rows included, and deleted by edge_key; an
+    older record is matched by recomputing the open mirror's id. Either way a row goes only
+    while it carries the merge's provenance.
+    """
+    keys = mirrors_to_remove(mirrors.seeds, mirrors.sources, _mirror_rows(conn, owner_id))
     deleted = 0
     if keys:
         deleted += conn.execute(
@@ -598,9 +633,9 @@ def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> in
                 cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
             )
         ).rowcount
-    for edge in asserted:
-        for member_id in {edge.src_node_id, edge.dst_node_id} & set(legacy):
-            record = legacy[member_id]
+    for edge in mirrors.asserted:
+        for member_id in {edge.src_node_id, edge.dst_node_id} & set(mirrors.legacy):
+            record = mirrors.legacy[member_id]
             canonical = record.get("canonical")
             if not isinstance(canonical, str):
                 continue
@@ -618,8 +653,10 @@ def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> in
     return deleted
 
 
-def _edges_and_entities(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
-    mirrors = _mirrors_of_asserted(conn, owner_id, persona_id)
+def _edges_and_entities(
+    conn: Connection, owner_id: str, persona_id: str, found: _Mirrors
+) -> dict[str, int]:
+    mirrors = _remove_mirrors(conn, owner_id, found)
     edges = conn.execute(
         delete(graph_edges).where(
             graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id)
@@ -738,8 +775,9 @@ def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> di
         # cycle passes through it: persona.graph.maintenance_lock). The persona row itself was
         # deleted earlier, in its own transaction, without this lock.
         take_graph_maintenance_lock(conn, owner_id)
+        mirrors = _read_mirrors(conn, owner_id, persona_id)
         return {
-            **_nodes(conn, owner_id, persona_id),
+            **_nodes(conn, owner_id, persona_id, mirrors),
             **_versions(conn, owner_id, persona_id),
-            **_edges_and_entities(conn, owner_id, persona_id),
+            **_edges_and_entities(conn, owner_id, persona_id, mirrors),
         }
