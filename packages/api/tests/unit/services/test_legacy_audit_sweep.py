@@ -1,0 +1,312 @@
+"""The legacy persona audit sweep (R9-290).
+
+A persona deleted before the erasure ledger left its audit files behind with no row anywhere.
+The sweep claims an OPEN persona erasure for one whose owner its own log names (the resume then
+erases it in full), cleans the files in place where the owner is unknown or ambiguous, and
+leaves alone anything with a persona row, a ledger row, or a log written to just now. Runs on
+the community engine.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from _erase_seed import OWNER, legacy_edition, row
+from persona_api.db.community import create_community_schema, make_community_engine
+from persona_api.db.models import erasures as erasures_t
+from persona_api.services import legacy_audit_sweep
+from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
+from persona_api.services.erasure_service import PersonaEraseDeps, erase_persona
+from persona_api.services.legacy_audit_sweep import (
+    QUIET_FOR,
+    LegacySweepCounts,
+    sweep_legacy_audit_files,
+)
+from sqlalchemy import select, update
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from sqlalchemy.engine import Engine
+
+_OWNER = "user_alice"
+_OTHER = "user_bob"
+_GONE = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_LIVE = "persona_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_SECRET = "what the user said"
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Iterator[Engine]:
+    eng = make_community_engine(tmp_path / "community.db")
+    create_community_schema(eng)
+    with eng.begin() as conn:
+        for owner in (_OWNER, _OTHER):
+            row(conn, "users", id=owner, email=f"{owner}@x.test")
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    path = tmp_path / "audit"
+    path.mkdir()
+    return path
+
+
+def _event(persona_id: str, *, source: str, written_by: str | None) -> str:
+    return json.dumps(
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "persona_id": persona_id,
+            "action": "write",
+            "store": "self_facts",
+            "source": source,
+            "written_by": written_by,
+            "reason": _SECRET,
+            "chunk_ids": ["c1"],
+            "logical_ids": [],
+            "metadata": {"verbatim_ask": _SECRET, "to_version": "3"},
+        }
+    )
+
+
+def _old(path: Path) -> None:
+    then = time.time() - QUIET_FOR - 60
+    os.utime(path, (then, then))
+
+
+def _logs(root: Path, persona_id: str, *writers: str | None) -> tuple[Path, Path]:
+    store = root / f"{persona_id}.jsonl"
+    store.write_text(
+        "\n".join(
+            [
+                _event(persona_id, source="system", written_by="system"),
+                *(_event(persona_id, source="user", written_by=w) for w in writers),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    tools = root / f"{persona_id}.tools.jsonl"
+    tools.write_text('{"tool_name":"file_write","resource":"notes.md"}\n', encoding="utf-8")
+    _old(store)
+    _old(tools)
+    return store, tools
+
+
+def _erasures(engine: Engine) -> list[tuple[str, str, str]]:
+    with engine.connect() as conn:
+        return [(r.owner_id, r.subject_id, r.state) for r in conn.execute(select(erasures_t)).all()]
+
+
+def test_a_legacy_persona_with_a_known_owner_gets_an_open_erasure(
+    engine: Engine, root: Path
+) -> None:
+    store, tools = _logs(root, _GONE, _OWNER, "author")
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(claimed=1)
+    assert _erasures(engine) == [(_OWNER, _GONE, ErasureState.PENDING.value)]
+    # The resume's full erasure does the files; the sweep only claims.
+    assert tools.exists()
+    assert _SECRET in store.read_text(encoding="utf-8")
+
+
+def test_a_persona_with_a_row_is_never_claimed(engine: Engine, root: Path) -> None:
+    with engine.begin() as conn:
+        row(conn, "personas", id=_LIVE, owner_id=_OWNER, yaml="x: 1")
+    store, tools = _logs(root, _LIVE, _OWNER)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(kept_known=1)
+    assert _erasures(engine) == []
+    assert store.read_bytes() == before
+    assert tools.exists()
+
+
+@pytest.mark.parametrize("state", [ErasureState.PENDING, ErasureState.COMPLETE])
+def test_a_persona_the_ledger_knows_is_never_claimed_again(
+    engine: Engine, root: Path, state: ErasureState
+) -> None:
+    ledger = ErasureLedger(engine)
+    erasure = ledger.claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=_GONE, captured={}
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            update(erasures_t).where(erasures_t.c.id == erasure.id).values(state=state.value)
+        )
+    store, tools = _logs(root, _GONE, _OWNER)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(kept_known=1)
+    assert len(_erasures(engine)) == 1
+    assert store.read_bytes() == before
+    assert tools.exists()
+
+
+def test_two_possible_owners_are_refused_and_the_files_cleaned_in_place(
+    engine: Engine, root: Path
+) -> None:
+    store, tools = _logs(root, _GONE, _OWNER, _OTHER)
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(scrubbed_ambiguous_owner=1)
+    assert _erasures(engine) == []
+    assert not tools.exists()
+    assert _SECRET not in store.read_text(encoding="utf-8")
+
+
+def test_an_unknown_owner_is_cleaned_in_place_keeping_ids_and_labels(
+    engine: Engine, root: Path
+) -> None:
+    # "author" and a user id with no users row (an erased account) are not owners.
+    store, tools = _logs(root, _GONE, "author", "user_gone")
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(scrubbed_unknown_owner=1)
+    assert _erasures(engine) == []
+    assert not tools.exists()
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert all(e["reason"] is None for e in events)
+    assert all(e["metadata"] == {"to_version": "3"} for e in events)
+    assert all(e["chunk_ids"] == ["c1"] and e["persona_id"] == _GONE for e in events)
+
+
+def test_a_dry_run_counts_and_changes_nothing(engine: Engine, root: Path) -> None:
+    _logs(root, _GONE, _OWNER)
+    other = "persona_cccccccccccccccccccccccccccccccc"
+    _logs(root, other, "author")
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+
+    counts = sweep_legacy_audit_files(engine, root, dry_run=True)
+
+    assert counts == LegacySweepCounts(claimed=1, scrubbed_unknown_owner=1)
+    assert _erasures(engine) == []
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+
+
+def test_a_second_run_claims_and_cleans_nothing(engine: Engine, root: Path) -> None:
+    _logs(root, _GONE, _OWNER)
+    other = "persona_cccccccccccccccccccccccccccccccc"
+    _logs(root, other, "author")
+    first = sweep_legacy_audit_files(engine, root)
+    assert first == LegacySweepCounts(claimed=1, scrubbed_unknown_owner=1)
+    _old(root / f"{other}.jsonl")  # the clean rewrote it just now
+
+    second = sweep_legacy_audit_files(engine, root)
+
+    assert second == LegacySweepCounts(already_clean=1, kept_known=1)
+    assert len(_erasures(engine)) == 1
+
+
+def test_a_log_written_to_just_now_is_left_for_a_later_run(engine: Engine, root: Path) -> None:
+    store, _ = _logs(root, _GONE, _OWNER)
+    os.utime(store, None)  # a persona being created: its log before its row commits
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(kept_recent=1)
+    assert _erasures(engine) == []
+
+
+def test_only_persona_logs_are_considered(engine: Engine, root: Path) -> None:
+    for name in (f"{_OWNER}.jsonl", "_cli.tools.jsonl", "erasure_abc.jsonl", "notes.txt"):
+        (root / name).write_text(_event(_OWNER, source="user", written_by=_OWNER) + "\n")
+        _old(root / name)
+
+    assert sweep_legacy_audit_files(engine, root) == LegacySweepCounts()
+    assert sweep_legacy_audit_files(engine, None) == LegacySweepCounts()
+
+
+def test_the_cli_prints_counts_and_never_a_name(
+    engine: Engine,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import persona_api.config  # noqa: PLC0415
+    import persona_api.db.engine  # noqa: PLC0415
+
+    _logs(root, _GONE, _OWNER)
+
+    class _Config:
+        database_url = "sqlite://"
+        audit_root = str(root)
+
+    monkeypatch.setattr(persona_api.config, "APIConfig", _Config)
+    monkeypatch.setattr(persona_api.db.engine, "create_db_engine", lambda _url: engine)
+
+    assert legacy_audit_sweep.main(["--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "claimed=1" in out
+    assert _GONE not in out
+    assert _OWNER not in out
+    assert _erasures(engine) == []
+
+
+def test_the_resume_erases_a_claimed_legacy_persona_in_full(
+    tmp_path: Path,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """The claim is all the sweep adds: the existing persona erasure finishes it, files too."""
+    with legacy_edition(tmp_path, embedder) as seeded:  # type: ignore[arg-type]
+        _resume_erases_in_full(seeded)
+
+
+def _resume_erases_in_full(seeded: Any) -> None:  # noqa: ANN401
+    legacy = "persona_dddddddddddddddddddddddddddddddd"
+    store, tools = _logs(seeded.audit_root, legacy, OWNER)
+
+    counts = sweep_legacy_audit_files(seeded.engine, seeded.audit_root)
+
+    assert counts.claimed == 1
+    erasure = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, legacy)
+    assert erasure is not None
+    erase_persona(
+        PersonaEraseDeps(
+            engine=seeded.engine,
+            memory_backend=seeded.memory,
+            audit_logger=seeded.audit,
+            file_storage=seeded.storage,
+            workspace_root=seeded.workspace_root,
+            audit_root=seeded.audit_root,
+        ),
+        erasure,
+    )
+    done = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, legacy)
+    assert done is not None
+    assert done.state is ErasureState.COMPLETE
+    assert not tools.exists()
+    # The persona erasure's files step clears free text; its ids and labels stay (ruling 5).
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert all(e["reason"] is None for e in events)
+    assert all(e["chunk_ids"] == ["c1"] for e in events)
+
+
+def test_only_the_users_own_events_name_an_owner(engine: Engine, root: Path) -> None:
+    """A system or persona event's ``written_by`` is not who owns the persona."""
+    store, _ = _logs(root, _GONE, _OWNER)
+    with store.open("a", encoding="utf-8") as out:
+        out.write(_event(_GONE, source="system", written_by=_OTHER) + "\n")
+        out.write(_event(_GONE, source="persona_self", written_by=_OTHER) + "\n")
+    _old(store)
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(claimed=1)
+    assert _erasures(engine) == [(_OWNER, _GONE, ErasureState.PENDING.value)]
