@@ -12,11 +12,12 @@ from __future__ import annotations
 import inspect
 import math
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from persona.graph import merge as merge_module
 from persona.graph.config import GraphSettings
-from persona.graph.errors import NodeMergeError
+from persona.graph.errors import GraphPersonaGoneError, GraphStaleWriteError, NodeMergeError
 from persona.graph.merge import MergeEngine, accumulate
 from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, UpdateIntent
@@ -128,9 +129,19 @@ class _FakeBackend:
         self._next_surrogate += 1
         return self._next_surrogate
 
-    def update_node(self, owner_id: str, node: ConceptNode, embedding: list[float]) -> int | None:
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
         if node.id not in self.nodes:
             return None
+        if self.nodes[node.id][0].content_hash != expected_content_hash:  # the node CAS
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
         self.nodes[node.id] = (node, list(embedding))
         return 1
 
@@ -152,6 +163,33 @@ class _FakeBackend:
             (self._next_version_key, node_id, node, list(emb), valid_at, invalid_at, invalidated_by)
         )
         return self._next_version_key
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+        valid_at: datetime,
+        invalid_at: datetime,
+        invalidated_by: str | None,
+    ) -> int | None:
+        """One transaction, as on Postgres: the CAS first, then the version, then the write."""
+        if node.id not in self.nodes:
+            return None
+        if self.nodes[node.id][0].content_hash != expected_content_hash:
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        version_key = self.snapshot_node_version(
+            owner_id,
+            node.id,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
+            invalidated_by=invalidated_by,
+        )
+        self.nodes[node.id] = (node, list(embedding))
+        return version_key
 
     def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
         invalids = [v[5] for v in self.versions if v[1] == node_id]
@@ -466,3 +504,456 @@ def test_merge_engine_never_calls_resolve() -> None:
     src = inspect.getsource(merge_module)
     assert ".resolve(" not in src
     assert "EntityRegistry" not in src
+
+
+# ----- the node CAS: callers read afresh and try again (D-R9-284-node-cas) -----------------
+
+
+class _RacedBackend(_FakeBackend):
+    """Another writer changes the node just before each of the first ``races`` writes."""
+
+    def __init__(self, races: int) -> None:
+        super().__init__()
+        self.races = races
+        self.reads = 0
+        self.writes = 0
+
+    def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
+        self.reads += 1
+        return super().get_node(owner_id, node_id)
+
+    def delete_links_incident(self, *_a: object) -> None:
+        return None
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
+        self.writes += 1
+        if self.races:
+            self.races -= 1
+            current, vector = self.nodes[node.id]
+            raced = current.model_dump(exclude={"content_hash"})
+            raced["content"] = current.content + " (edited)"
+            self.nodes[node.id] = (ConceptNode.model_validate(raced), vector)
+        return super().update_node(
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
+        )
+
+
+def _created(backend: _FakeBackend) -> str:
+    out = _engine(backend, {"likes coffee": vec(0)}).merge("u1", _cand("likes coffee"))
+    return out.node_id
+
+
+def test_a_correction_that_lost_the_race_is_redone_on_a_fresh_read() -> None:
+    b = _RacedBackend(races=1)
+    node_id = _created(b)
+    b.writes = 0
+
+    _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
+
+    node, _ = b.nodes[node_id]
+    assert b.writes == 2, "refused once, then written on a fresh read"
+    assert node.content == "likes tea"
+    assert node.provenance[-1].superseded_content == "likes coffee (edited)", "the fresh one"
+
+
+def test_an_extend_that_lost_the_race_is_redone_on_a_fresh_read() -> None:
+    b = _RacedBackend(races=1)
+    mapping = {"likes coffee": vec(0), "loves espresso": vec(0, 0.95, 1)}
+    eng = _engine(b, mapping)
+    node_id = eng.merge("u1", _cand("likes coffee")).node_id
+    b.writes = 0
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    node, _ = b.nodes[node_id]
+    assert out.action is MergeAction.EXTENDED
+    assert b.writes == 2
+    assert node.content == "likes coffee (edited)\nloves espresso", "the edit is kept"
+
+
+def test_a_write_that_keeps_losing_gives_up_after_three_tries() -> None:
+    b = _RacedBackend(races=100)
+    node_id = _created(b)
+    b.writes = 0
+
+    with pytest.raises(GraphStaleWriteError):
+        _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
+
+    assert b.writes == 3
+
+
+class _RacedSupersede(_FakeBackend):
+    """Round 11: just before the first supersede, another writer appends to the node."""
+
+    def __init__(self, source: WriteSource) -> None:
+        super().__init__()
+        self.source = source
+        self.raced = False
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        if not self.raced:
+            self.raced = True
+            current, vector = self.nodes[node.id]
+            raced = current.model_dump(exclude={"content_hash"})
+            raced["content"] = current.content + " and also likes walks"
+            raced["provenance"] = [
+                *current.provenance,
+                NodeProvenance(source=self.source, written_at=NOW, reason="concurrent"),
+            ]
+            self.nodes[node.id] = (ConceptNode.model_validate(raced), vector)
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+@pytest.mark.parametrize("source", [WriteSource.PERSONA_SELF, WriteSource.USER, WriteSource.SYSTEM])
+def test_a_supersede_retry_leaves_no_orphan_version_and_decides_on_the_fresh_row(
+    source: WriteSource,
+) -> None:
+    """The reviewer's probe (round 11 MEDIUM-2): a lost CAS used to leave the stale snapshot,
+    which made every retry a tie and turned the contradiction into an accumulation."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona.graph.protocol import UpdateIntent  # noqa: PLC0415
+
+    b = _RacedSupersede(source)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = eng.merge("u1", _cand("works at Acme")).node_id
+    later = NodeProvenance(
+        source=WriteSource.PERSONA_SELF, written_at=NOW + timedelta(days=1), interaction_id="i2"
+    )
+
+    out = eng.merge(
+        "u1",
+        _cand(
+            "left Acme",
+            update_intent=UpdateIntent.CONTRADICT,
+            target_node_id=node_id,
+            provenance=later,
+        ),
+    )
+
+    node, _ = b.nodes[node_id]
+    assert out.action is MergeAction.EVOLVED, "still a contradiction"
+    assert node.content == "left Acme"
+    assert len(b.versions) == 1, "no orphan version from the lost attempt"
+    assert b.versions[0][2].content == "works at Acme and also likes walks", "the fresh row"
+
+
+class _MergedAway(_FakeBackend):
+    """Round 11 LOW-1: just before the first write, consolidation merges the target away."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raced = False
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
+        if not self.raced:
+            self.raced = True
+            self.merged.add(node.id)  # consolidation merged it, and wrote its record
+            current, vector = self.nodes[node.id]
+            moved = current.model_dump(exclude={"content_hash"})
+            moved["metadata"] = {"_k7_merge": "{}"}
+            self.nodes[node.id] = (ConceptNode.model_validate(moved), vector)
+        return super().update_node(
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
+        )
+
+
+@pytest.mark.parametrize("another", [True, False])
+def test_an_extend_whose_target_was_merged_away_searches_once_more(another: bool) -> None:
+    """It extends the next nearest node that is not merged, or creates one; never the merged."""
+    b = _MergedAway()
+    mapping = {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)}
+    eng = _engine(b, mapping)
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+    if another:  # close enough to extend (cos 0.891 >= 0.88), but not the first choice
+        b.nodes["u1::node::00000009"] = (_node_for("u1::node::00000009"), vec(0, 0.90, 3))
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    merged_node, _ = b.nodes[first]
+    assert merged_node.content == "likes coffee", "the merged member is never extended"
+    if another:
+        assert out.action is MergeAction.EXTENDED
+        assert out.node_id == "u1::node::00000009"
+    else:
+        assert out.action is MergeAction.CREATED
+        assert out.node_id != first
+
+
+def _node_for(node_id: str) -> ConceptNode:
+    return ConceptNode(
+        id=node_id,
+        node_kind=NodeKind.FACT,
+        concept_name="coffee too",
+        content="drinks coffee",
+        provenance=(NodeProvenance(source=WriteSource.PERSONA_SELF, written_at=NOW),),
+        created_at=NOW,
+    )
+
+
+class _DeletedAway(_FakeBackend):
+    """Round 12 LOW-3 (the reviewer's probe): the user forgets the target just before the
+    first write, so the write finds no row at all."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raced = False
+
+    def _forget(self, node_id: str) -> None:
+        if not self.raced:
+            self.raced = True
+            del self.nodes[node_id]
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._forget(node.id)
+        return super().update_node(owner_id, node, embedding, **kw)
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._forget(node.id)
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+def test_an_extend_whose_target_was_deleted_searches_again_and_creates() -> None:
+    """The reviewer's probe: the extend used to report EXTENDED onto a node that was gone."""
+    b = _DeletedAway()
+    eng = _engine(b, {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)})
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    assert out.action is MergeAction.CREATED
+    assert out.node_id in b.nodes, "the outcome names a node that exists"
+    created, _ = b.nodes[out.node_id]
+    assert created.content == "loves espresso", "a new node, not the forgotten one extended"
+    assert all("likes coffee" not in n.content for n, _ in b.nodes.values()), "first is gone"
+    assert first == out.node_id  # this fake reuses the freed index; Postgres would not
+
+
+def test_a_supersede_whose_target_was_deleted_is_refused_before_any_link() -> None:
+    from datetime import timedelta  # noqa: PLC0415
+
+    b = _DeletedAway()
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = eng.merge("u1", _cand("works at Acme")).node_id
+    edges_before = dict(b.edges)
+    later = NodeProvenance(
+        source=WriteSource.PERSONA_SELF, written_at=NOW + timedelta(days=1), interaction_id="i2"
+    )
+
+    with pytest.raises(NodeMergeError, match="removed meanwhile"):
+        eng.merge(
+            "u1",
+            _cand(
+                "left Acme",
+                update_intent=UpdateIntent.CONTRADICT,
+                target_node_id=node_id,
+                provenance=later,
+            ),
+        )
+
+    assert node_id not in b.nodes
+    assert b.edges == edges_before, "no link formed for the deleted node"
+    assert b.versions == []
+
+
+_P_ERASED = "persona_p"
+_Q_WRITES = "persona_q"
+
+
+class _PersonaErasedMeanwhile(_FakeBackend):
+    """Round 12 LOW-4: ``erased`` is erased between the merge's read and its write. The write
+    holds every persona in the read trail and the new one, so it is refused; the erasure
+    strips the persona from the node, so a fresh read no longer names it."""
+
+    def __init__(self, erased: str) -> None:
+        super().__init__()
+        self.erased = erased
+        self.writes = 0
+
+    def _hold(self, node: ConceptNode, expected: object) -> None:
+        self.writes += 1
+        named = {p.persona_id for p in (*node.provenance, *expected)}  # type: ignore[misc]
+        if self.erased not in named:
+            return
+        current, vector = self.nodes[node.id]
+        stripped = current.model_dump(exclude={"content_hash"})
+        stripped["provenance"] = [p for p in current.provenance if p.persona_id != self.erased]
+        self.nodes[node.id] = (ConceptNode.model_validate(stripped), vector)
+        raise GraphPersonaGoneError("gone", context={"persona_id": self.erased})
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._hold(node, kw.get("expected_provenance", ()))
+        return super().update_node(owner_id, node, embedding, **kw)
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._hold(node, kw.get("expected_provenance", ()))
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+def _trail_q_then_p(b: _FakeBackend) -> str:
+    node = ConceptNode(
+        id="u1::node::00000000",
+        node_kind=NodeKind.FACT,
+        concept_name="concept",
+        content="works at Acme",
+        provenance=(
+            NodeProvenance(source=WriteSource.PERSONA_SELF, persona_id=_Q_WRITES, written_at=NOW),
+            NodeProvenance(source=WriteSource.PERSONA_SELF, persona_id=_P_ERASED, written_at=NOW),
+        ),
+        created_at=NOW,
+    )
+    b.nodes[node.id] = (node, vec(0))
+    return node.id
+
+
+def _contradiction_by(persona_id: str, node_id: str) -> KnowledgeCandidate:
+    from datetime import timedelta  # noqa: PLC0415
+
+    return _cand(
+        "left Acme",
+        update_intent=UpdateIntent.CONTRADICT,
+        target_node_id=node_id,
+        provenance=NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            persona_id=persona_id,
+            written_at=NOW + timedelta(days=1),
+        ),
+    )
+
+
+def test_a_persona_erased_meanwhile_that_the_candidate_does_not_name_is_read_again() -> None:
+    """Trail [Q, P]; P is erased between the read and the write; Q's contradiction lands on
+    the retry, against the trail without P."""
+    b = _PersonaErasedMeanwhile(_P_ERASED)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = _trail_q_then_p(b)
+
+    out = eng.merge("u1", _contradiction_by(_Q_WRITES, node_id))
+
+    node, _ = b.nodes[node_id]
+    assert b.writes == 2, "refused once, then written on a fresh read"
+    assert out.action is MergeAction.EVOLVED
+    assert node.content == "left Acme"
+    assert _P_ERASED not in {p.persona_id for p in node.provenance}
+    assert len(b.versions) == 1
+    assert _P_ERASED not in {p.persona_id for p in b.versions[0][2].provenance}
+
+
+def test_the_candidates_own_persona_gone_is_not_retried() -> None:
+    b = _PersonaErasedMeanwhile(_Q_WRITES)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = _trail_q_then_p(b)
+
+    with pytest.raises(GraphPersonaGoneError):
+        eng.merge("u1", _contradiction_by(_Q_WRITES, node_id))
+
+    assert b.writes == 1, "the writer itself is gone: nothing to read again for"
+    assert b.versions == []
+
+
+class _EveryTargetMergedAway(_MergedAway):
+    """Round 12 LOW-6: each extend target is merged away just before its write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.searches = 0
+
+    def dense_query(
+        self,
+        owner_id: str,
+        query_vector: list[float],
+        top_k: int,
+        **kw: Any,  # noqa: ANN401
+    ) -> list[ConceptNode]:
+        self.searches += 1
+        return super().dense_query(owner_id, query_vector, top_k, **kw)
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> int | None:
+        self.raced = node.id in self.merged  # race each node once, the first time it is hit
+        return super().update_node(
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
+        )
+
+
+def test_the_re_search_runs_only_once() -> None:
+    """The first target and the re-searched one are both merged away: NodeMergeError, and no
+    third search."""
+    b = _EveryTargetMergedAway()
+    eng = _engine(b, {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)})
+    b.raced = True  # no race while seeding
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+    second = "u1::node::00000009"
+    b.nodes[second] = (_node_for(second), vec(0, 0.90, 3))
+    searches_before = b.searches
+
+    with pytest.raises(NodeMergeError, match="twice"):
+        eng.merge("u1", _cand("loves espresso"))
+
+    assert {first, second} <= b.merged, "both targets were merged away"
+    assert b.searches - searches_before == 2, "the first search and one re-search, no third"

@@ -168,9 +168,12 @@ def _seed_conversation(
 def _build_worker(
     *, dispatch_engine: Engine, app_engine: Engine, embedder: Embedder, audit_root: Path
 ) -> Worker:
-    graph_backend = PostgresGraphBackend(engine=app_engine)
+    graph_backend = PostgresGraphBackend(engine=app_engine, persona_guard=False)
     graph_store = build_graph_store(
-        engine=app_engine, embedder=embedder, audit_logger=JSONLAuditLogger(audit_root)
+        engine=app_engine,
+        embedder=embedder,
+        audit_logger=JSONLAuditLogger(audit_root),
+        persona_guard=False,
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     from persona_runtime.extraction.synthesizer import build_synthesizer
@@ -241,7 +244,10 @@ def _as_owner(owner: str) -> Iterator[None]:
 
 def _retrieval_store(app_engine: Engine, embedder: Embedder, audit_root: Path) -> GraphStore:
     return build_graph_store(
-        engine=app_engine, embedder=embedder, audit_logger=JSONLAuditLogger(audit_root)
+        engine=app_engine,
+        embedder=embedder,
+        audit_logger=JSONLAuditLogger(audit_root),
+        persona_guard=False,
     )
 
 

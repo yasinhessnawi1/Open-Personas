@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -121,6 +122,10 @@ from persona_api.jobs.handlers.file_extract import (
     file_extract_queue_ready,
     register_file_extract_handler,
 )
+from persona_api.jobs.handlers.persona_erase import (
+    build_persona_erase_sweep,
+    register_persona_erase_tenant,
+)
 from persona_api.jobs.handlers.synthesis import PgSynthesisRepository, register_synthesis_handler
 from persona_api.jobs.handlers.title_refresh import (
     build_title_refresh_generator,
@@ -132,6 +137,7 @@ from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
+from persona_api.services import persona_service
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
@@ -206,6 +212,7 @@ def build_worker_registry(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    platform_engine: Engine | None = None,
 ) -> JobRegistry:
     """Compose the worker's :class:`JobRegistry` — A0's durable tenants.
 
@@ -255,6 +262,8 @@ def build_worker_registry(
         workspace_root: The app's workspace root (the ``file_extract``
             renderer's persist target — the SAME root the code_execution
             produced-file persister writes under).
+        platform_engine: An engine that sees every tenant's rows, for the persona erase
+            tenant (R9-284). ``None`` leaves that tenant unregistered.
     """
     # R9-096: plan-scoped, resolved per job inside the owner scope — never once here on
     # the paid registry. Metered (Spec M3, T5): the handler now has its owner-billing seam.
@@ -270,17 +279,24 @@ def build_worker_registry(
         free_tier_registry=free_tier_registry,
         metered=True,
     )
-    graph_backend = PostgresGraphBackend(engine=rls_engine)
+    # R9-284: every graph write that names a persona holds that persona's row.
+    graph_backend = PostgresGraphBackend(engine=rls_engine, persona_guard=True)
     graph_store = build_graph_store(
         engine=rls_engine,
         embedder=embedder,
         # R5-D-2: Postgres audit when PERSONA_API_AUDIT_BACKEND=postgres, else the
         # JSONL default (config.audit_root) — the same selection the API makes.
         audit_logger=build_audit_logger(config, rls_engine),
+        persona_guard=True,
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(
-        graph_store=graph_store, registry=entity_registry, backend=backend
+        graph_store=graph_store,
+        registry=entity_registry,
+        backend=backend,
+        # R9-284 review H2: a synthesis past its read writes nothing for an erased persona.
+        # On the RLS engine, inside the job owner's scope.
+        persona_exists=functools.partial(persona_service.persona_exists, rls_engine),
     )
     registry = JobRegistry()
 
@@ -787,6 +803,18 @@ def build_worker_registry(
             "persona avatars stay on the in-request path",
             image_backend_present=image_backend is not None,
             file_storage_present=file_storage is not None,
+        )
+    # R9-284: the persona erase tenant, on the engine that sees every tenant's rows (the api's
+    # persona_platform engine on hosted, the community engine there). Without one it is not
+    # registered and the route runs the erasure inline instead (persona_erase_queue_available).
+    if platform_engine is not None:
+        register_persona_erase_tenant(
+            registry,
+            platform_engine=platform_engine,
+            embedder=embedder,
+            config=config,
+            file_storage=file_storage,
+            workspace_root=workspace_root,
         )
     _log.info(
         "worker registry composed",
@@ -1533,6 +1561,7 @@ def start_in_process_worker(
     file_storage: FileStorage | None = None,
     sandbox_pool: SandboxPool | None = None,
     workspace_root: Path | None = None,
+    platform_engine: Engine | None = None,
 ) -> InProcessWorker:
     """Compose + start the in-process worker (registry + worker + A1 tick).
 
@@ -1591,6 +1620,7 @@ def start_in_process_worker(
         # producer gate (file_extract_queue_ready), so enqueue implies handler.
         sandbox_pool=sandbox_pool,
         workspace_root=workspace_root,
+        platform_engine=platform_engine,
     )
 
     # A1's scheduler tick — additive, leader-gated, built on the SAME two engines
@@ -1801,6 +1831,15 @@ def start_in_process_worker(
             leader=SchedulerLeader(dispatch_engine, lock_key=TITLE_BACKFILL_LOCK_KEY),
         )
 
+    erase_sweep = (
+        build_persona_erase_sweep(platform_engine) if platform_engine is not None else None
+    )
+
+    def _on_drain() -> None:
+        leg_drain.request_drain()
+        if erase_sweep is not None:
+            erase_sweep.close()  # its waiting thread (R9-284 round 8 LOW-3)
+
     worker = build_worker(
         config,
         registry,
@@ -1813,7 +1852,11 @@ def start_in_process_worker(
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,
         title_backfill_builder=_title_backfill_builder,
-        on_drain=leg_drain.request_drain,
+        on_drain=_on_drain,
+        # R9-284 (review M2): erasures whose job died, or whose request failed between the
+        # row delete and the enqueue, are resumed on the maintenance cadence; the erasure
+        # lock makes a resume beside a live run a no-op.
+        maintenance_hooks=(erase_sweep,) if erase_sweep is not None else (),
     )
     handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()

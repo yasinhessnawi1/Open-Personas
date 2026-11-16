@@ -15,10 +15,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from persona.graph.errors import GraphNodeNotFoundError
+from persona.graph.errors import GraphNodeNotFoundError, GraphStaleWriteError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
-from persona_api.errors import MemoryNodeNotFoundError
+from persona_api.errors import MemoryNodeChangedError, MemoryNodeNotFoundError
 from persona_api.schemas.requests import ForgetRequest, MemoryCorrectionRequest
 from persona_api.schemas.responses import (
     EpisodicMembersResponse,
@@ -156,6 +156,11 @@ async def correct_node(
     except GraphNodeNotFoundError as exc:
         # Re-raise as the API's 404 domain error (catch-at-boundary, eng-std §1).
         raise MemoryNodeNotFoundError("memory not found", context={"node_id": node_id}) from exc
+    except GraphStaleWriteError as exc:
+        # Another writer kept changing the node through every retry (node CAS): 409.
+        raise MemoryNodeChangedError(
+            "this memory changed, try again", context={"node_id": node_id}
+        ) from exc
 
 
 @router.delete("/nodes/{node_id}", status_code=status.HTTP_204_NO_CONTENT)

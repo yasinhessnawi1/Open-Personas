@@ -251,7 +251,7 @@ maxretry = 5
 findtime = 10m
 bantime = 1h
 EOF
-systemctl enable --now fail2ban
+systemctl enable --now fail2ban.service
 systemctl restart fail2ban
 
 # Docker's repository joins the upgrade origins: its security fixes install like
@@ -268,7 +268,7 @@ write_file /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
-systemctl enable --now unattended-upgrades
+systemctl enable --now unattended-upgrades.service
 
 # --- the block volume ---------------------------------------------------------------------
 # Formatted only when it carries NO signature at all (blkid -p finds nothing and it has no
@@ -457,7 +457,7 @@ RequiresMountsFor=${OP_DATA_MOUNT}
 EOF
 fi
 systemctl daemon-reload
-systemctl enable docker
+systemctl enable docker.service
 systemctl restart docker
 
 # --- the link-local range, out of reach of bridged containers ------------------------------
@@ -484,6 +484,7 @@ install -d -o root -g "${OP_USER}" -m 2770 /var/lib/open-persona/alerts
 # --- timers, the failure alert and the login banner -------------------------------------
 for unit in open-persona-backup.service open-persona-backup.timer \
             open-persona-diskcheck.service open-persona-diskcheck.timer \
+            open-persona-erasurecheck.service open-persona-erasurecheck.timer \
             open-persona-alert@.service; do
   install -m 0644 "${KIT_DIR}/systemd/${unit}" /etc/systemd/system/
 done
@@ -491,7 +492,8 @@ install -m 0755 "${KIT_DIR}/systemd/99-open-persona-alerts" /etc/update-motd.d/
 systemctl daemon-reload
 systemctl enable --now open-persona-metadata-block.service
 systemctl restart open-persona-metadata-block.service
-systemctl enable --now open-persona-backup.timer open-persona-diskcheck.timer
+systemctl enable --now open-persona-backup.timer open-persona-diskcheck.timer \
+  open-persona-erasurecheck.timer
 
 say "done. profile ${OP_HOST_PROFILE}; $(docker --version); $(docker compose version)"
 say "time synchronised: $(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"

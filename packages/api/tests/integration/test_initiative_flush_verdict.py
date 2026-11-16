@@ -128,7 +128,7 @@ def _seed(super_engine: Engine) -> None:
             text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :u, 'name: A')"),
             {"p": _PERSONA, "u": _OWNER},
         )
-    PostgresGraphBackend(engine=super_engine).insert_node_if_absent(
+    PostgresGraphBackend(engine=super_engine, persona_guard=False).insert_node_if_absent(
         _OWNER, _node(_CONTENT), [1.0] + [0.0] * (_DIM - 1)
     )
 
@@ -147,7 +147,9 @@ def _node(content: str) -> ConceptNode:
 
 
 def _pipeline(app_engine: Engine, judge: _CountingJudge, now: list[datetime]) -> InitiativePipeline:
-    store = build_graph_store(engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger())
+    store = build_graph_store(
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+    )
     return InitiativePipeline(
         grounding=GroundingChecker(
             source=ApiGroundingSource(

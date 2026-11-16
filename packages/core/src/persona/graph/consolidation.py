@@ -29,14 +29,20 @@ This module imports NO chat/LLM backend — the guardrail test asserts it struct
 
 from __future__ import annotations
 
+import functools
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from persona.audit import AuditAction, AuditEvent
+from persona.graph.errors import (
+    STALE_WRITE_ATTEMPTS,
+    GraphMergeConflictError,
+    GraphStaleWriteError,
+)
 from persona.graph.models import (
     ConceptNode,
     NodeKind,
@@ -46,10 +52,12 @@ from persona.graph.models import (
     make_edge_id,
 )
 from persona.graph.salience import SALIENCE_EXCLUDED_KINDS
+from persona.logging import get_logger
 from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+    from contextlib import AbstractContextManager
 
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
@@ -59,9 +67,30 @@ __all__ = ["ConsolidationPass", "ConsolidationReport", "MergeGroup", "SkippedCan
 
 #: Reserved member-metadata key holding the JSON reversal record (K7-D-4.5). Present
 #: ⇔ the node is a consolidated member; unmerge reads it to invert precisely.
+_log = get_logger("graph.consolidation")
+
 _MERGE_KEY = "_k7_merge"
 #: Reserved canonical-metadata key holding the accreted alias list (K7-D-4.4).
 _ALIAS_KEY = "_k7_aliases"
+
+#: A pending member whose give back failed this many runs in a row is an operator alert,
+#: repeated at most this often while it stays stuck (R9-284 round 8 MEDIUM-A).
+GIVE_BACK_ALERT_AFTER = 5
+GIVE_BACK_ALERT_EVERY = timedelta(hours=24)
+
+#: A merge record's state: the act is still running, or it finished (R9-284).
+_PENDING = "pending"
+_DONE = "done"
+
+
+def _personas_of(node: ConceptNode) -> list[str]:
+    """The personas a node's trail names, for the R9-284 write guard."""
+    return sorted({p.persona_id for p in node.provenance if p.persona_id})
+
+
+def _held(asserters: dict[str, str], mirror_id: str) -> list[str]:
+    """The source's asserting persona for one mirror, if it has one."""
+    return [asserters[mirror_id]] if mirror_id in asserters else []
 
 
 class MergeGroup(BaseModel):
@@ -104,9 +133,16 @@ class ConsolidationReport(BaseModel):
 class _ConsolidationBackend(Protocol):
     """The transport surface the pass composes (PostgresGraphBackend satisfies it)."""
 
+    def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
+    def pending_merges(self, owner_id: str) -> list[str]: ...
+    def is_merged(self, owner_id: str, node_id: str) -> bool: ...
+    def merge_records_listing(
+        self, owner_id: str, *, run_id: str, mirror_ids: Sequence[str]
+    ) -> dict[str, str]: ...
+    def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
-        self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
+        self, owner_id: str, *, epoch: int, watermark: datetime | None, last_run_at: datetime
     ) -> None: ...
     def dirty_candidates(self, owner_id: str, watermark: datetime | None) -> list[ConceptNode]: ...
     def band_semantic_neighbors(
@@ -114,8 +150,12 @@ class _ConsolidationBackend(Protocol):
     ) -> list[ConceptNode]: ...
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
-    def open_assertion_edges(self, owner_id: str, node_id: str) -> list[TypedLink]: ...
-    def upsert_edge(self, owner_id: str, link: TypedLink) -> None: ...
+    def open_assertion_edges_keyed(
+        self, owner_id: str, node_id: str
+    ) -> list[tuple[TypedLink, int]]: ...
+    def upsert_edge(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> None: ...
     def close_edges_incident(
         self, owner_id: str, node_id: str, *, invalidated_by: str
     ) -> list[str]: ...
@@ -123,15 +163,39 @@ class _ConsolidationBackend(Protocol):
         self, owner_id: str, node_id: str, *, invalidated_by: str
     ) -> None: ...
     def delete_open_edge(self, owner_id: str, edge_id: str) -> None: ...
+    def insert_edge_if_absent(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> bool: ...
+    def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None: ...
     def entities_for_node(self, owner_id: str, node_id: str) -> list[str]: ...
-    def associate_entities(
-        self, owner_id: str, node_id: str, entity_ids: Sequence[str]
-    ) -> None: ...
+    def associate_entities_recording(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        member_id: str,
+        merged_into: str,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        record: Callable[[list[str]], tuple[dict[str, str], str]],
+        guard_personas: Sequence[str] = (),
+    ) -> list[str]: ...
+    def entity_carriers(
+        self, owner_id: str, canonical_id: str, entity_ids: Sequence[str], *, excluding: str
+    ) -> dict[str, str]: ...
     def remove_entity_associations(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
     def update_node(
-        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        guard_personas: Sequence[str] = (),
     ) -> int | None: ...
     def set_merged_into(
         self,
@@ -141,6 +205,9 @@ class _ConsolidationBackend(Protocol):
         merged_into: str | None,
         metadata: dict[str, str],
         content_hash: str,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        guard_personas: Sequence[str] = (),
     ) -> None: ...
     def surrogate_for(self, owner_id: str, node_id: str) -> int | None: ...
     def bump_salience(
@@ -191,11 +258,71 @@ class ConsolidationPass:
     # ===== the pass =======================================================
 
     def run(self, owner_id: str) -> ConsolidationReport:
-        """Consolidate the owner's dirty near-dup neighbourhoods → a report (K7-D-4)."""
+        """Consolidate the owner's dirty near-dup neighbourhoods → a report (K7-D-4).
+
+        The whole run holds the owner's graph maintenance lock (R9-284,
+        D-R9-284-graph-mutex), so an erasure's graph step never lands between two of its
+        transactions; every read, the marker and the candidates first, happens under it.
+        """
+        with self._backend.maintenance_lock(owner_id):
+            return self._run_locked(owner_id)
+
+    def _run_locked(self, owner_id: str) -> ConsolidationReport:
+        # A member whose merge act stopped part way (its record still "pending") is given
+        # back first, so this run starts from whole merges only (D-R9-284-graph-mutex).
+        stuck: list[str] = []
+        now = datetime.now(UTC)
+        for node_id in self._backend.pending_merges(owner_id):
+            try:
+                self._unmerge(owner_id, node_id)
+            except Exception as exc:  # noqa: BLE001 - still pending: the next run tries again
+                # One member's failure must not stop the others (round 6 L-1).
+                stuck.append(node_id)
+                _log.warning(
+                    "pending merge not given back node={node} error={err}",
+                    node=node_id,
+                    err=type(exc).__name__,
+                )
+                self._note_failed_give_back(owner_id, node_id, now=now)
         epoch, watermark = self._backend.get_marker(owner_id)
+        if stuck:
+            # A member still pending could be clustered again, or its canonical could, from a
+            # half-made state: this run merges nothing (round 7 MEDIUM-1). Disuse still decays,
+            # at a new epoch, but the watermark stays, so the next run gives the members back
+            # and considers the same candidates (round 8 MEDIUM-A).
+            _log.warning(
+                "consolidation merge phase skipped: pending merges not given back count={n}",
+                n=len(stuck),
+            )
+            self._apply_disuse(owner_id, epoch + 1)
+            # The epoch is recorded even with no watermark yet, so the decay is never applied
+            # twice at one epoch (round 9 LOW-1).
+            self._backend.advance_marker(
+                owner_id, epoch=epoch + 1, watermark=watermark, last_run_at=now
+            )
+            return ConsolidationReport(
+                run_id=f"{owner_id}:{epoch + 1}",
+                owner_id=owner_id,
+                epoch=epoch + 1,
+                candidates_considered=0,
+                clusters_formed=0,
+                nodes_merged=0,
+                skipped=tuple(
+                    SkippedCandidate(
+                        node_id=node_id, reason="pending merge not given back: merge phase skipped"
+                    )
+                    for node_id in stuck
+                ),
+            )
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
         started_at = datetime.now(UTC)  # a SYSTEM timestamp (watermark axis) — never salience
+        # The epoch is recorded before anything is merged, with the old watermark, so a run
+        # that dies after merging cannot hand its tag to the next run (round 10 LOW-3): the
+        # tag names the run's mirrors, closes and records, and must never be reused.
+        self._backend.advance_marker(
+            owner_id, epoch=new_epoch, watermark=watermark, last_run_at=started_at
+        )
 
         floor = self._settings.semantic_link_threshold
         ceil = self._settings.merge_extend_threshold
@@ -229,7 +356,10 @@ class ConsolidationPass:
                     owner_id, seed, members, run_id=run_id, now=started_at, epoch=new_epoch
                 )
             except Exception as exc:  # noqa: BLE001 — per-cluster isolation: one failure
-                # must not abort the run; record it honestly and carry on (K7-D-4.6).
+                # must not abort the run; record it honestly and carry on (K7-D-4.6). The
+                # cluster's members this run merged are given back, still under the lock, so
+                # a failed cluster leaves none of them merged (R9-284 round 5 MEDIUM-1).
+                self._give_back_cluster(owner_id, members, run_id=run_id)
                 skipped.append(
                     SkippedCandidate(
                         node_id=seed.id, reason=f"merge failed: {type(exc).__name__}: {exc}"
@@ -268,6 +398,97 @@ class ConsolidationPass:
         )
         return report
 
+    def _note_failed_give_back(self, owner_id: str, node_id: str, *, now: datetime) -> None:
+        """Count a failed give back in the pending record; alert once stuck (round 8 MEDIUM-A).
+
+        From the fifth failure in a row an OPERATOR ALERT is logged, once, then again at most
+        every 24 hours while it stays stuck. Kept in the record, so it survives restarts. A
+        record that cannot be read or written is left as it is: the next run counts again.
+        """
+        try:
+            current = self._backend.get_node(owner_id, node_id)
+            record = json.loads(current.metadata[_MERGE_KEY]) if current is not None else None
+            if current is None or not isinstance(record, dict):
+                return
+            failures = int(record.get("give_back_failures", 0)) + 1
+            last = record.get("give_back_alerted_at")
+            due = failures >= GIVE_BACK_ALERT_AFTER and (
+                not isinstance(last, str)
+                or now - datetime.fromisoformat(last) >= GIVE_BACK_ALERT_EVERY
+            )
+            record = {**record, "give_back_failures": failures}
+            if due:
+                record["give_back_alerted_at"] = now.isoformat()
+            metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+            self._backend.set_merged_into(
+                owner_id,
+                node_id,
+                merged_into=str(record.get("canonical")),
+                metadata=metadata,
+                content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+                expected_content_hash=current.content_hash,
+                expected_provenance=current.provenance,
+            )
+        except Exception as exc:  # noqa: BLE001 - counted again by the next run
+            _log.warning(
+                "failed give back not counted node={node} error={err}",
+                node=node_id,
+                err=type(exc).__name__,
+            )
+            return
+        if due:
+            _log.error(
+                "OPERATOR ALERT: consolidation give back stuck owner={owner} node={node} "
+                "failures={n}",
+                owner=owner_id,
+                node=node_id,
+                n=failures,
+            )
+
+    def _give_back_cluster(
+        self, owner_id: str, members: Sequence[ConceptNode], *, run_id: str
+    ) -> None:
+        """Unmerge each member this run merged; one that fails is left for the next run.
+
+        A member left "pending" by a failure here (or by a crash, where this never ran) is what
+        the next run gives back first.
+        """
+        for member in members:
+            current = self._backend.get_node(owner_id, member.id)
+            raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+            try:
+                record = json.loads(raw) if raw is not None else None
+            except ValueError:
+                record = None
+            if not isinstance(record, dict) or record.get("run_id") != run_id:
+                continue
+            try:
+                if current is not None and record.get("state") != _PENDING:
+                    # A done member is marked pending first, so a give back that fails part
+                    # way is retried by the next run instead of left half done (round 6 L-2).
+                    self._mark_pending(owner_id, current, record)
+                self._unmerge(owner_id, member.id)
+            except Exception:  # noqa: BLE001, S112 - still pending: the next run gives it back
+                continue
+
+    def _mark_pending(self, owner_id: str, current: ConceptNode, record: dict[str, object]) -> None:
+        canonical = record.get("canonical")
+        if not isinstance(canonical, str):
+            return
+        metadata = {
+            **current.metadata,
+            _MERGE_KEY: json.dumps({**record, "state": _PENDING}, sort_keys=True),
+        }
+        self._backend.set_merged_into(
+            owner_id,
+            current.id,
+            merged_into=canonical,
+            metadata=metadata,
+            content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+            expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
+        )
+
     def _cluster_members(
         self, owner_id: str, seed: ConceptNode, *, floor: float, ceil: float, seen: set[str]
     ) -> list[ConceptNode]:
@@ -303,12 +524,70 @@ class ConsolidationPass:
     ) -> None:
         tag = f"consolidation:{run_id}"
         for member in members:
-            mirrored = self._mirror_assertion_edges(owner_id, member, canonical, tag=tag, now=now)
-            self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
-            added = self._copy_entities(owner_id, member, canonical)
-            self._mark_merged(
-                owner_id, member, canonical, run_id=run_id, mirrored=mirrored, added=added
+            personas = _personas_of(member)
+            mirrors, sources, asserters = self._plan_mirrors(
+                owner_id, member, canonical, tag=tag, now=now
             )
+            to_copy = self._entities_to_copy(owner_id, member, canonical)
+            # R9-284 (D-R9-284-write-guard): the merge record first, in a transaction that holds
+            # the member's personas, listing the mirrors this merge will make. Its entity links
+            # are recorded only once made, and only those the association added (round 6 L-4):
+            # a pending record lists none, so a give back removes none.
+            # An erasure landing at any later point finds them through the record; one that has
+            # already landed refuses this write, and nothing below happens.
+            pending, pending_hash = self._mark_merged(
+                owner_id,
+                member,
+                canonical,
+                run_id=run_id,
+                mirrored=[m.id for m in mirrors],
+                added=[],
+                # The record lists knowledge of the sources' asserters too (review round 5 H1).
+                personas=sorted({*personas, *asserters.values()}),
+                sources=sources,
+                state=_PENDING,
+            )
+            # A mirror never overwrites an edge the canonical already has open (review
+            # MEDIUM-1); the record then keeps only the mirrors actually made.
+            made = [
+                m.id
+                for m in mirrors
+                if self._backend.insert_edge_if_absent(
+                    owner_id, m, guard_personas=sorted({*personas, *_held(asserters, m.id)})
+                )
+            ]
+            self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
+            made_sources = {m: sources[m] for m in made if m in sources}
+            # The act is whole: the entity links and the done record (listing exactly the links
+            # the insert made, and the mirrors made) commit in one transaction holding the
+            # personas (round 7 HIGH-1). Either both land or neither: a link is never left on
+            # the canonical with a record that does not list it. Until then the record stays
+            # "pending", lists no links, and the next run gives the member back.
+            try:
+                self._backend.associate_entities_recording(
+                    owner_id,
+                    canonical.id,
+                    to_copy,
+                    member_id=member.id,
+                    merged_into=canonical.id,
+                    expected_content_hash=pending_hash,
+                    expected_provenance=member.provenance,  # the pending write keeps the trail
+                    record=functools.partial(
+                        self._done_metadata,
+                        member,
+                        canonical,
+                        run_id=run_id,
+                        mirrored=made,
+                        sources=made_sources,
+                    ),
+                    guard_personas=sorted({*personas, *asserters.values()}),
+                )
+            except GraphMergeConflictError:
+                # The member's record is not the one this merge wrote (round 9 MEDIUM-1): it
+                # may be gone, so nothing would find the mirrors and closed edges this act
+                # made. Give them back from the record in hand, then fail the cluster.
+                self._give_back_conflicted(owner_id, member.id, json.loads(pending))
+                raise
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
                 self._index.remove(surrogate)  # leave the dense index (visibility)
@@ -328,7 +607,12 @@ class ConsolidationPass:
                 metadata={"action": "consolidation_merge", "member": member.id, "run_id": run_id},
             )
         self._accrete_aliases(
-            owner_id, canonical.id, [m.concept_name for m in members], run_id=run_id, now=now
+            owner_id,
+            canonical.id,
+            [m.concept_name for m in members],
+            run_id=run_id,
+            now=now,
+            personas=[p for m in members for p in _personas_of(m)],
         )
 
     def _apply_disuse(self, owner_id: str, current_epoch: int) -> None:
@@ -348,11 +632,20 @@ class ConsolidationPass:
                 floor=self._settings.salience_floor,
             )
 
-    def _mirror_assertion_edges(
+    def _plan_mirrors(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode, *, tag: str, now: datetime
-    ) -> list[str]:
-        mirrored: list[str] = []
-        for edge in self._backend.open_assertion_edges(owner_id, member.id):
+    ) -> tuple[list[TypedLink], dict[str, list[int]], dict[str, str]]:
+        """The mirrors of the member's open assertion edges onto the canonical, not yet written.
+
+        Also ``{mirror id: [the source edge's edge_key]}``, so an erasure of the persona that
+        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3);
+        a list, because members of one run can share a mirror (round 5 MEDIUM-2),
+        and ``{mirror id: the source's asserting persona}``, held when the mirror is written.
+        """
+        mirrors: list[TypedLink] = []
+        sources: dict[str, list[int]] = {}
+        asserters: dict[str, str] = {}
+        for edge, edge_key in self._backend.open_assertion_edges_keyed(owner_id, member.id):
             if edge.src_node_id == member.id:
                 src, dst = canonical.id, edge.dst_node_id
             else:
@@ -360,8 +653,10 @@ class ConsolidationPass:
             if src == dst:  # a self-loop after re-pointing onto the canonical — skip
                 continue
             mirror_id = make_edge_id(src, dst, edge.link_type)
-            self._backend.upsert_edge(
-                owner_id,
+            sources[mirror_id] = [edge_key]
+            if edge.provenance is not None and edge.provenance.persona_id:
+                asserters[mirror_id] = edge.provenance.persona_id
+            mirrors.append(
                 TypedLink(
                     id=mirror_id,
                     src_node_id=src,
@@ -373,18 +668,16 @@ class ConsolidationPass:
                     ),
                     created_at=now,
                     valid_at=now,
-                ),
+                )
             )
-            mirrored.append(mirror_id)
-        return mirrored
+        return mirrors, sources, asserters
 
-    def _copy_entities(
+    def _entities_to_copy(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode
     ) -> list[str]:
+        """The member's entity links the canonical does not have yet, not yet written."""
         canon = set(self._backend.entities_for_node(owner_id, canonical.id))
-        added = [e for e in self._backend.entities_for_node(owner_id, member.id) if e not in canon]
-        self._backend.associate_entities(owner_id, canonical.id, added)
-        return added
+        return [e for e in self._backend.entities_for_node(owner_id, member.id) if e not in canon]
 
     def _mark_merged(
         self,
@@ -395,25 +688,116 @@ class ConsolidationPass:
         run_id: str,
         mirrored: list[str],
         added: list[str],
-    ) -> None:
-        record = {
-            "run_id": run_id,
-            "canonical": canonical.id,
-            "mirrored_edges": mirrored,
-            "added_entities": added,
-        }
-        new_meta = {**member.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
-        # content byte-untouched → content_hash recomputes over the new metadata only.
+        personas: Sequence[str] = (),
+        sources: dict[str, list[int]] | None = None,
+        state: str = _DONE,
+    ) -> tuple[str, str]:
+        """Write the member's merge record; return it as written and the new content hash.
+
+        A compare-and-set on the member as read (D-R9-284-node-cas): a member that changed
+        since raises :class:`GraphStaleWriteError`, a merge conflict, and nothing is written.
+        """
+        metadata, content_hash = self._merge_metadata(
+            member,
+            canonical,
+            run_id=run_id,
+            mirrored=mirrored,
+            added=added,
+            sources=sources,
+            state=state,
+        )
         self._backend.set_merged_into(
             owner_id,
             member.id,
             merged_into=canonical.id,
-            metadata=new_meta,
-            content_hash=_compute_node_hash(member.concept_name, member.content, new_meta),
+            metadata=metadata,
+            content_hash=content_hash,
+            expected_content_hash=member.content_hash,
+            expected_provenance=member.provenance,
+            guard_personas=personas,
+        )
+        return metadata[_MERGE_KEY], content_hash
+
+    def _done_metadata(
+        self,
+        member: ConceptNode,
+        canonical: ConceptNode,
+        added: list[str],
+        *,
+        run_id: str,
+        mirrored: list[str],
+        sources: dict[str, list[int]],
+    ) -> tuple[dict[str, str], str]:
+        """The done record's metadata, given the entity links the insert made (round 7)."""
+        return self._merge_metadata(
+            member,
+            canonical,
+            run_id=run_id,
+            mirrored=mirrored,
+            added=added,
+            sources=sources,
+            state=_DONE,
         )
 
+    def _merge_metadata(
+        self,
+        member: ConceptNode,
+        canonical: ConceptNode,
+        *,
+        run_id: str,
+        mirrored: list[str],
+        added: list[str],
+        sources: dict[str, list[int]] | None,
+        state: str,
+    ) -> tuple[dict[str, str], str]:
+        """The member's metadata carrying this merge record, and its content hash."""
+        record = {
+            # "pending" while the member's merge act runs, "done" at its end; a record from
+            # before this has no state and is done (D-R9-284-graph-mutex).
+            "state": state,
+            "run_id": run_id,
+            "canonical": canonical.id,
+            "mirrored_edges": mirrored,
+            "added_entities": added,
+            # {mirror id: [source edge_key]} (R9-284 LOW-3, round 5 MEDIUM-2): this member's
+            # sources of each mirror it made or shares. Absent in records before LOW-3; a
+            # single key in records before MEDIUM-2.
+            "mirror_sources": {m: list(k) for m, k in (sources or {}).items()},
+        }
+        new_meta = {**member.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        # content byte-untouched → content_hash recomputes over the new metadata only.
+        return new_meta, _compute_node_hash(member.concept_name, member.content, new_meta)
+
     def _accrete_aliases(
-        self, owner_id: str, canonical_id: str, names: list[str], *, run_id: str, now: datetime
+        self,
+        owner_id: str,
+        canonical_id: str,
+        names: list[str],
+        *,
+        run_id: str,
+        now: datetime,
+        personas: Sequence[str] = (),
+    ) -> None:
+        """Accrete the members' names onto the canonical, retried on a fresh read (node CAS)."""
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                self._accrete_once(
+                    owner_id, canonical_id, names, run_id=run_id, now=now, personas=personas
+                )
+                return
+            except GraphStaleWriteError:
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+
+    def _accrete_once(
+        self,
+        owner_id: str,
+        canonical_id: str,
+        names: list[str],
+        *,
+        run_id: str,
+        now: datetime,
+        personas: Sequence[str],
     ) -> None:
         current = self._backend.get_node(owner_id, canonical_id)
         if current is None:  # pragma: no cover - the canonical was just read
@@ -442,16 +826,30 @@ class ConsolidationPass:
                 NodeProvenance(
                     source=WriteSource.SYSTEM,
                     written_at=now,
-                    reason=f"consolidation:{run_id} aliases:{','.join(fresh)}",
+                    # The names as a JSON list: a name may hold a comma (R9-284 HIGH-3).
+                    reason=f"consolidation:{run_id} aliases:{json.dumps(fresh)}",
                 ),
             ),
             created_at=current.created_at,
         )
-        self._backend.update_node(owner_id, rebuilt, emb)
+        # R9-284: the aliases are the members' names; hold the personas that gave them.
+        self._backend.update_node(
+            owner_id,
+            rebuilt,
+            emb,
+            expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
+            guard_personas=personas,
+        )
 
     # ===== the inverse ====================================================
 
     def unmerge(self, owner_id: str, node_id: str) -> bool:
+        """Reverse a consolidated member, holding the owner's graph maintenance lock (R9-284)."""
+        with self._backend.maintenance_lock(owner_id):
+            return self._unmerge(owner_id, node_id)
+
+    def _unmerge(self, owner_id: str, node_id: str) -> bool:
         """Reverse a consolidated member back to its pre-merge state (K7-D-4.5).
 
         The precise inverse: drop the mirrored edges from the canonical, remove the
@@ -468,16 +866,100 @@ class ConsolidationPass:
         raw = member.metadata.get(_MERGE_KEY)
         if raw is None:
             return False  # not a consolidated member
-        record = json.loads(raw)
+        self._unmerge_with(owner_id, node_id, member, json.loads(raw))
+        return True
+
+    def _give_back_conflicted(
+        self, owner_id: str, node_id: str, pending: dict[str, object]
+    ) -> None:
+        """Undo a merge act whose done write lost the CAS, from its pending record in hand.
+
+        When the row still carries this run's record, the ordinary give back reads it; when
+        it does not (another write dropped it, or the member is gone), this one uses the
+        record the act wrote: its planned mirrors go while they are still this run's, its
+        closed edges reopen by tag, and ``merged_into`` is cleared (round 9 MEDIUM-1).
+        """
+        current = self._backend.get_node(owner_id, node_id)
+        raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+        try:
+            on_row = json.loads(raw) if raw is not None else None
+        except ValueError:
+            on_row = None
+        if isinstance(on_row, dict) and on_row.get("run_id") == pending.get("run_id"):
+            return  # the row's own record: the cluster's give back reads it
+        try:
+            self._unmerge_with(owner_id, node_id, current, pending)
+        except Exception as exc:  # noqa: BLE001 - kept findable; the conflict is still raised
+            self._keep_pending_findable(owner_id, node_id, pending, exc)
+
+    def _keep_pending_findable(
+        self, owner_id: str, node_id: str, pending: dict[str, object], exc: Exception
+    ) -> None:
+        """A give back from the record in hand failed part way (round 10 LOW-2).
+
+        If the member is still there and merged, the pending record goes back onto its row, so
+        the next run's recovery finds and finishes it. If it is gone, nothing could carry the
+        record: the operator is told which mirrors may be left.
+        """
+        mirrors = pending.get("mirrored_edges")
+        mirror_ids = sorted(map(str, mirrors)) if isinstance(mirrors, list) else []
+        current = self._backend.get_node(owner_id, node_id)
+        if current is None:
+            _log.error(
+                "OPERATOR ALERT: consolidation give back failed for a removed member "
+                "owner={owner} node={node} mirrors={mirrors} error={err}",
+                owner=owner_id,
+                node=node_id,
+                mirrors=mirror_ids,
+                err=type(exc).__name__,
+            )
+            return
+        if not self._backend.is_merged(owner_id, node_id):
+            return  # the give back got as far as clearing it: nothing left to find
+        record = {**pending, "state": _PENDING}
+        metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        try:
+            self._backend.set_merged_into(
+                owner_id,
+                node_id,
+                merged_into=str(pending.get("canonical")),
+                metadata=metadata,
+                content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+                expected_content_hash=current.content_hash,
+                expected_provenance=current.provenance,
+            )
+        except Exception as again:  # noqa: BLE001 - the operator is told
+            _log.error(
+                "OPERATOR ALERT: consolidation give back failed and its record could not be "
+                "restored owner={owner} node={node} mirrors={mirrors} error={err}",
+                owner=owner_id,
+                node=node_id,
+                mirrors=mirror_ids,
+                err=type(again).__name__,
+            )
+
+    def _unmerge_with(
+        self,
+        owner_id: str,
+        node_id: str,
+        member: ConceptNode | None,
+        record: dict[str, object],
+    ) -> None:
         run_id = record["run_id"]
         tag = f"consolidation:{run_id}"
 
-        for mirror_id in record.get("mirrored_edges", []):
-            self._backend.delete_open_edge(owner_id, mirror_id)
-        self._backend.remove_entity_associations(
-            owner_id, record["canonical"], record.get("added_entities", [])
-        )
+        shared = self._mirrors_shared_with(owner_id, node_id, record)
+        listed = record.get("mirrored_edges")
+        for mirror_id in map(str, listed if isinstance(listed, list) else []):
+            # Only while it is still this merge's mirror: the record may list one that was
+            # never made, if the merge stopped before narrowing it (R9-284 MEDIUM-1). A mirror
+            # another member of the same run still shares stays (round 5 MEDIUM-2).
+            if mirror_id not in shared:
+                self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
+        self._give_back_entity_links(owner_id, node_id, record)
         self._backend.reopen_edges_incident(owner_id, node_id, invalidated_by=tag)
+        if member is None:
+            return  # gone: its edges went with it
 
         orig_meta = {k: v for k, v in member.metadata.items() if k != _MERGE_KEY}
         self._backend.set_merged_into(
@@ -486,6 +968,8 @@ class ConsolidationPass:
             merged_into=None,
             metadata=orig_meta,
             content_hash=_compute_node_hash(member.concept_name, member.content, orig_meta),
+            expected_content_hash=member.content_hash,
+            expected_provenance=member.provenance,
         )
         surrogate = self._backend.surrogate_for(owner_id, node_id)
         emb = self._backend.get_embeddings(owner_id, [node_id]).get(node_id)
@@ -494,9 +978,95 @@ class ConsolidationPass:
         self._emit(
             owner_id,
             node_id=node_id,
-            metadata={"action": "consolidation_unmerge", "canonical": record["canonical"]},
+            metadata={"action": "consolidation_unmerge", "canonical": str(record["canonical"])},
         )
-        return True
+
+    def _give_back_entity_links(
+        self, owner_id: str, node_id: str, record: dict[str, object]
+    ) -> None:
+        """Remove the links this merge added, except those another member still carries.
+
+        The entity version of the shared mirror (round 8 LOW-4): if another member merged into
+        the canonical links the entity too, the canonical keeps the link, and that member's
+        record takes it over, so whichever goes last removes it.
+        """
+        canonical = record.get("canonical")
+        listed = record.get("added_entities")
+        if not isinstance(canonical, str) or not isinstance(listed, list) or not listed:
+            return
+        added = [str(e) for e in listed]
+        carriers = self._backend.entity_carriers(owner_id, canonical, added, excluding=node_id)
+        transfers: dict[str, list[str]] = {}
+        for entity, carrier in carriers.items():
+            transfers.setdefault(carrier, []).append(entity)
+        for carrier, entities in sorted(transfers.items()):
+            self._take_over_links(owner_id, carrier, entities)
+        self._backend.remove_entity_associations(
+            owner_id, canonical, [e for e in added if e not in carriers]
+        )
+
+    def _take_over_links(self, owner_id: str, member_id: str, entities: list[str]) -> None:
+        current = self._backend.get_node(owner_id, member_id)
+        raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+        record = json.loads(raw) if raw is not None else None
+        if current is None or not isinstance(record, dict):
+            return
+        listed = [str(e) for e in record.get("added_entities", [])]
+        record = {**record, "added_entities": list(dict.fromkeys([*listed, *entities]))}
+        metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        self._backend.set_merged_into(
+            owner_id,
+            member_id,
+            merged_into=str(record.get("canonical")),
+            metadata=metadata,
+            content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+            expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
+        )
+
+    def _mirrors_shared_with(
+        self, owner_id: str, node_id: str, record: dict[str, object]
+    ) -> set[str]:
+        """Mirrors another member of the same run, still merged, also backs.
+
+        Any member of the run, merged into any canonical (round 6 M-2): members of two
+        clusters can make the same mirror id, A1 into C1 and B2 into C2 both C2::t::C1.
+
+        It backs one only while one of the sources it lists for it is still a row (round 6
+        M-1): a stale listing, whose source an erasure or a forget removed, keeps nothing. A
+        mirror it lists without sources (a record before LOW-3) is taken as backed.
+        """
+        listed = record.get("mirrored_edges")
+        mirror_ids = sorted({str(m) for m in listed}) if isinstance(listed, list) else []
+        if not mirror_ids:
+            return set()
+        claims: dict[str, set[int]] = {}
+        unsourced: set[str] = set()
+        listing = self._backend.merge_records_listing(
+            owner_id, run_id=str(record.get("run_id")), mirror_ids=mirror_ids
+        )
+        for other_id, raw in listing.items():
+            if other_id == node_id:
+                continue
+            try:
+                other = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(other, dict) or other.get("run_id") != record.get("run_id"):
+                continue
+            sources = other.get("mirror_sources") or {}
+            for mirror in map(str, other.get("mirrored_edges", [])):
+                if mirror not in mirror_ids:
+                    continue
+                if mirror not in sources:
+                    unsourced.add(mirror)  # no sources listed: taken as backed
+                    continue
+                listed = sources[mirror]
+                keys = listed if isinstance(listed, list) else [listed]
+                claims.setdefault(mirror, set()).update(k for k in keys if isinstance(k, int))
+        wanted = sorted({k for keys in claims.values() for k in keys})
+        alive = self._backend.existing_edge_keys(owner_id, wanted) if wanted else set()
+        return unsourced | {mirror for mirror, keys in claims.items() if keys & alive}
 
     # ===== helpers ========================================================
 

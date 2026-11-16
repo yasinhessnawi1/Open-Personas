@@ -42,7 +42,7 @@ from persona_api.jobs.queue import JobQueue
 from persona_api.middleware.rls_context import make_rls_engine
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from sqlalchemy import Engine
 
@@ -136,8 +136,12 @@ class Worker:
         title_backfill: UntitledConversationBackfill | None = None,
         title_backfill_interval_seconds: float = 900.0,
         on_drain: Callable[[], None] | None = None,
+        maintenance_hooks: Sequence[Callable[[], object]] = (),
     ) -> None:
         self._dispatch_engine = dispatch_engine
+        # Extra work for the maintenance cadence, each guarded on its own (R9-284: the
+        # unfinished-erasure resume).
+        self._maintenance_hooks = tuple(maintenance_hooks)
         self._rls_engine = rls_engine
         self._worker_id = worker_id or make_worker_id()
         self._queue = JobQueue(dispatch_engine)
@@ -652,6 +656,11 @@ class Worker:
                 archived=archived,
                 purged=purged,
             )
+        for hook in self._maintenance_hooks:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - one hook's failure must not stop the others
+                _log.exception("maintenance hook failed", worker_id=self._worker_id)
 
     def _next_poll_delay(self) -> float:
         """Jittered poll interval: ``interval + U(0, jitter)`` (D-A0-3)."""
@@ -722,6 +731,7 @@ def build_worker(
     revival_sweep_builder: Callable[[Engine, Engine], RevivalSweeper | None] | None = None,
     title_backfill_builder: Callable[[Engine], UntitledConversationBackfill | None] | None = None,
     on_drain: Callable[[], None] | None = None,
+    maintenance_hooks: Sequence[Callable[[], object]] = (),
 ) -> Worker:
     """Compose a :class:`Worker` from config — the worker's composition root.
 
@@ -842,4 +852,5 @@ def build_worker(
         archive_after_seconds=config.worker_archive_after_seconds,
         archive_retention_seconds=config.worker_archive_retention_seconds,
         on_drain=on_drain,
+        maintenance_hooks=maintenance_hooks,
     )

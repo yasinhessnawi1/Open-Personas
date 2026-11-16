@@ -142,7 +142,7 @@ def _seed(migrated_engine: Engine) -> None:
                 ),
                 {"p": pid, "u": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     backend.insert_node_if_absent(
         _OWNER,
         ConceptNode(
@@ -209,7 +209,7 @@ def _candidate(ref: str, **overrides: Any) -> InitiativeCandidate:  # noqa: ANN4
 
 def _pipeline(app_engine: Engine) -> InitiativePipeline:
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
     )
     settings = InitiativeSettings()
 

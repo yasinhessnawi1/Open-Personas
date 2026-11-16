@@ -53,12 +53,15 @@ __all__ = [
     "create_persona",
     "default_embedder",
     "delete_persona",
+    "delete_persona_row",
     "get_persona",
     "list_personas",
     "load_persona_from_yaml",
     "notify_persona_ready",
     "persona_display_name",
+    "persona_exists",
     "persona_name_from_yaml",
+    "remove_persona_folder",
     "set_avatar_url",
     "summary_of",
     "update_persona",
@@ -611,10 +614,13 @@ def conversation_count_for(*, rls_engine: Engine, persona_id: str) -> int:
 def delete_persona(
     *, rls_engine: Engine, persona_id: str, workspace_root: Path | None = None, owner_id: str
 ) -> None:
-    """Delete a persona: its row (which cascades conversations) and its workspace folder.
+    """Delete a persona's row (which cascades conversations), and its folder if asked.
 
-    The persona's memory rows are NOT removed by this (``memory_chunks`` has had no foreign
-    key since migration 007); that is R9-284, still open.
+    Memory rows are not reached by this (``memory_chunks`` has had no foreign key since
+    migration 007). The route no longer calls it alone: a persona delete is an erasure
+    (R9-284, :mod:`persona_api.services.erasure_start`), which calls this for the row and
+    leaves the folder, memory and the rest to the erase job. ``workspace_root`` stays for
+    callers that delete a row and its folder together.
 
     Order, and why (R9-284 audit and its review, 2026-11-07). Everything runs in ONE
     transaction, and the files go last inside it:
@@ -654,25 +660,57 @@ def delete_persona(
         ).first()
         if owned is None:
             raise not_found
-        conn.execute(
-            update(connector_channels_t)
-            .where(
-                connector_channels_t.c.active_persona_id == persona_id,
-                connector_channels_t.c.owner_id == owner_id,
-            )
-            .values(active_persona_id=None)
-        )
-        result = conn.execute(
-            delete(personas_t)
-            .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
-            .returning(personas_t.c.id)
-        )
-        if result.first() is None:
+        if delete_persona_row(conn, owner_id=owner_id, persona_id=persona_id) == 0:
             raise not_found
         if workspace_root is not None:
-            folder = persona_root(workspace_root, owner_id, persona_id)
-            if folder.exists():
-                shutil.rmtree(folder)
+            remove_persona_folder(workspace_root, owner_id=owner_id, persona_id=persona_id)
+
+
+def persona_exists(engine: Engine, persona_id: str) -> bool:
+    """Whether the persona's row is still there, as the engine's role sees it (R9-284)."""
+    with engine.connect() as conn:
+        found = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id))
+        return found.first() is not None
+
+
+def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> int:
+    """Delete the persona's row, scoped to its owner, and return how many rows went (0 or 1).
+
+    Channels that have this persona foregrounded forget it first. The channel's foreign key is
+    composite, ``(active_persona_id, owner_id)``, and its plain ``ON DELETE SET NULL`` nulls
+    the NOT NULL ``owner_id`` too (migration 060 narrows that on Postgres 15 and later; SQLite
+    cannot). The foreign key cascade then takes conversations, messages, tasks, runs and the
+    rest. Runs inside the caller's transaction; 0 when the row is already gone, which is what
+    a resumed erasure finds.
+    """
+    conn.execute(
+        update(connector_channels_t)
+        .where(
+            connector_channels_t.c.active_persona_id == persona_id,
+            connector_channels_t.c.owner_id == owner_id,
+        )
+        .values(active_persona_id=None)
+    )
+    result = conn.execute(
+        delete(personas_t)
+        .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
+        .returning(personas_t.c.id)
+    )
+    return 0 if result.first() is None else 1
+
+
+def remove_persona_folder(workspace_root: Path, *, owner_id: str, persona_id: str) -> bool:
+    """Remove the persona's local folder and say whether there was one.
+
+    Resolved through :func:`persona_api.workspace_paths.persona_root`, which refuses anything
+    but exactly one persona folder below the owner's. Errors propagate: a folder that could
+    not be removed is not reported gone. Removing a partly removed folder again is harmless.
+    """
+    folder = persona_root(workspace_root, owner_id, persona_id)
+    if not folder.exists():
+        return False
+    shutil.rmtree(folder)
+    return True
 
 
 def default_embedder(model_name: str) -> SentenceTransformerEmbedder:

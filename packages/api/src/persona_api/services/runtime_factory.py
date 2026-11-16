@@ -386,6 +386,8 @@ class RuntimeFactory:
             engine=self._engine,
             embedder=self._embedder,
             audit_logger=self._audit_logger or JSONLAuditLogger(audit_root),
+            # R9-284: a write naming an erased persona is refused in its own transaction.
+            persona_guard=True,
         )
         _logger.info("graph writes enabled (record_user_fact composed into toolboxes)")
 
@@ -821,6 +823,12 @@ class RuntimeFactory:
 
     # -- shared per-request pieces ------------------------------------------
 
+    def _persona_exists(self, persona_id: str) -> bool:
+        """Whether the persona's row is still there (R9-284: an erasure deletes it first)."""
+        with self._engine.connect() as conn:
+            found = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id))
+            return found.first() is not None
+
     def _load_persona(self, persona_id: str) -> Persona:
         """Load + validate the persona's YAML from the RLS-scoped row (→ 404)."""
         with self._engine.begin() as conn:
@@ -1026,6 +1034,8 @@ class RuntimeFactory:
                     graph_store=self._graph_store,
                     owner_provider=current_user_id.get,
                     persona_id=persona.persona_id,
+                    # R9-284: an erased persona's late turn must not grow the graph again.
+                    persona_exists=self._persona_exists,
                 )
             )
         # Spec A4 (A4-D-5) — the read-only ``task_introspect`` tool: the persona's only window

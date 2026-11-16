@@ -196,3 +196,34 @@ async def test_criterion_3_alias_heavy_collapses_to_one_canonical_entity() -> No
 
 def test_fake_registry_satisfies_the_k0_protocol() -> None:
     assert isinstance(_FakeRegistry({}), EntityRegistry)
+
+
+class _RecordingRegistry(_FakeRegistry):
+    def __init__(self, verdicts: dict[str, ResolutionVerdict]) -> None:
+        super().__init__(verdicts)
+        self.added: list[EntityAlias] = []
+
+    def add_alias(self, owner_id: str, entity_id: str, alias: EntityAlias) -> None:
+        self.added.append(alias)
+        super().add_alias(owner_id, entity_id, alias)
+
+
+@pytest.mark.asyncio
+async def test_an_alias_records_the_persona_it_came_through() -> None:
+    """R9-284 review H-1: erasing that persona must be able to find the surface."""
+    from persona.graph.models import NodeProvenance  # noqa: PLC0415
+    from persona.schema.chunks import WriteSource  # noqa: PLC0415
+
+    reg = _RecordingRegistry({"my doctor": _ambiguous("entity-7")})
+    judge = _FakeJudge({"my doctor": "entity-7"})
+    provenance = NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id="persona_a",
+        written_at=datetime(2026, 11, 15, tzinfo=UTC),
+    )
+
+    await EntityResolver(registry=reg, judge=judge).resolve_mentions(
+        "u1", ["my doctor"], provenance=provenance
+    )
+
+    assert [(a.surface, a.persona_id) for a in reg.added] == [("my doctor", "persona_a")]

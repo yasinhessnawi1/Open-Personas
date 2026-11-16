@@ -145,7 +145,11 @@ def stack(request: pytest.FixtureRequest, _engine: Engine) -> Iterator[_Stack]:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
     store = build_graph_store(
-        engine=_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger(), settings=settings
+        engine=_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+        persona_guard=False,
     )
     yield store, _engine
     with _engine.begin() as conn:
@@ -226,7 +230,7 @@ def test_k4_subtraction_removes_flagged_node_from_the_sparse_leg(stack: _Stack) 
 def test_entity_thread_surfaces_a_node_the_flat_query_missed(stack: _Stack) -> None:
     store, engine = stack
     registry = PostgresEntityRegistry(
-        backend=PostgresGraphBackend(engine=engine), embedder=_Embedder()
+        backend=PostgresGraphBackend(engine=engine, persona_guard=False), embedder=_Embedder()
     )
     ent = registry.create_entity("u1", canonical_name="Dr. Hansen")
     seed = store.merge("u1", _cand("annual checkup appointment", entity_ids=(ent.id,)))  # type: ignore[attr-defined]

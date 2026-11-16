@@ -75,7 +75,7 @@ anything there, and no step below may either.
 | `bin/deploy.sh` | on the host: build, pre-migrate dump, migrate, start, health checks |
 | `bin/preflight.sh` | on the host: env completeness, the host as provisioned, firewall, listeners, DNS |
 | `bin/backup.sh` + `systemd/` | nightly dump, roles, api data, facts, checksums; refuses below a free-space floor; off-site copy when configured |
-| `bin/alert.sh`, `bin/diskcheck.sh` | a failed backup or a full disk raises an alert (marker, login banner, optional notifier) |
+| `bin/alert.sh`, `bin/diskcheck.sh`, `bin/erasurecheck.sh` | a failed backup, a full disk or a stalled erasure raises an alert (marker, login banner, optional notifier) |
 | `sql/verify.sql` | the post-restore facts (counts and schema facts only) |
 | `cloud-init.yaml` | first-boot baseline for a NEW host only; the Oracle instance already exists |
 
@@ -571,7 +571,8 @@ no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtim
 
 ## Alerts
 
-A failed nightly backup, a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
+A failed nightly backup, an erasure failed or unfinished for 15 minutes (hourly,
+`bin/erasurecheck.sh`), a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
 backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB` in the profile, 20 on
 Oracle) is never silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
 

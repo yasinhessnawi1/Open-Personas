@@ -136,3 +136,40 @@ async def test_means_free_self_harm_disclosure_is_still_recorded() -> None:
     )
     assert not res.is_error
     assert len(store.merges) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_persona_that_no_longer_exists_records_nothing() -> None:
+    """R9-284: a turn still running when its persona was erased must not grow the graph again.
+
+    The graph is owner scoped, so nothing else refuses this write: the erasure would have
+    taken the persona out, and the next fact would put it back in.
+    """
+    store = _FakeGraphStore()
+    tool = make_record_user_fact_tool(
+        graph_store=store,
+        owner_provider=lambda: "u1",
+        persona_id="assistant",
+        persona_exists=lambda persona_id: persona_id != "assistant",
+    )
+
+    res = await tool.execute(fact="I'm allergic to shellfish")  # type: ignore[attr-defined]
+
+    assert res.is_error
+    assert store.merges == []
+
+
+@pytest.mark.asyncio
+async def test_a_persona_that_exists_still_records() -> None:
+    store = _FakeGraphStore()
+    tool = make_record_user_fact_tool(
+        graph_store=store,
+        owner_provider=lambda: "u1",
+        persona_id="assistant",
+        persona_exists=lambda _persona_id: True,
+    )
+
+    res = await tool.execute(fact="I'm allergic to shellfish")  # type: ignore[attr-defined]
+
+    assert not res.is_error
+    assert len(store.merges) == 1

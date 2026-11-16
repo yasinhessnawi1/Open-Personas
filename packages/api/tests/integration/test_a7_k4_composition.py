@@ -147,7 +147,7 @@ def _seed(migrated_engine: Engine) -> None:
             ),
             {"p": _PERSONA, "u": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     backend.insert_node_if_absent(_OWNER, _gated_node(), [1.0] + [0.0] * (DIM - 1))
 
 
@@ -174,7 +174,7 @@ def _handler(
 ) -> EventCandidateHandler:
     """The handler exactly as the worker registers it — real wellbeing check, real audit sink."""
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
     )
 
     def _audit(

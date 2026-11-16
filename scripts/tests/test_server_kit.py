@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -784,7 +785,14 @@ def test_the_backup_service_runs_the_kit_from_the_provisioned_checkout() -> None
     assert "User=" not in service
 
 
-@pytest.mark.parametrize("unit", ["open-persona-backup.service", "open-persona-diskcheck.service"])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "open-persona-backup.service",
+        "open-persona-diskcheck.service",
+        "open-persona-erasurecheck.service",
+    ],
+)
 def test_a_failing_timer_job_raises_an_alert(unit: str) -> None:
     text = (KIT / "systemd" / unit).read_text(encoding="utf-8")
     assert "OnFailure=open-persona-alert@%n.service" in text
@@ -955,3 +963,46 @@ def test_every_unit_runs_the_kit_from_its_new_path() -> None:
         text = unit.read_text(encoding="utf-8")
         for path in re.findall(r"/opt/open-persona/repo/\S+", text):
             assert path.startswith("/opt/open-persona/repo/deploy/server/bin/"), (unit.name, path)
+
+
+def test_the_erasure_check_reports_failed_and_long_unfinished_erasures() -> None:
+    """R9-284 review M2: a failed erasure, or one unfinished for 15 minutes, raises an alert."""
+    check = (KIT / "bin" / "erasurecheck.sh").read_text(encoding="utf-8")
+    assert "state = 'failed'" in check
+    assert "state <> 'complete'" in check
+    assert 'STALL_MINUTES="${OP_ERASURE_STALL_MINUTES:-15}"' in check
+    assert "exit 1" in check
+    timer = (KIT / "systemd" / "open-persona-erasurecheck.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=hourly" in timer
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    assert "open-persona-erasurecheck.timer" in provision.split("systemctl enable --now", 1)[1]
+
+
+def _systemctl_enables(script: str) -> list[list[str]]:
+    """Every ``systemctl enable`` command in a script, continuation lines joined, split by shlex."""
+    joined = script.replace("\\\n", " ")
+    return [
+        shlex.split(line.strip())
+        for line in joined.splitlines()
+        if line.strip().startswith("systemctl enable")
+    ]
+
+
+def test_every_systemctl_enable_names_only_units() -> None:
+    """R9-284 review H1: a stray escape became an argument, and set -e aborted provision."""
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    commands = _systemctl_enables(provision)
+    assert commands, "provision.sh enables nothing"
+    for command in commands:
+        for argument in command[2:]:
+            assert argument == "--now" or argument.endswith((".timer", ".service")), command
+
+
+def test_every_kit_timer_is_installed_enabled_and_checked() -> None:
+    provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
+    enabled = {a for command in _systemctl_enables(provision) for a in command[2:]}
+    preflight = (KIT / "bin" / "preflight.sh").read_text(encoding="utf-8")
+    assert '"${KIT_DIR}"/systemd/*.timer' in preflight
+    assert "systemctl is-active --quiet" in preflight
+    for timer in (KIT / "systemd").glob("*.timer"):
+        assert timer.name in enabled, f"provision.sh never enables {timer.name}"

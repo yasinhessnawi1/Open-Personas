@@ -151,7 +151,7 @@ def _seed(migrated_engine: Engine, owner: str, persona_id: str) -> None:
 
 
 def _seed_node(migrated_engine: Engine, owner: str, node_id: str) -> None:
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     backend.insert_node_if_absent(
         owner,
         ConceptNode(
@@ -170,7 +170,7 @@ def _scan_registry(app_engine: Engine) -> tuple[JobRegistry, _ScriptedScanBacken
     settings = InitiativeSettings()
     backend = _ScriptedScanBackend()
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
     )
     gate = ConversationWellbeingGate(graph_store, app_engine)
     scanner = InitiativeScanner(
@@ -365,7 +365,9 @@ def test_graph_reader_is_owner_scoped_under_persona_app(
     _seed_node(migrated_engine, "own_a5ra", "own_a5ra::node::00000001")
     _seed_node(migrated_engine, "own_a5rb", "own_a5rb::node::00000001")
 
-    store = build_graph_store(engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger())
+    store = build_graph_store(
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+    )
     reader = ApiScanGraphReader(store, ConversationWellbeingGate(store, app_engine))
     token = current_user_id.set("own_a5ra")
     try:

@@ -12,6 +12,7 @@ test_migration_061_erasures.py.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,10 +31,11 @@ _CAPTURED = {"conversations": ["c1", "c2"], "tasks": ["t1"]}
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Engine:
+def engine(tmp_path: Path) -> Iterator[Engine]:
     eng = make_community_engine(tmp_path / "community.db")
     create_community_schema(eng)
-    return eng
+    yield eng
+    eng.dispose()
 
 
 @pytest.fixture
@@ -310,3 +312,35 @@ def test_unfinished_lists_what_a_sweep_has_to_resume(ledger: ErasureLedger) -> N
     ledger.complete(claim("complete"))
 
     assert {row.subject_id for row in ledger.unfinished()} == {"pending", "running", "failed"}
+
+
+def test_ids_found_after_the_claim_are_added_not_replaced(ledger: ErasureLedger) -> None:
+    """R9-284 review L2: the row step records conversations started after the claim."""
+    erasure_id = _claim(ledger)
+
+    ledger.add_captured(erasure_id, "conversations", ["c3", "c1"])
+
+    row = ledger.get(SubjectKind.PERSONA, _PERSONA)
+    assert row is not None
+    assert row.captured == {"conversations": ["c1", "c2", "c3"], "tasks": ["t1"]}
+
+
+@pytest.mark.parametrize(
+    ("name", "ids"),
+    [("Conversations", ["c1"]), ("conversations", ["a text with spaces"])],
+)
+def test_added_ids_are_held_to_the_same_shape(
+    ledger: ErasureLedger, name: str, ids: list[str]
+) -> None:
+    erasure_id = _claim(ledger)
+
+    with pytest.raises(ErasureRecordError):
+        ledger.add_captured(erasure_id, name, ids)
+
+
+def test_nothing_is_added_to_a_finished_erasure(ledger: ErasureLedger) -> None:
+    erasure_id = _claim(ledger)
+    ledger.complete(erasure_id)
+
+    with pytest.raises(ErasureRecordError):
+        ledger.add_captured(erasure_id, "conversations", ["c9"])

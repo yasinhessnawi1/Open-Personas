@@ -1,0 +1,8 @@
+# Open Persona erasure check (R9-284). Installed by bin/provision.sh.
+[Unit]
+Description=Open Persona stalled erasure check
+OnFailure=open-persona-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/open-persona/repo/deploy/server/bin/erasurecheck.sh

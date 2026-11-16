@@ -108,6 +108,7 @@ def _store(owner: str, embedder: SentenceTransformerEmbedder, tmp_path: Path) ->
         engine=engine,  # type: ignore[arg-type]
         embedder=embedder,  # type: ignore[arg-type]
         audit_logger=JSONLAuditLogger(tmp_path / "audit"),
+        persona_guard=False,
     )
 
 

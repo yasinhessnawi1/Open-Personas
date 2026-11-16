@@ -15,6 +15,7 @@ from persona.errors import PersonaError
 __all__ = [
     "EntityResolutionError",
     "GraphError",
+    "GraphPersonaGoneError",
     "GraphIndexError",
     "GraphNodeNotFoundError",
     "GraphProtectedNodeError",
@@ -88,6 +89,41 @@ class GraphProtectedNodeError(GraphError):
     not deletable). This closes the Phase-1 gap where SELF was reachable as a
     merge/evolve/delete target. ``context`` conventionally carries the offending
     ``node_id`` and the attempted operation.
+    """
+
+
+class GraphPersonaGoneError(GraphError):
+    """A graph write names a persona whose row is gone (R9-284).
+
+    The graph is owner scoped, so nothing else stops a write from putting an erased persona
+    back into it. With the persona guard on, every write that carries a persona id holds that
+    persona's row (``FOR KEY SHARE``) in its own transaction: the erasure's row delete waits for
+    it, and a write that comes after the delete is refused with this. ``context`` carries the
+    persona id.
+    """
+
+
+class GraphMergeConflictError(GraphError):
+    """A merge's done write found the member changed since its pending record (R9-284).
+
+    The done write is a compare-and-set: the member must still be merged into the canonical
+    with the very pending record this merge wrote. If it is not (deleted, given back, merged
+    again), the write is refused and the entity links it was committing with roll back.
+    ``context`` carries the member id.
+    """
+
+
+#: How many times a caller reads afresh and tries again after a stale node write (node CAS).
+STALE_WRITE_ATTEMPTS = 3
+
+
+class GraphStaleWriteError(GraphMergeConflictError):
+    """A node write found the row changed since the writer read it (R9-284, node CAS).
+
+    Every write that replaces a node's content, metadata or provenance trail names the
+    ``content_hash`` it read, and the row must still have it (D-R9-284-node-cas). Callers
+    re-read and retry; consolidation treats it as a merge conflict and gives the member back,
+    hence the parent class. ``context`` carries the node id.
     """
 
 

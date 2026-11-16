@@ -150,7 +150,7 @@ def env(pg_engine: Engine) -> Iterator[tuple[PostgresGraphBackend, _FakeIndex, C
     with pg_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=pg_engine)
+    backend = PostgresGraphBackend(engine=pg_engine, persona_guard=False)
     index = _FakeIndex()
     pass_ = ConsolidationPass(
         backend=backend, index=index, embedder=_Embedder(), audit_logger=MemoryAuditLogger()
@@ -360,3 +360,64 @@ def test_pass_is_owner_scoped(
     assert all(nid.startswith("u1::") for nid in touched)
     # u2's would-be member is untouched (non-vacuous: it WOULD merge if scanned).
     assert backend.is_merged("u2", "u2::node::00000001") is False
+
+
+def test_pending_merges_names_only_records_still_pending(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 5 MEDIUM-1: the next run gives these back; done and stateless ones stay."""
+    import json  # noqa: PLC0415
+
+    backend, _, _ = env
+    records = {
+        "u1::node::00000001": json.dumps({"state": "pending", "run_id": "r"}, sort_keys=True),
+        "u1::node::00000002": json.dumps({"state": "done", "run_id": "r"}, sort_keys=True),
+        "u1::node::00000003": json.dumps({"run_id": "r"}, sort_keys=True),
+        "u1::node::00000004": '{"state": "pending"',  # not JSON: never cast, never returned
+    }
+    backend.insert_node("u1", _node("u1::node::00000000", "Canonical"), _vec(0))
+    for node_id, raw in records.items():
+        backend.insert_node("u1", _node(node_id, node_id), _vec(0))
+        backend.set_merged_into(
+            "u1",
+            node_id,
+            merged_into="u1::node::00000000",
+            metadata={"_k7_merge": raw},
+            content_hash="h",
+            expected_content_hash=_node(node_id, node_id).content_hash,
+            expected_provenance=_node(node_id, node_id).provenance,
+        )
+
+    assert backend.pending_merges("u1") == ["u1::node::00000001"]
+    assert backend.pending_merges("u2") == []
+
+
+def test_associate_entities_returning_names_only_the_links_it_inserted(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 6 L-4: the merge records only these, so a give back removes only these."""
+    backend, _, _ = env
+    _seed_cluster(backend)
+    member = "u1::node::00000001"
+
+    assert backend.associate_entities_returning("u1", member, [E]) == [], "already linked"
+    assert backend.associate_entities_returning("u1", C, [E, E]) == [E]
+    assert backend.associate_entities_returning("u1", C, [E]) == []
+
+
+def test_a_member_given_back_is_not_its_own_entity_carrier(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 8 LOW-4: the member being given back still links E itself; that must not
+    keep the canonical's copy of the link."""
+    backend, _, pass_ = env
+    _seed_cluster(backend)
+    member = "u1::node::00000001"
+    pass_.run("u1")
+    assert E in backend.entities_for_node("u1", C), "the merge copied E onto the canonical"
+
+    assert backend.entity_carriers("u1", C, [E], excluding=member) == {}, "only M carries E"
+    assert pass_.unmerge("u1", member) is True
+
+    assert E not in backend.entities_for_node("u1", C), "the copy went with the give back"
+    assert E in backend.entities_for_node("u1", member), "M keeps its own link"

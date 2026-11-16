@@ -45,6 +45,7 @@ def make_graph_index(
         GraphIndexError: turbovec selected without a ``float32_fetch``.
     """
     if settings.index_backend == "turbovec":
+        # R9-284: an erased node's entry stays in RAM until a rebuild; the rerank reads Postgres.
         if float32_fetch is None:
             raise GraphIndexError(
                 "turbovec index requires float32_fetch (the rerank is mandatory)",

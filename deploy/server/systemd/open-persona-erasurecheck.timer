@@ -1,0 +1,10 @@
+# Open Persona erasure check, hourly.
+[Unit]
+Description=Run the Open Persona erasure check
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

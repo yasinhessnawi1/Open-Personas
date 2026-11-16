@@ -178,7 +178,7 @@ def _seed(migrated_engine: Engine) -> None:
             ),
             {"p": _PERSONA, "u": _OWNER},
         )
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     vec = [1.0] + [0.0] * (DIM - 1)
     backend.insert_node_if_absent(_OWNER, _node(_PLAIN, _PLAIN_CONTENT), vec)
     backend.insert_node_if_absent(
@@ -195,7 +195,7 @@ def _seed(migrated_engine: Engine) -> None:
 
 def _pipeline(app_engine: Engine, backend: object) -> InitiativePipeline:
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
     )
     return InitiativePipeline(
         grounding=GroundingChecker(
@@ -236,7 +236,7 @@ def test_criterion_6_sensitive_content_never_becomes_the_subject(
     _seed(migrated_engine)
     backend = _HostileScanBackend(cite=sensitive_node)
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger()
+        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
     )
     token = current_user_id.set(_OWNER)
     try:

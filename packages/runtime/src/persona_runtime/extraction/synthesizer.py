@@ -36,6 +36,8 @@ from persona.schema.chunks import WriteSource
 from persona_runtime.extraction.means_guard import contains_self_harm_means
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from persona.backends.protocol import ChatBackend
     from persona.extraction import ExtractionCandidate, ExtractionInput, Extractor
     from persona.graph.protocol import EntityRegistry, GraphStore, MergeOutcome
@@ -62,6 +64,10 @@ class Synthesizer:
         entity_resolver: Canonical-entity resolution orchestrator (T3).
         update_resolver: Update/contradiction target resolver (T4).
         graph_store: K0's user-scoped graph store (the single write path).
+        persona_exists: Asked after the model call and before every merge whether the
+            interaction's persona still exists (R9-284 review H2). A synthesis already past
+            its read can outlive an erasure that has finished, graph step included; the graph
+            is owner scoped, so nothing else refuses its writes. ``None`` skips the check.
     """
 
     def __init__(
@@ -71,16 +77,29 @@ class Synthesizer:
         entity_resolver: EntityResolver,
         update_resolver: UpdateResolver,
         graph_store: GraphStore,
+        persona_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self._extractor = extractor
         self._entities = entity_resolver
         self._updates = update_resolver
         self._store = graph_store
+        self._persona_exists = persona_exists
+
+    def _erased(self, interaction: ExtractionInput) -> bool:
+        """Whether the interaction's persona was erased while this synthesis ran."""
+        if self._persona_exists is None or not interaction.persona_id:
+            return False
+        if self._persona_exists(interaction.persona_id):
+            return False
+        _logger.info(
+            "synthesis stopped: its persona was erased", interaction_id=interaction.interaction_id
+        )
+        return True
 
     async def synthesise(self, owner_id: str, interaction: ExtractionInput) -> list[MergeOutcome]:
         """Extract → resolve → merge for one interaction. Returns the merge outcomes."""
         candidates = await self._extractor.extract(interaction)
-        if not candidates:
+        if not candidates or self._erased(interaction):
             return []
 
         base_provenance = NodeProvenance(
@@ -124,6 +143,8 @@ class Synthesizer:
                     interaction_id=interaction.interaction_id,
                 )
                 continue
+            if self._erased(interaction):
+                break
             knowledge = self._assemble(
                 owner_id, candidate, mention_to_id, concept_to_node, base_provenance
             )
@@ -217,6 +238,7 @@ def build_synthesizer(
     graph_store: GraphStore,
     registry: EntityRegistry,
     backend: ChatBackend,
+    persona_exists: Callable[[str], bool] | None = None,
 ) -> Synthesizer:
     """Compose a ``Synthesizer`` from the wired graph store, registry, and tier backend.
 
@@ -235,4 +257,5 @@ def build_synthesizer(
         entity_resolver=EntityResolver(registry=registry, judge=LlmEntityJudge(backend=backend)),
         update_resolver=UpdateResolver(store=graph_store),
         graph_store=graph_store,
+        persona_exists=persona_exists,
     )

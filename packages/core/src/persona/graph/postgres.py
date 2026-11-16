@@ -22,10 +22,12 @@ Decisions in force:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import BigInteger, delete, func, or_, select, text, update
+from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona.graph._schema import (
@@ -37,7 +39,13 @@ from persona.graph._schema import (
     graph_node_versions,
     graph_nodes,
 )
-from persona.graph.errors import GraphIndexError
+from persona.graph.errors import (
+    GraphIndexError,
+    GraphMergeConflictError,
+    GraphPersonaGoneError,
+    GraphStaleWriteError,
+)
+from persona.graph.maintenance_lock import graph_maintenance_held
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -47,17 +55,118 @@ from persona.graph.models import (
     NodeProvenance,
     NodeVersion,
     TypedLink,
+    _compute_node_hash,
     make_edge_id,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterable, Sequence
+    from contextlib import AbstractContextManager
 
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 __all__ = ["PostgresGraphBackend"]
 
 _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
+
+# R9-284: a graph write holds the persona it names (see PostgresGraphBackend._hold_personas).
+_HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
+
+
+def trail_is(expected: Sequence[NodeProvenance]) -> Any:  # noqa: ANN401 - SQL
+    """The row's trail is the one the writer read (D-R9-284-node-cas, the trail half).
+
+    The content hash spans name, content and metadata, not the trail, and the erasure can
+    rewrite a trail alone (a consolidation entry's alias names name no persona, so the write
+    guard does not see them). Compared as jsonb, so key order does not matter, with null
+    fields stripped on both sides: a row written before a field was added lacks the key that
+    the writer's parsed copy has as null.
+    """
+    read = [p.model_dump(mode="json", exclude_none=True) for p in expected]
+    return func.jsonb_strip_nulls(graph_nodes.c.provenance) == func.jsonb_strip_nulls(
+        literal(read, JSONB)
+    )
+
+
+def _without_nulls(value: object) -> object:
+    """``jsonb_strip_nulls`` in Python: object fields whose value is null go, recursively."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(v) for v in value]
+    return value
+
+
+def trail_matches(stored: object, expected: Sequence[NodeProvenance]) -> bool:
+    """:func:`trail_is` for a row already read (the supersede's locked row)."""
+    read = [p.model_dump(mode="json", exclude_none=True) for p in expected]
+    return _without_nulls(stored or []) == _without_nulls(read)
+
+
+def _refuse_if_stale(conn: Connection, owner_id: str, node_id: str, exists: bool | None) -> None:
+    """A CAS that wrote nothing: raise if the row is there (it changed), else it is absent."""
+    if exists is None:
+        exists = (
+            conn.execute(
+                select(graph_nodes.c.id).where(
+                    graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
+                )
+            ).first()
+            is not None
+        )
+    if exists:
+        raise GraphStaleWriteError(
+            "the node changed since it was read", context={"node_id": node_id}
+        )
+
+
+def keep_merge_record(metadata: dict[str, str], current: object) -> dict[str, str]:
+    """``metadata`` with the row's merge record in place of the caller's (round 9 MEDIUM-1).
+
+    Only ``_k7_merge``: other ``_k7_*`` keys (the alias list) are the caller's to write.
+    """
+    kept = {k: v for k, v in metadata.items() if k != "_k7_merge"}
+    if isinstance(current, dict) and isinstance(current.get("_k7_merge"), str):
+        kept["_k7_merge"] = current["_k7_merge"]
+    return kept
+
+
+def reopen_statement(owner_id: str, node_id: str, invalidated_by: str) -> Any:  # noqa: ANN401
+    """Re-open the node's edges closed under ``invalidated_by``, but never a second open row.
+
+    A writer may have opened a new row with the same id since (K2's typed links do not look at
+    merged endpoints); re-opening the old one too would break the one-open-row-per-id index
+    and fail the whole statement, every time (R9-284 round 8 MEDIUM-B). That row is left
+    closed: the fact is open already. Shared by unmerge and the erasure's unmerge of members.
+    """
+    open_twin = graph_edges.alias("open_twin")
+    newest = graph_edges.alias("newest")
+    return (
+        update(graph_edges)
+        .where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.invalidated_by == invalidated_by,
+            or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+            # Only the newest row per id closed under this tag (round 9 LOW-3): two rows of one
+            # fact closed under the same tag would otherwise both reopen, and break the index.
+            graph_edges.c.edge_key
+            == select(func.max(newest.c.edge_key))
+            .where(
+                newest.c.owner_id == owner_id,
+                newest.c.id == graph_edges.c.id,
+                newest.c.invalidated_by == invalidated_by,
+            )
+            .scalar_subquery(),
+            ~select(open_twin.c.id)
+            .where(
+                open_twin.c.owner_id == owner_id,
+                open_twin.c.id == graph_edges.c.id,
+                open_twin.c.invalid_at.is_(None),
+            )
+            .exists(),
+        )
+        .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+    )
 
 
 class PostgresGraphBackend:
@@ -69,8 +178,31 @@ class PostgresGraphBackend:
     statements. Vectors are supplied pre-computed (the store embeds once).
     """
 
-    def __init__(self, *, engine: Engine) -> None:
+    def __init__(self, *, engine: Engine, persona_guard: bool) -> None:
         self._engine = engine
+        # R9-284: hold each named persona's row in the write's own transaction. Off where the
+        # schema has no ``personas`` table (the graph's own tests); the api turns it on.
+        self._persona_guard = persona_guard
+
+    def _hold_personas(
+        self, conn: Connection, owner_id: str, persona_ids: Iterable[str | None]
+    ) -> None:
+        """Hold the row of every persona this write names, or refuse the write (R9-284).
+
+        ``FOR KEY SHARE`` on the owner's persona row, in the same transaction as the write: an
+        erasure's row delete waits for this write to commit (and its graph step then removes
+        what it wrote), and a write after the delete finds no row and raises
+        :class:`GraphPersonaGoneError`. A no-op with the guard off.
+        """
+        if not self._persona_guard:
+            return
+        for persona_id in sorted({p for p in persona_ids if p}):
+            held = conn.execute(_HOLD_PERSONA, {"p": persona_id, "o": owner_id}).first()
+            if held is None:
+                raise GraphPersonaGoneError(
+                    "a graph write names a persona that no longer exists",
+                    context={"persona_id": persona_id[:80]},
+                )
 
     # ===== nodes ===========================================================
 
@@ -86,6 +218,7 @@ class PostgresGraphBackend:
         row = self._node_to_row(owner_id, node, embedding, embedding_model)
         stmt = pg_insert(graph_nodes).values(**row).returning(graph_nodes.c.surrogate)
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
             surrogate = conn.execute(stmt).scalar_one()
         return int(surrogate)
 
@@ -113,6 +246,7 @@ class PostgresGraphBackend:
             .returning(graph_nodes.c.surrogate)
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
             surrogate = conn.execute(stmt).scalar_one_or_none()
         return None if surrogate is None else int(surrogate)
 
@@ -122,27 +256,78 @@ class PostgresGraphBackend:
         node: ConceptNode,
         embedding: Sequence[float],
         *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        guard_personas: Sequence[str] = (),
     ) -> int | None:
         """Replace a node's mutable fields in place (the extend path, D-K0-4).
 
         Keeps ``id``/``owner_id``/``surrogate``/``created_at``; refreshes content,
         embedding, metadata, wellbeing tag, content_hash, and the provenance trail.
         Returns the ``surrogate`` (for index replace) or ``None`` if absent.
+
+        A compare-and-set (D-R9-284-node-cas): the row must still have
+        ``expected_content_hash`` and ``expected_provenance``, the hash and trail the caller
+        read, or :class:`GraphStaleWriteError` is raised and nothing is written; the caller
+        re-reads and retries. The trail is compared because the hash does not cover it.
+
+        The merge record (``_k7_merge``) is lifecycle state, like ``merged_into``: the row's
+        is written, whatever the caller's metadata says (round 9 MEDIUM-1). Under the CAS a
+        stale copy can no longer drop it, but a fresh read can still carry foreign metadata: a
+        version restore writes the snapshot's, which may hold an old record or none. So the
+        row's record is read (no lock: if the row changes before the write, the CAS refuses)
+        and kept, and the content hash is recomputed over the metadata actually written.
         """
         self._check_dim(embedding, node.id)
-        stmt = (
+        with self._engine.begin() as conn:
+            self._hold_personas(
+                conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
+            )
+            current = conn.execute(
+                select(graph_nodes.c.metadata).where(
+                    graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id
+                )
+            ).scalar_one_or_none()
+            metadata = keep_merge_record(dict(node.metadata), current)
+            content_hash = (
+                node.content_hash
+                if metadata == dict(node.metadata)
+                else _compute_node_hash(node.concept_name, node.content, metadata)
+            )
+            surrogate = conn.execute(
+                self._update_node_statement(
+                    owner_id, node, embedding, embedding_model, metadata, content_hash
+                ).where(
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+            ).scalar_one_or_none()
+            if surrogate is None:
+                _refuse_if_stale(conn, owner_id, node.id, current is not None)
+        return None if surrogate is None else int(surrogate)
+
+    def _update_node_statement(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        embedding_model: str,
+        metadata: dict[str, str],
+        content_hash: str,
+    ) -> Any:  # noqa: ANN401 - an UPDATE
+        return (
             update(graph_nodes)
             .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
             .values(
                 node_kind=str(node.node_kind),
                 concept_name=node.concept_name,
                 content=node.content,
-                metadata=dict(node.metadata),
+                metadata=metadata,
                 wellbeing_category=node.wellbeing_category,
                 embedding=list(embedding),
                 embedding_model=embedding_model,
-                content_hash=node.content_hash,
+                content_hash=content_hash,
                 provenance=[p.model_dump(mode="json") for p in node.provenance],
                 # Advance the dirty-neighbourhood watermark (K7-D-4). salience /
                 # last_evidence_epoch / merged_into are lifecycle state and are
@@ -151,9 +336,6 @@ class PostgresGraphBackend:
             )
             .returning(graph_nodes.c.surrogate)
         )
-        with self._engine.begin() as conn:
-            surrogate = conn.execute(stmt).scalar_one_or_none()
-        return None if surrogate is None else int(surrogate)
 
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
         stmt = select(graph_nodes).where(
@@ -485,60 +667,101 @@ class PostgresGraphBackend:
 
     # ===== node versions (Spec K7, K7-D-1) ================================
 
-    def snapshot_node_version(
+    def supersede_node(
         self,
         owner_id: str,
-        node_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
         *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         valid_at: datetime,
         invalid_at: datetime,
         invalidated_by: str | None,
+        embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        guard_personas: Sequence[str] = (),
     ) -> int | None:
-        """Preserve the node's CURRENT state as a window-closed version row (K7-D-1).
+        """Snapshot the node as a closed version and write ``node`` over it, in one commit.
 
-        Reads the live ``graph_nodes`` row (content + **embedding** + metadata +
-        wellbeing + content_hash + provenance-trail snapshot) and inserts an immutable
-        version row window-closed at ``[valid_at, invalid_at]`` — the §0-honest
-        preservation the caller runs BEFORE overwriting the node with the superseding
-        account. Nothing is destroyed; the prior embedding is byte-exact for restore.
-        ``invalidated_at`` (bookkeeping, K7-D-10) records the SYSTEM close moment.
-        Returns the assigned ``version_key`` (the ``superseded_version_id`` source),
-        or ``None`` if the node vanished.
+        The supersede (K7-D-1) under the node CAS (R9-284 round 11): the personas are held,
+        the row is locked ``FOR NO KEY UPDATE``, its hash and trail are checked against the
+        caller's read (:class:`GraphStaleWriteError` on a mismatch, before anything is
+        written), the version is inserted from the locked row, and the update runs. A lost
+        CAS leaves no version behind, and a version is never taken of a row an erasure has
+        since rewritten. Returns the version key, or ``None`` if the node is gone.
         """
+        self._check_dim(embedding, node.id)
         with self._engine.begin() as conn:
+            self._hold_personas(
+                conn,
+                owner_id,
+                [
+                    *(p.persona_id for p in node.provenance),
+                    *(p.persona_id for p in expected_provenance),
+                    *guard_personas,
+                ],
+            )
             row = (
                 conn.execute(
-                    select(graph_nodes).where(
-                        graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
-                    )
+                    select(graph_nodes)
+                    .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
+                    .with_for_update(key_share=True)
                 )
                 .mappings()
                 .one_or_none()
             )
             if row is None:
                 return None
-            ins = (
-                pg_insert(graph_node_versions)
-                .values(
-                    owner_id=owner_id,
-                    node_id=node_id,
-                    node_kind=row["node_kind"],
-                    concept_name=row["concept_name"],
-                    content=row["content"],
-                    metadata=dict(row["metadata"]),
-                    wellbeing_category=row["wellbeing_category"],
-                    embedding=list(row["embedding"]),
-                    embedding_model=row["embedding_model"],
-                    content_hash=row["content_hash"],
-                    provenance=row["provenance"],
-                    valid_at=valid_at,
-                    invalid_at=invalid_at,
-                    invalidated_by=invalidated_by,
-                    invalidated_at=datetime.now(UTC),
+            if row["content_hash"] != expected_content_hash or not trail_matches(
+                row["provenance"], expected_provenance
+            ):
+                raise GraphStaleWriteError(
+                    "the node changed since it was read", context={"node_id": node.id}
                 )
-                .returning(graph_node_versions.c.version_key)
+            version_key = int(
+                conn.execute(
+                    pg_insert(graph_node_versions)
+                    .values(
+                        owner_id=owner_id,
+                        node_id=node.id,
+                        node_kind=row["node_kind"],
+                        concept_name=row["concept_name"],
+                        content=row["content"],
+                        metadata=dict(row["metadata"]),
+                        wellbeing_category=row["wellbeing_category"],
+                        embedding=list(row["embedding"]),
+                        embedding_model=row["embedding_model"],
+                        content_hash=row["content_hash"],
+                        provenance=row["provenance"],
+                        valid_at=valid_at,
+                        invalid_at=invalid_at,
+                        invalidated_by=invalidated_by,
+                        invalidated_at=datetime.now(UTC),
+                    )
+                    .returning(graph_node_versions.c.version_key)
+                ).scalar_one()
             )
-            return int(conn.execute(ins).scalar_one())
+            metadata = keep_merge_record(dict(node.metadata), row["metadata"])
+            content_hash = (
+                node.content_hash
+                if metadata == dict(node.metadata)
+                else _compute_node_hash(node.concept_name, node.content, metadata)
+            )
+            surrogate = conn.execute(
+                self._update_node_statement(
+                    owner_id, node, embedding, embedding_model, metadata, content_hash
+                ).where(
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+            ).scalar_one_or_none()
+            if surrogate is None:
+                # The locked row passed the check, so this is not expected; refuse inside
+                # the transaction so the version inserted above rolls back with it.
+                raise GraphStaleWriteError(
+                    "the node changed since it was read", context={"node_id": node.id}
+                )
+        return version_key
 
     def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
         """The max ``invalid_at`` across a node's versions — when its CURRENT account began.
@@ -625,7 +848,9 @@ class PostgresGraphBackend:
 
     # ===== edges ===========================================================
 
-    def upsert_edge(self, owner_id: str, link: TypedLink) -> None:
+    def upsert_edge(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> None:
         """Insert or replace the OPEN edge for a fact-id (idempotent assertion, D-K0-2, K7-D-1).
 
         The conflict target is the partial unique index ``(id) WHERE invalid_at IS
@@ -644,7 +869,9 @@ class PostgresGraphBackend:
             index_where=graph_edges.c.invalid_at.is_(None),
             set_=update_cols,
         )
+        asserted_by = link.provenance.persona_id if link.provenance is not None else None
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
             conn.execute(stmt)
 
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
@@ -801,7 +1028,12 @@ class PostgresGraphBackend:
             else entity.provenance.model_dump(mode="json"),
             "created_at": entity.created_at,
         }
+        named = [
+            entity.provenance.persona_id if entity.provenance else None,
+            *(a.persona_id for a in entity.aliases),
+        ]
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, named)
             conn.execute(pg_insert(graph_entities).values(**row))
 
     def get_entity(self, owner_id: str, entity_id: str) -> CanonicalEntity | None:
@@ -813,17 +1045,26 @@ class PostgresGraphBackend:
         return None if row is None else self._row_to_entity(dict(row))
 
     def add_alias(self, owner_id: str, entity_id: str, alias: EntityAlias) -> None:
-        """Append a confirmed surface form to an entity's alias set (K2's MERGE callback)."""
-        existing = self.get_entity(owner_id, entity_id)
-        if existing is None:
-            return
-        merged = [*existing.aliases, alias]
+        """Append a confirmed surface form to an entity's alias set (K2's MERGE callback).
+
+        One UPDATE appends in SQL, in the transaction that holds the alias's persona (R9-284
+        review MEDIUM-2): reading the list on one connection and writing it back on another
+        could rewrite an alias an erasure had just removed, or lose a concurrent append. An
+        alias already in the set, field for field, is not appended again. A missing entity is
+        a no-op, as before.
+        """
+        new = func.jsonb_build_array(literal(alias.model_dump(mode="json"), JSONB))
         stmt = (
             update(graph_entities)
-            .where(graph_entities.c.id == entity_id, graph_entities.c.owner_id == owner_id)
-            .values(aliases=[a.model_dump(mode="json") for a in merged])
+            .where(
+                graph_entities.c.id == entity_id,
+                graph_entities.c.owner_id == owner_id,
+                ~graph_entities.c.aliases.contains(new),
+            )
+            .values(aliases=graph_entities.c.aliases.concat(new))
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [alias.persona_id])
             conn.execute(stmt)
 
     def find_entity_by_text(self, owner_id: str, normalized_name: str) -> CanonicalEntity | None:
@@ -883,10 +1124,34 @@ class PostgresGraphBackend:
 
     # ===== node ↔ entity associations (T6b) ===============================
 
-    def associate_entities(self, owner_id: str, node_id: str, entity_ids: Sequence[str]) -> None:
+    def associate_entities(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        guard_personas: Sequence[str] = (),
+    ) -> None:
         """Record that ``node_id`` concerns each entity (idempotent on the PK)."""
+        self.associate_entities_returning(
+            owner_id, node_id, entity_ids, guard_personas=guard_personas
+        )
+
+    def associate_entities_returning(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        guard_personas: Sequence[str] = (),
+    ) -> list[str]:
+        """:meth:`associate_entities`, returning the links this call inserted (round 6 L-4).
+
+        A link the node already had is not returned: consolidation records only these, so a
+        give back never removes a link the canonical had before the merge.
+        """
         if not entity_ids:
-            return
+            return []
         now = datetime.now(UTC)
         rows = [
             {"owner_id": owner_id, "node_id": node_id, "entity_id": eid, "created_at": now}
@@ -896,9 +1161,78 @@ class PostgresGraphBackend:
             pg_insert(graph_node_entities)
             .values(rows)
             .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
+            .returning(graph_node_entities.c.entity_id)
         )
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            self._hold_personas(conn, owner_id, guard_personas)
+            return [str(e) for e in conn.execute(stmt).scalars()]
+
+    def associate_entities_recording(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        member_id: str,
+        merged_into: str,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        record: Callable[[list[str]], tuple[dict[str, str], str]],
+        guard_personas: Sequence[str] = (),
+    ) -> list[str]:
+        """Link ``node_id`` to the entities and write ``member_id``'s record, in one commit.
+
+        Consolidation's done write (R9-284 round 7 HIGH-1): ``record`` is given the links
+        the insert actually made and returns the member's metadata and content hash, so the
+        record lists exactly those. One transaction holding ``guard_personas``: if the guard
+        refuses, or anything fails, neither the links nor the record land.
+
+        The record write is a compare-and-set (round 8 LOW-1, D-R9-284-node-cas): the member
+        must still be merged into ``merged_into`` and have ``expected_content_hash``, the hash
+        of its pending record. Otherwise :class:`GraphMergeConflictError` is raised and the
+        links roll back with it.
+        """
+        now = datetime.now(UTC)
+        rows = [
+            {"owner_id": owner_id, "node_id": node_id, "entity_id": eid, "created_at": now}
+            for eid in dict.fromkeys(entity_ids)
+        ]
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, guard_personas)
+            added: list[str] = []
+            if rows:
+                added = [
+                    str(e)
+                    for e in conn.execute(
+                        pg_insert(graph_node_entities)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
+                        .returning(graph_node_entities.c.entity_id)
+                    ).scalars()
+                ]
+            metadata, content_hash = record(added)
+            written = conn.execute(
+                update(graph_nodes)
+                .where(
+                    graph_nodes.c.id == member_id,
+                    graph_nodes.c.owner_id == owner_id,
+                    graph_nodes.c.merged_into == merged_into,
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+                .values(
+                    merged_into=merged_into,
+                    metadata=metadata,
+                    content_hash=content_hash,
+                    updated_at=datetime.now(UTC),
+                )
+            ).rowcount
+            if written != 1:
+                raise GraphMergeConflictError(
+                    "the member changed since its pending merge record",
+                    context={"node_id": member_id},
+                )
+        return added
 
     def nodes_for_entity(self, owner_id: str, entity_id: str) -> list[ConceptNode]:
         """All nodes that concern ``entity_id`` (criterion 2 — the entity thread)."""
@@ -974,9 +1308,13 @@ class PostgresGraphBackend:
         return int(row[0]), (None if row[1] is None else _as_utc(row[1]))
 
     def advance_marker(
-        self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
+        self, owner_id: str, *, epoch: int, watermark: datetime | None, last_run_at: datetime
     ) -> None:
-        """Advance the marker after a pass (ordinal epoch + dirty watermark + run time)."""
+        """Advance the marker after a pass (ordinal epoch + dirty watermark + run time).
+
+        ``watermark`` may be ``None``: a run that skipped its merges before any run set one
+        still records its epoch (R9-284 round 9 LOW-1).
+        """
         stmt = (
             update(graph_consolidation_markers)
             .where(graph_consolidation_markers.c.owner_id == owner_id)
@@ -1061,6 +1399,24 @@ class PostgresGraphBackend:
             rows = conn.execute(select(graph_edges).where(*conds)).mappings().all()
         return [self._row_to_link(dict(r)) for r in rows]
 
+    def open_assertion_edges_keyed(
+        self, owner_id: str, node_id: str
+    ) -> list[tuple[TypedLink, int]]:
+        """A node's OPEN temporal/causal edges with each row's ``edge_key``, in one query.
+
+        ``edge_key`` names the exact row a mirror copies (R9-284 LOW-3); read with the edge,
+        not by a second query that could see a different row (round 5 LOW-1).
+        """
+        conds = [
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.invalid_at.is_(None),
+            graph_edges.c.link_type.in_([str(LinkType.TEMPORAL), str(LinkType.CAUSAL)]),
+            or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+        ]
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(graph_edges).where(*conds)).mappings().all()
+        return [(self._row_to_link(dict(r)), int(r["edge_key"])) for r in rows]
+
     def close_edges_incident(
         self, owner_id: str, node_id: str, *, invalidated_by: str
     ) -> list[str]:
@@ -1082,14 +1438,128 @@ class PostgresGraphBackend:
 
     def reopen_edges_incident(self, owner_id: str, node_id: str, *, invalidated_by: str) -> None:
         """Re-open the edges incident to ``node_id`` closed under ``invalidated_by`` (unmerge)."""
+        with self._engine.begin() as conn:
+            conn.execute(reopen_statement(owner_id, node_id, invalidated_by))
+
+    def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]:
+        """The owner's graph maintenance lock, held on its own session (D-R9-284-graph-mutex)."""
+        return graph_maintenance_held(self._engine, owner_id)
+
+    def pending_merges(self, owner_id: str) -> list[str]:
+        """Members whose merge record is still ``pending``: their act stopped part way (R9-284).
+
+        Filtered in SQL by the record's text, then read in Python, so a record that is not JSON
+        is never cast; one without a state is done.
+        """
+        record = graph_nodes.c.metadata["_k7_merge"].astext
         stmt = (
-            update(graph_edges)
+            select(graph_nodes.c.id, record)
             .where(
-                graph_edges.c.owner_id == owner_id,
-                graph_edges.c.invalidated_by == invalidated_by,
-                or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into.is_not(None),
+                record.contains('"state": "pending"'),
             )
-            .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+            .order_by(graph_nodes.c.id)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        pending = []
+        for node_id, raw in rows:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and parsed.get("state") == "pending":
+                pending.append(str(node_id))
+        return pending
+
+    def insert_edge_if_absent(
+        self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
+    ) -> bool:
+        """Open ``link`` unless an open edge with its id exists; return whether it is now ``link``.
+
+        Consolidation's mirror (R9-284 review MEDIUM-1): an id is ``src::type::dst``, so an
+        edge another persona (or the user) already asserted on the canonical has the mirror's
+        id, and upserting the mirror would overwrite it with SYSTEM provenance; that is ``False``.
+        An open edge that already is this merge's mirror (another member of the same run made
+        it, round 5 MEDIUM-2) is ``True``: the caller adds its own source to the mirror.
+        """
+        row = self._link_to_row(owner_id, link)
+        stmt = (
+            pg_insert(graph_edges)
+            .values(**row)
+            .on_conflict_do_nothing(
+                index_elements=["id"], index_where=graph_edges.c.invalid_at.is_(None)
+            )
+            .returning(graph_edges.c.id)
+        )
+        asserted_by = link.provenance.persona_id if link.provenance is not None else None
+        reason = link.provenance.reason if link.provenance is not None else None
+        same_mirror = select(graph_edges.c.id).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.id == link.id,
+            graph_edges.c.invalid_at.is_(None),
+            cast(graph_edges.c.provenance, JSONB).contains({"source": "system", "reason": reason}),
+        )
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
+            if conn.execute(stmt).first() is not None:
+                return True
+            return reason is not None and conn.execute(same_mirror).first() is not None
+
+    def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]:
+        """Which of ``edge_keys`` are still rows of the owner's edges."""
+        if not edge_keys:
+            return set()
+        stmt = select(graph_edges.c.edge_key).where(
+            graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(list(edge_keys))
+        )
+        with self._engine.connect() as conn:
+            return {int(k) for k in conn.execute(stmt).scalars()}
+
+    def merge_records_listing(
+        self, owner_id: str, *, run_id: str, mirror_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """``{member id: raw record}`` for each merged member of ``run_id`` listing a mirror id.
+
+        Across every canonical (round 6 M-2). Narrowed in SQL by the record's text, then
+        decided in Python on the parsed record, so a record that is not JSON is never cast.
+        """
+        if not mirror_ids:
+            return {}
+        record = graph_nodes.c.metadata["_k7_merge"].astext
+        stmt = (
+            select(graph_nodes.c.id, record)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into.is_not(None),
+                record.contains(run_id, autoescape=True),
+                or_(*(record.contains(m, autoescape=True) for m in mirror_ids)),
+            )
+            .order_by(graph_nodes.c.id)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        wanted = set(mirror_ids)
+        out: dict[str, str] = {}
+        for node_id, raw in rows:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(parsed, dict) or parsed.get("run_id") != run_id:
+                continue
+            if wanted & {str(m) for m in parsed.get("mirrored_edges", [])}:
+                out[str(node_id)] = str(raw)
+        return out
+
+    def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None:
+        """Remove the OPEN row for ``edge_id`` only while it is still the merge's mirror."""
+        stmt = delete(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.id == edge_id,
+            graph_edges.c.invalid_at.is_(None),
+            cast(graph_edges.c.provenance, JSONB).contains({"source": "system", "reason": tag}),
         )
         with self._engine.begin() as conn:
             conn.execute(stmt)
@@ -1103,6 +1573,34 @@ class PostgresGraphBackend:
         )
         with self._engine.begin() as conn:
             conn.execute(stmt)
+
+    def entity_carriers(
+        self, owner_id: str, canonical_id: str, entity_ids: Sequence[str], *, excluding: str
+    ) -> dict[str, str]:
+        """``{entity: a member merged into the canonical that links it}``, but ``excluding``.
+
+        The first such member by id. For a give back that must keep a link another member
+        still carries (R9-284 round 8 LOW-4).
+        """
+        if not entity_ids:
+            return {}
+        stmt = (
+            select(graph_node_entities.c.entity_id, graph_nodes.c.id)
+            .join(graph_nodes, graph_nodes.c.id == graph_node_entities.c.node_id)
+            .where(
+                graph_node_entities.c.owner_id == owner_id,
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into == canonical_id,
+                graph_nodes.c.id != excluding,
+                graph_node_entities.c.entity_id.in_(list(entity_ids)),
+            )
+            .order_by(graph_nodes.c.id)
+        )
+        out: dict[str, str] = {}
+        with self._engine.connect() as conn:
+            for entity_id, member_id in conn.execute(stmt).all():
+                out.setdefault(str(entity_id), str(member_id))
+        return out
 
     def remove_entity_associations(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
@@ -1126,8 +1624,15 @@ class PostgresGraphBackend:
         merged_into: str | None,
         metadata: dict[str, str],
         content_hash: str,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        guard_personas: Sequence[str] = (),
     ) -> None:
         """Set/clear ``merged_into`` + bookkeeping ``metadata``/``content_hash`` (K7-D-4.4).
+
+        A compare-and-set on ``expected_content_hash`` (D-R9-284-node-cas): a row that changed
+        since the caller read it raises :class:`GraphStaleWriteError`; a missing row is a
+        no-op.
 
         Targeted update — does NOT touch ``content``/``embedding`` (§0 byte-equality) or
         ``salience``/``last_evidence_epoch``. Advances ``updated_at`` so a re-scan sees
@@ -1135,7 +1640,12 @@ class PostgresGraphBackend:
         """
         stmt = (
             update(graph_nodes)
-            .where(graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id)
+            .where(
+                graph_nodes.c.id == node_id,
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.content_hash == expected_content_hash,
+                trail_is(expected_provenance),
+            )
             .values(
                 merged_into=merged_into,
                 metadata=metadata,
@@ -1144,7 +1654,9 @@ class PostgresGraphBackend:
             )
         )
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            self._hold_personas(conn, owner_id, guard_personas)
+            if conn.execute(stmt).rowcount != 1:
+                _refuse_if_stale(conn, owner_id, node_id, None)
 
     def merged_members(self, owner_id: str, canonical_id: str) -> list[ConceptNode]:
         """The nodes consolidated into ``canonical_id`` (K5 inspection / unmerge scope)."""

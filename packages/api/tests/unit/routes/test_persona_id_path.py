@@ -14,6 +14,7 @@ stubbed to the ownership answer a database would give.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +24,7 @@ from persona_api.app import create_app
 from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig
 from persona_api.errors import PersonaNotFoundError
-from persona_api.services import persona_service
+from persona_api.services import erasure_start, persona_service
 from persona_api.storage import LocalFileStorage
 from persona_api.workspace_paths import PERSONA_ID_PATTERN
 
@@ -129,11 +130,23 @@ def test_a_delete_with_anything_but_a_persona_id_never_reaches_the_service(
 
 
 def test_a_delete_of_a_real_id_still_reaches_the_service(
-    client: TestClient, deletes: list[str]
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The erasure itself is pinned in test_persona_erase_route.py; here only the id gets in."""
+    begun: list[str] = []
+
+    def _begin(**kwargs: Any) -> Any:  # noqa: ANN401
+        begun.append(str(kwargs["persona_id"]))
+        return SimpleNamespace(id="erasure_" + "a" * 32, captured={})
+
+    monkeypatch.setattr(
+        erasure_start, "erase_deps_from_state", lambda _state: SimpleNamespace(engine=None)
+    )
+    monkeypatch.setattr(erasure_start, "begin_persona_erasure", _begin)
+    monkeypatch.setattr(erasure_start, "dispatch_persona_erasure", lambda *_a, **_k: True)
     resp = client.delete(f"/v1/personas/{_MINE}", headers=_auth())
-    assert resp.status_code == 204, resp.text
-    assert deletes == [_MINE]
+    assert resp.status_code == 202, resp.text
+    assert begun == [_MINE]
 
 
 def test_an_encoded_slash_in_the_id_is_not_a_persona_route(

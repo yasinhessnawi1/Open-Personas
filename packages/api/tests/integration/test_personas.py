@@ -131,7 +131,7 @@ def test_create_get_patch_delete_round_trip(client: tuple[TestClient, str]) -> N
 
     # delete
     resp = c.delete(f"/v1/personas/{pid}", headers=_auth(uid))
-    assert resp.status_code == 204
+    assert resp.status_code == 202  # R9-284: gone at once, erased by a job
     resp = c.get(f"/v1/personas/{pid}", headers=_auth(uid))
     assert resp.status_code == 404
 

@@ -63,6 +63,7 @@ from persona_api.schemas import (
     GrantToolRequest,
     PersonaCapabilities,
     PersonaDetail,
+    PersonaErasureAccepted,
     PersonaMemoriesResponse,
     PersonaMemoryItem,
     PersonaSpecialitySummary,
@@ -79,6 +80,7 @@ from persona_api.services import (
     avatar_billing,
     catalog_service,
     consent_service,
+    erasure_start,
     notifications_service,
     persona_service,
     skill_consent_service,
@@ -1462,19 +1464,37 @@ async def set_skill_consent(
     return _persona_speciality(spec, state)
 
 
-@router.delete("/{persona_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{persona_id}", status_code=status.HTTP_202_ACCEPTED, response_model=PersonaErasureAccepted
+)
 async def delete_persona(
     persona_id: PersonaIdPath,
     request: Request,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> None:
-    """Delete a persona + all its conversations and memory (cascade)."""
-    persona_service.delete_persona(
-        rls_engine=request.app.state.rls_engine,
-        persona_id=persona_id,
-        workspace_root=getattr(request.app.state, "workspace_root", None),
+) -> PersonaErasureAccepted:
+    """Erase a persona (R9-284, D-R9-284-erase): gone at once, erased by a resumable job.
+
+    Claimed in the ledger, fenced and its row deleted before this answers (see
+    :mod:`persona_api.services.erasure_start`); its live turns and runs are cancelled; then its
+    memory, files and remaining rows are erased by the ``persona_erase`` job, or in the
+    background where this process runs no worker for it.
+    """
+    state = request.app.state
+    deps = erasure_start.erase_deps_from_state(state)
+    if deps is None:
+        # Nothing could erase the memory: refuse rather than delete the row and strand it.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "persona erasure is unavailable")
+    erasure = await asyncio.to_thread(
+        erasure_start.begin_persona_erasure,
+        rls_engine=state.rls_engine,
+        platform_engine=deps.engine,
         owner_id=user.id,
+        persona_id=persona_id,
     )
+    _cancel_live_work(state, erasure.captured)
+    if not erasure_start.dispatch_persona_erasure(state, erasure):
+        background_tasks.add_task(erasure_start.run_persona_erasure_inline, deps, erasure)
     audit_service.record(
         engine=request.app.state.rls_engine,
         user_id=user.id,
@@ -1487,3 +1507,22 @@ async def delete_persona(
         owner_id=user.id,
         reason="persona.deleted",
     )
+    return PersonaErasureAccepted(erasure_id=erasure.id)
+
+
+def _cancel_live_work(state: object, captured: dict[str, list[str]]) -> None:
+    """Cancel the erased persona's in-flight chat turns and runs (best effort, this process).
+
+    Their writes would be refused anyway (the row is gone); this stops the model calls and the
+    billing behind them. A voice session is not reached from here (registered follow-up).
+    """
+    turns = getattr(state, "chat_turn_registry", None)
+    for conversation_id in captured.get("conversations", []):
+        if turns is not None:
+            turns.request_cancel(conversation_id)
+    runs = getattr(state, "run_registry", None)
+    for run_id in captured.get("runs", []):
+        handle = runs.get(run_id) if runs is not None else None
+        if handle is not None and handle.task is not None and not handle.task.done():
+            handle.cancel_token.cancel()
+            handle.task.cancel()

@@ -96,6 +96,10 @@ class SynthesisRepository(Protocol):
         """Read the marker + transcript + summary, or ``None`` if the interaction is gone."""
         ...
 
+    def exists(self, conn: Connection, *, owner_id: str, payload: SynthesisJobPayload) -> bool:
+        """Whether the interaction is still there: one row, not the transcript (R9-284)."""
+        ...
+
     def advance(
         self,
         conn: Connection,
@@ -191,12 +195,21 @@ class SynthesisHandler:
                     "candidates": str(len(outcomes)),
                 },
             )
-            self._repo.advance(
-                conn,
-                owner_id=context.owner_id,
-                payload=payload,
-                high_water_mark=window.high_water_mark,
-            )
+            # R9-284 review H2: the conversation (or its persona) can be erased while the
+            # model call is awaited. The synthesizer checks the persona before each merge;
+            # this is the handler's own look, before it writes the marker.
+            if not self._repo.exists(conn, owner_id=context.owner_id, payload=payload):
+                _logger.info(
+                    "synthesis interaction deleted during the model call",
+                    interaction_id=payload.interaction_id,
+                )
+            else:
+                self._repo.advance(
+                    conn,
+                    owner_id=context.owner_id,
+                    payload=payload,
+                    high_water_mark=window.high_water_mark,
+                )
 
         # Spec M3 (T5): owner-bill the extractor's real cost, keyed on the job's own
         # idempotency key so a re-delivered synthesis re-runs the extractor and hits the
@@ -267,6 +280,20 @@ class PgSynthesisRepository:
             messages=transcript,
             compacted_summary=convo.compacted_summary or "",
         )
+
+    def exists(
+        self,
+        conn: Connection,
+        *,
+        owner_id: str,  # noqa: ARG002 - the job's connection is already owner scoped
+        payload: SynthesisJobPayload,
+    ) -> bool:
+        if payload.interaction_kind != InteractionKind.CONVERSATION.value:
+            return False
+        found = conn.execute(
+            select(conversations.c.id).where(conversations.c.id == payload.interaction_id)
+        ).first()
+        return found is not None
 
     def advance(
         self,

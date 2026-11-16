@@ -80,6 +80,7 @@ def test_cross_persona_knowledge_reaches_persona_b_prompt(
         engine=app_engine,  # type: ignore[arg-type]
         embedder=real_embedder,  # type: ignore[arg-type]
         audit_logger=JSONLAuditLogger(tmp_path / "audit"),
+        persona_guard=False,
     )
     settings = GraphSettings()
     retriever = HybridRetriever(store=graph_store, settings=settings)
@@ -145,6 +146,7 @@ def test_irrelevant_turn_injects_nothing_for_persona_b(
         engine=app_engine,  # type: ignore[arg-type]
         embedder=real_embedder,  # type: ignore[arg-type]
         audit_logger=JSONLAuditLogger(tmp_path / "audit"),
+        persona_guard=False,
     )
     settings = GraphSettings()
     retriever = HybridRetriever(store=graph_store, settings=settings)

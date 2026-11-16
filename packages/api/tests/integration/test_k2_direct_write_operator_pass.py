@@ -77,7 +77,10 @@ async def test_record_user_fact_operator_pass(
     seeded: Engine, app_engine: Engine, embedder: Embedder, tmp_path: Path
 ) -> None:
     graph_store = build_graph_store(
-        engine=app_engine, embedder=embedder, audit_logger=JSONLAuditLogger(tmp_path / "audit")
+        engine=app_engine,
+        embedder=embedder,
+        audit_logger=JSONLAuditLogger(tmp_path / "audit"),
+        persona_guard=False,
     )
     # Bind the owner's RLS scope per the production worker/request wiring.
     token = current_user_id.set(_OWNER)

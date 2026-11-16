@@ -27,8 +27,9 @@ from datetime import datetime  # noqa: TC003 - a dataclass field, read at runtim
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from persona.logging import get_logger
 from sqlalchemy import case, func, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from persona_api.db.models import erasures as erasures_t
 from persona_api.errors import ErasureRecordError
@@ -37,6 +38,12 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
 __all__ = ["Erasure", "ErasureLedger", "ErasureState", "SubjectKind"]
+
+# Insufficient privilege (a missing grant, and a row level security refusal) and undefined
+# table: the probe failures that will not change until an operator acts.
+_REFUSED_FOR_GOOD = frozenset({"42501", "42P01"})
+
+_log = get_logger("api.erasure")
 
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _ID = re.compile(r"\S{1,200}")
@@ -134,6 +141,47 @@ class ErasureLedger:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def can_write(self) -> bool | None:
+        """Whether this engine can open an erasure: a probe row, always rolled back (review L7).
+
+        Run at boot and again by readiness while it fails. On hosted the ledger is SELECT-only
+        to ``persona_app``, so an api whose platform engine is that role (or lacks the grant)
+        would accept every delete and then fail every erasure. ``False`` only for what will not
+        change by itself (review L3): a permission or row level security refusal, or no ledger
+        table. ``None`` for anything else (the database briefly unreachable), so a transient
+        boot error does not pin readiness. The exception class is logged, never its message.
+        """
+        try:
+            with self._engine.connect() as conn:
+                transaction = conn.begin()
+                try:
+                    conn.execute(
+                        insert(erasures_t).values(
+                            id=f"erasure_{uuid.uuid4().hex}",
+                            owner_id="boot-probe",
+                            subject_kind=SubjectKind.PERSONA.value,
+                            subject_id=f"probe_{uuid.uuid4().hex}",
+                            captured={},
+                        )
+                    )
+                finally:
+                    transaction.rollback()
+        except DBAPIError as exc:
+            sqlstate = getattr(exc.orig, "sqlstate", None)
+            missing_table = "no such table" in str(exc.orig).lower()  # SQLite says it so
+            definitive = sqlstate in _REFUSED_FOR_GOOD or missing_table
+            _log.error(
+                "erasure ledger probe failed error={err} sqlstate={code} definitive={definitive}",
+                err=type(exc.orig).__name__,
+                code=sqlstate or "none",
+                definitive=definitive,
+            )
+            return False if definitive else None
+        except Exception as exc:  # noqa: BLE001 - unknown means "look again", never "ready"
+            _log.error("erasure ledger probe failed error={err}", err=type(exc).__name__)
+            return None
+        return True
+
     def get(self, subject_kind: SubjectKind, subject_id: str) -> Erasure | None:
         """This subject's open erasure, else its latest finished one, else ``None``."""
         finished_last = case((erasures_t.c.state == ErasureState.COMPLETE.value, 1), else_=0)
@@ -194,6 +242,23 @@ class ErasureLedger:
         if claimed is None:  # pragma: no cover - the row was just written or found
             raise _refuse("claim_not_visible")
         return claimed
+
+    def add_captured(self, erasure_id: str, name: str, ids: Sequence[str]) -> None:
+        """Add ids to one captured list (a union), for rows found after the claim.
+
+        The claim's capture is a snapshot; the row step re-reads under the persona's row lock
+        what was created since (a conversation started mid-delete), so its rows are erased
+        too. Ids only, like every other write here.
+        """
+        clean = _require_captured({name: ids})[name]
+        with self._engine.begin() as conn:
+            row = self._lock_open(conn, erasure_id)
+            merged = sorted({*row.captured.get(name, []), *clean})
+            conn.execute(
+                update(erasures_t)
+                .where(erasures_t.c.id == erasure_id)
+                .values(captured={**row.captured, name: merged}, updated_at=func.now())
+            )
 
     def record_step(self, erasure_id: str, step: str, counts: Mapping[str, int]) -> None:
         """Add one run of a step to what that step has recorded so far.
