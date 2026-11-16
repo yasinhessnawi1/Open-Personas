@@ -288,11 +288,15 @@ sudo rsync -aHAX --numeric-ids --delete /var/lib/containerd/ /srv/containerd/
 # 5. the copy is exact: this dry run must print nothing; stop here (and roll back) if it does
 sudo rsync -aHAXn --numeric-ids --delete -i /var/lib/containerd/ /srv/containerd/
 
-# 6. no root set yet (this must print nothing; a root already set is not this procedure's),
-#    then back up the config and prepend the root
-sudo grep -nE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml
-sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289
-sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
+# 6. only when no root is set yet (a root already set is not this procedure's: STOP), back
+#    up the config (cp -n never overwrites an earlier backup) and prepend the root. Safe to
+#    paste twice: the second time it stops.
+if sudo grep -qE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml; then
+  echo "STOP: containerd's config already sets a root"
+else
+  sudo cp -an /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289 \
+    && sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
+fi
 
 # 7. keep the old root aside; do not delete it yet
 sudo mv /var/lib/containerd /var/lib/containerd.old
