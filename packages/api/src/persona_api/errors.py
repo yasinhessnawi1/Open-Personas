@@ -278,6 +278,15 @@ class RunRecordEmptyError(PersonaError):
     """
 
 
+class MemoryNodeChangedError(PersonaError):
+    """A Memory node changed while it was being written, every try (→ 409; R9-284).
+
+    The graph's node writes are a compare-and-set on what the writer read
+    (D-R9-284-node-cas); the store re-reads and retries a few times, and when another writer
+    keeps winning the user is asked to try again. ``context`` carries the ``node_id``.
+    """
+
+
 class MemoryNodeNotFoundError(PersonaError):
     """Raised when a Memory (graph) node is not the current user's (→ 404; Spec K5).
 
@@ -621,6 +630,17 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_body("run_not_found", exc.message or "run not found", exc.context),
+        )
+
+    @app.exception_handler(MemoryNodeChangedError)
+    async def _memory_node_changed_409(_: Request, exc: MemoryNodeChangedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=_body(
+                "memory_node_changed",
+                exc.message or "this memory changed, try again",
+                exc.context,
+            ),
         )
 
     @app.exception_handler(MemoryNodeNotFoundError)
