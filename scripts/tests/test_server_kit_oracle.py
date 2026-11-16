@@ -631,7 +631,16 @@ def test_provision_sets_containerds_root_before_docker_restarts() -> None:
     assert "containerd.service.d/10-open-persona.conf" in call
 
 
-STUB_DOCKER = '#!/usr/bin/env bash\ncat "${STUB_DIR}/docker.out" 2>/dev/null || true\n'
+# docker info answers unless docker.down exists; ps -aq and images -q print their own files
+# (review M1: a stub that cannot tell them apart could not catch a guard that asks only one).
+STUB_DOCKER = (
+    "#!/usr/bin/env bash\n"
+    'case "$1" in\n'
+    '  info) [ -e "${STUB_DIR}/docker.down" ] && exit 1; exit 0 ;;\n'
+    '  ps) cat "${STUB_DIR}/ps.out" 2>/dev/null || true ;;\n'
+    '  images) cat "${STUB_DIR}/images.out" 2>/dev/null || true ;;\n'
+    "esac\n"
+)
 STUB_SYSTEMCTL = '#!/usr/bin/env bash\necho "$*" >> "${STUB_DIR}/systemctl.log"\n'
 # `install -d -m MODE DIR`, as the lib calls it: the directory, without the chmod (which Git
 # Bash cannot do under a Windows temp directory).
@@ -657,6 +666,9 @@ def _apply(
     images: str,
     dropin: str | None,
     failing: tuple[tuple[str, str], ...] = (),
+    containers: str = "",
+    docker_down: bool = False,
+    held: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """apply_containerd_root on files under tmp_path, with docker and systemctl stubbed."""
     stubs = tmp_path / "stubs"
@@ -669,7 +681,14 @@ def _apply(
     ):
         (stubs / name).write_text(body, encoding="utf-8", newline="\n")
         (stubs / name).chmod(0o755)
-    (stubs / "docker.out").write_text(images, encoding="utf-8", newline="\n")
+    (stubs / "images.out").write_text(images, encoding="utf-8", newline="\n")
+    (stubs / "ps.out").write_text(containers, encoding="utf-8", newline="\n")
+    if docker_down:
+        (stubs / "docker.down").touch()
+    old_root = tmp_path / "var-lib-containerd"
+    if held is not None:  # a file in this directory under the old root
+        (old_root / held).mkdir(parents=True)
+        (old_root / held / "x").write_text("layer", encoding="utf-8")
     etc = tmp_path / "etc"
     etc.mkdir()
     if config is not None:
@@ -679,6 +698,7 @@ def _apply(
     result = _bash(
         # A POSIX path for PATH: a "C:/..." entry would split at its colon.
         f'set -eu; export STUB_DIR="{stubs.as_posix()}"; '
+        f'export CONTAINERD_DEFAULT_ROOT="{old_root.as_posix()}"; '
         f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"; '
         f'. "{(LIB / "containerd_root.sh").as_posix()}"; '
         f'apply_containerd_root "{(etc / "config.toml").as_posix()}" '
@@ -780,3 +800,40 @@ def test_a_step_that_fails_fails_the_whole_and_restarts_nothing(
     assert result.returncode == 1
     assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
     assert systemctl == []
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("signal", "said"),
+    [
+        ({"containers": "c0ffee\n"}, "Docker holds containers or images"),
+        ({"docker_down": True}, "does not answer"),
+        ({"held": "io.containerd.content.v1.content/blobs/sha256"}, "holds image content"),
+        ({"held": "io.containerd.snapshotter.v1.overlayfs/snapshots"}, "holds image content"),
+    ],
+    ids=["containers only", "docker down", "blobs on disk", "snapshots on disk"],
+)
+def test_the_move_is_refused_whatever_says_something_is_there(
+    tmp_path: Path, signal: dict[str, Any], said: str
+) -> None:
+    """Review M1: containers alone, an unreachable Docker, or content on the old root's disk."""
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None, **signal
+    )
+    assert result.returncode == 1
+    assert said in result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
+
+
+@needs_bash
+def test_empty_content_directories_do_not_stop_the_move(tmp_path: Path) -> None:
+    old_root = tmp_path / "var-lib-containerd"
+    for d in (
+        "io.containerd.content.v1.content/blobs/sha256",
+        "io.containerd.snapshotter.v1.overlayfs/snapshots",
+    ):
+        (old_root / d).mkdir(parents=True)
+    result, systemctl = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    assert systemctl == ["daemon-reload", "restart containerd"]

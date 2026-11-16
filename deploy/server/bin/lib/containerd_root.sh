@@ -40,6 +40,35 @@ containerd_config_with_root() {
   fi
 }
 
+# containerd_holds_nothing
+# Whether moving containerd's root would orphan nothing (review M1). Two signals, either one
+# refuses (status 1, a message on stderr):
+#   * containerd's current root (CONTAINERD_DEFAULT_ROOT, /var/lib/containerd: the config sets
+#     none, or this would not be asked) holds image content: blobs, or snapshots of any
+#     snapshotter. Read from the disk, so it holds when Docker is down;
+#   * Docker, when installed, holds containers or images; or it is installed and does not
+#     answer, so what it holds cannot be known.
+containerd_holds_nothing() {
+  local current="${CONTAINERD_DEFAULT_ROOT:-/var/lib/containerd}" d
+  for d in "${current}/io.containerd.content.v1.content/blobs/sha256" \
+      "${current}"/io.containerd.snapshotter.v1.*/snapshots; do
+    if [ -d "${d}" ] && [ -n "$(ls -A "${d}" 2>/dev/null)" ]; then
+      echo "containerd's root ${current} holds image content (${d#"${current}/"}); move it by hand first (RUNBOOK.md)" >&2
+      return 1
+    fi
+  done
+  if command -v docker >/dev/null 2>&1; then
+    if ! docker info >/dev/null 2>&1; then
+      echo "Docker is installed but does not answer, so what it holds cannot be known" >&2
+      return 1
+    fi
+    if [ -n "$(docker ps -aq 2>/dev/null)" ] || [ -n "$(docker images -q 2>/dev/null)" ]; then
+      echo "Docker holds containers or images; move them before moving containerd's root" >&2
+      return 1
+    fi
+  fi
+}
+
 # apply_containerd_root <config.toml> <root> <data mount, or ""> <drop-in file>
 # Puts containerd's root at <root>, decided first and changed second:
 #   * the config already sets <root> (and the drop-in is in place): nothing happens at all,
@@ -57,10 +86,7 @@ apply_containerd_root() {
   local config="$1" root="$2" mount="$3" dropin="$4" wanted unit config_changed=0 dropin_changed=0
   wanted="$(containerd_config_with_root "${config}" "${root}")" || return 1
   if [ "${wanted}" != "$(cat "${config}" 2>/dev/null || true)" ]; then
-    if [ -n "$(docker ps -aq 2>/dev/null)$(docker images -q 2>/dev/null)" ]; then
-      echo "Docker holds containers or images; move them before putting containerd's root at ${root}" >&2
-      return 1
-    fi
+    containerd_holds_nothing || return 1
     install -d -m 0711 "${root}" || return 1
     install -d -m 0755 "$(dirname "${config}")" || return 1
     # The first rewrite keeps the package's config beside it; a later one never overwrites it.
