@@ -178,3 +178,15 @@ def test_webhook_404_when_billing_disabled() -> None:
     payload = _event()
     resp = _post(client, payload, sig=_sign(payload))
     assert resp.status_code == 404
+
+
+def test_the_route_hands_the_handlers_the_gateways_own_client() -> None:
+    """R9-284 T9 round 3 LOW-6 (the reviewer's M15): the erased-account guard needs it."""
+    handler = MagicMock()
+    client = _make_client(handler=handler)
+    payload = _event("evt_client")
+
+    _post(client, payload, sig=_sign(payload))
+
+    context = handler.call_args[0][1]
+    assert context.stripe_client is client.app.state.stripe_gateway.client

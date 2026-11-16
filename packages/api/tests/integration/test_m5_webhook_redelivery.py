@@ -46,6 +46,7 @@ class _VerifyingGateway:
 
     publishable_key = "pk_test"
     webhook_secret = _SECRET
+    client = None  # no Stripe calls here; the erased-account guard is skipped (R9-284 T9)
 
     def construct_event(self, *, payload: bytes, sig_header: str) -> object:
         import stripe
