@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from persona.graph.errors import GraphNodeNotFoundError, GraphStaleWriteError
+from persona.graph.errors import GraphNodeBusyError, GraphNodeNotFoundError, GraphStaleWriteError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import MemoryNodeChangedError, MemoryNodeNotFoundError
@@ -175,9 +175,19 @@ async def delete_node(
     caller's (existence-disclosure-safe — never reveals another tenant's node exists).
     """
     store = _graph_store(request)
-    deleted = store is not None and memory_service.delete(store, user.id, node_id)
+    try:
+        deleted = store is not None and memory_service.delete(store, user.id, node_id)
+    except GraphNodeBusyError as exc:
+        raise _reorganising(node_id) from exc
     if not deleted:
         raise MemoryNodeNotFoundError("memory not found", context={"node_id": node_id})
+
+
+def _reorganising(node_id: str) -> MemoryNodeChangedError:
+    """A consolidation run holds the owner's graph past the delete's lock timeout (R9-287)."""
+    return MemoryNodeChangedError(
+        "this memory is being reorganised, try again", context={"node_id": node_id}
+    )
 
 
 def _forget_composition(
@@ -239,15 +249,18 @@ async def forget_node(
     evidence that still exists. 404 when the node is not the caller's.
     """
     store, backend, audit_logger, rls_engine = _forget_composition(request, user, node_id)
-    memory_service.forget(
-        graph_store=store,
-        memory_backend=backend,
-        audit_logger=audit_logger,
-        rls_engine=rls_engine,
-        owner_id=user.id,
-        node_id=node_id,
-        episodic=[(e.persona_id, e.chunk_id) for e in body.episodic],
-    )
+    try:
+        memory_service.forget(
+            graph_store=store,
+            memory_backend=backend,
+            audit_logger=audit_logger,
+            rls_engine=rls_engine,
+            owner_id=user.id,
+            node_id=node_id,
+            episodic=[(e.persona_id, e.chunk_id) for e in body.episodic],
+        )
+    except GraphNodeBusyError as exc:
+        raise _reorganising(node_id) from exc
 
 
 @router.get("/search", response_model=MemorySearchResponse)

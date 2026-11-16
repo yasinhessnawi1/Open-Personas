@@ -724,6 +724,8 @@ async def build_agent_session(
             audit_logger=audit.audit_logger,
             # R9-284: a write naming an erased persona is refused in its own transaction.
             persona_guard=True,
+            # R9-287: the voice agent never deletes a node, and persona-voice cannot import
+            # the api's releaser; deletes go through the api's memory routes.
             node_releaser=None,
         )
         if RecallSettings().unified_enabled:
