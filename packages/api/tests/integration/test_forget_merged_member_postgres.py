@@ -502,3 +502,35 @@ def test_a_legacy_mirror_two_members_share_goes_with_the_last_of_them(
     backend.delete_node(_OWNER, "f_m2")
 
     assert not _open(migrated_engine, "f_c", "f_x"), "the last lister took it"
+
+
+def test_a_forget_during_a_consolidation_waits_then_gives_up_and_deletes_nothing(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review MEDIUM-2: a real 55P03. A consolidation holds the owner's graph lock on its own
+    session; the delete waits its (here short) lock timeout, then raises the busy error the
+    routes answer 409 to, and nothing is gone. Once the lock is free it goes through."""
+    import time  # noqa: PLC0415
+
+    from persona.graph.errors import GraphNodeBusyError  # noqa: PLC0415
+    from persona.graph.maintenance_lock import graph_maintenance_held  # noqa: PLC0415
+
+    _merged(migrated_engine, embedder)
+    backend = PostgresGraphBackend(
+        engine=migrated_engine,
+        persona_guard=True,
+        node_releaser=ForgetReleaser(),
+        delete_lock_timeout="200ms",
+    )
+
+    with graph_maintenance_held(migrated_engine, _OWNER):
+        started = time.monotonic()
+        with pytest.raises(GraphNodeBusyError):
+            backend.delete_node(_OWNER, "f_m1")
+        waited = time.monotonic() - started
+
+    assert waited >= 0.15, "it waited for the lock"
+    assert "f_m1" in _nodes(migrated_engine), "nothing was deleted"
+    assert _open_edges_from_canonical(migrated_engine) == {"f_x", "f_y"}
+    assert backend.delete_node(_OWNER, "f_m1") is not None
