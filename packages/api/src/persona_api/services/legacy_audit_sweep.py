@@ -260,7 +260,7 @@ def _store_log_has_content(audit_root: Path, persona_id: str, rekey: dict[str, s
         if (
             event.get("reason") is not None
             or (isinstance(meta, dict) and AUDIT_CONTENT_KEYS & meta.keys())
-            or event.get("written_by") in rekey
+            or (isinstance(author := event.get("written_by"), str) and author in rekey)
         ):
             return True
     return False

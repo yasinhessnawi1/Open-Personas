@@ -89,7 +89,7 @@ def _scrubbed_line(
     )
     if not ours:
         return line
-    clean = {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}
+    clean = {**event, **dict.fromkeys(f for f in FREE_TEXT_FIELDS if f in event)}
     meta = event.get("metadata")
     if isinstance(meta, dict):  # review L2, and only a dict (L3)
         clean["metadata"] = {k: v for k, v in meta.items() if k not in content_keys}
@@ -188,7 +188,7 @@ def _contentless_line(
     if not isinstance(event, dict) or event.get("persona_id") != persona_id:
         return line
     meta = event.get("metadata")
-    clean = {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}
+    clean = {**event, **dict.fromkeys(f for f in FREE_TEXT_FIELDS if f in event)}
     if isinstance(meta, dict):
         # Only a dict is rewritten (review L3): a missing or odd metadata stays as it was, so
         # the line still reads back as the event it was.

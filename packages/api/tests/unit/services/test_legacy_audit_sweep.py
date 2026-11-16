@@ -609,3 +609,37 @@ def test_the_cli_exits_1_on_a_refusal(
     assert legacy_audit_sweep.main([]) == 1
 
     assert "refused=1" in capsys.readouterr().out
+
+
+def test_an_event_without_a_reason_key_is_already_clean_in_both_runs(
+    engine: Engine, root: Path
+) -> None:
+    """Round 2 LOW-2: the clean never adds a ``reason`` key, so the dry run tells the truth."""
+    store = root / f"{_GONE}.jsonl"
+    event = json.loads(_event(_GONE, source="user", written_by="author"))
+    del event["reason"]
+    event["metadata"] = {"to_version": "3"}
+    store.write_text(json.dumps(event) + "\n", "utf-8")
+    _old(store)
+    before = store.read_bytes()
+
+    dry = sweep_legacy_audit_files(engine, root, dry_run=True)
+    real = sweep_legacy_audit_files(engine, root)
+
+    assert dry == real == LegacySweepCounts(already_clean=1)
+    assert store.read_bytes() == before
+
+
+def test_an_author_that_is_not_a_string_is_never_a_rekey(engine: Engine, root: Path) -> None:
+    """Round 2 LOW-2: an odd ``written_by`` (a list) is neither a crash nor a change."""
+    store = root / f"{_GONE}.jsonl"
+    event = json.loads(_event(_GONE, source="system", written_by=None))
+    store.write_text(
+        json.dumps({**event, "written_by": ["a"], "reason": None, "metadata": {}}) + "\n",
+        "utf-8",
+    )
+    _old(store)
+
+    assert sweep_legacy_audit_files(engine, root, dry_run=True) == LegacySweepCounts(
+        already_clean=1
+    )
