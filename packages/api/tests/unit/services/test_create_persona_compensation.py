@@ -101,3 +101,26 @@ def test_a_create_that_succeeds_undoes_nothing(monkeypatch: pytest.MonkeyPatch) 
 
     assert persona_id.startswith("persona_")
     assert undone == []
+
+
+def test_a_registry_that_cannot_be_built_is_undone_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review LOW-4: the row is committed before the registry is built; that failure counts."""
+    undone: list[str] = []
+
+    def _no_registry(*_a: Any) -> Any:  # noqa: ANN401
+        msg = "the memory backend is unreachable"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(persona_service, "_build_registry", _no_registry)
+
+    with pytest.raises(ConnectionError, match="unreachable"):
+        persona_service.create_persona(
+            rls_engine=_Engine(),  # type: ignore[arg-type]
+            embedder=object(),  # type: ignore[arg-type]
+            audit_root=None,  # type: ignore[arg-type]
+            owner_id="u1",
+            yaml_str=_YAML,
+            compensate=undone.append,
+        )
+
+    assert len(undone) == 1
