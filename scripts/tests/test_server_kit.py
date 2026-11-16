@@ -1038,6 +1038,8 @@ def test_deploy_never_prunes_images_or_the_whole_system() -> None:
     the database is a volume, which an image or system prune could take with it."""
     deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in deploy.splitlines() if not line.lstrip().startswith("#"))
-    assert "image prune" not in code
-    assert "system prune" not in code
-    assert "volume prune" not in code
+    for destroys in ("image prune", "system prune", "volume prune", "volume rm", "image rm"):
+        assert destroys not in code, destroys
+    # Round 2 LOW-3: `down -v` drops the database volume; `rmi` the rollback image.
+    assert not re.search(r"\bdown\b[^\n]*\s-v\b", code), "down -v"
+    assert not re.search(r"\brmi\b", code), "rmi"
