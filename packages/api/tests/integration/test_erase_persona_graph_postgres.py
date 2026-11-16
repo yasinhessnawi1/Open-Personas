@@ -945,3 +945,68 @@ def test_a_mirror_two_clusters_made_survives_one_clusters_give_back(
     assert consolidation.unmerge(_OWNER, "t_b2") is True
 
     assert "t_c2::causal::t_c1" in _open_edges(migrated_engine, "t_c1"), "A1's mirror stays"
+
+
+def test_a_mirror_whose_sources_went_by_another_path_is_pruned(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 6 M-1 (c): the source row went outside the erasure; the next graph step cleans up.
+
+    A user's forget cannot make this shape on its own: forgetting the member takes its record
+    with it, and forgetting the other end takes the mirror too (they share that node). So the
+    source row is removed here directly, as any path outside the erasure (or a delete from
+    before R9-284) leaves it. The next graph step of the owner, for any persona, deletes the
+    mirror nothing backs and drops it from the record.
+    """
+    import json  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("o_c", "o_m", "o_x"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("o_m::causal::o_x", "o_m", "o_x", _PERSONA))
+    settings = GraphSettings()
+    ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "o_c"),
+        [backend.get_node(_OWNER, "o_m")],
+        run_id="ro",
+        now=_NOW,
+        epoch=1,
+    )
+    assert _open_edges(migrated_engine, "o_c") == {"o_c::causal::o_x"}
+    with migrated_engine.begin() as conn:  # the source row goes, not through the erasure
+        conn.execute(
+            text("DELETE FROM graph_edges WHERE owner_id = :o AND id = 'o_m::causal::o_x'"),
+            {"o": _OWNER},
+        )
+
+    unrelated = "persona_" + "c" * 32  # names nothing in this graph
+    counts = erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=unrelated)
+
+    assert _open_edges(migrated_engine, "o_c") == set(), "the orphan mirror is gone"
+    member = backend.get_node(_OWNER, "o_m")
+    assert member is not None
+    record = json.loads(member.metadata["_k7_merge"])
+    assert record["mirrored_edges"] == []
+    assert record["mirror_sources"] == {}
+    assert counts["orphan_mirrors_deleted"] == 1
+    assert counts["merge_records_pruned"] == 1

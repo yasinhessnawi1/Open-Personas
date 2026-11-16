@@ -81,3 +81,43 @@ def test_without_waiting_a_busy_lock_raises_before_any_other_statement() -> None
     ((first, params),) = engine.log
     assert first.startswith("SELECT pg_try_advisory_xact_lock(")
     assert params == {"owner": "u1"}
+
+
+class _EmptyResult:
+    rowcount = 0
+
+    def all(self) -> list[object]:
+        return []
+
+    def scalars(self) -> list[object]:
+        return []
+
+    def first(self) -> None:
+        return None
+
+    def scalar(self) -> bool:
+        return True
+
+
+class _EmptyConn(_Conn):
+    def execute(self, stmt: Any, params: Any = None) -> _EmptyResult:  # noqa: ANN401
+        self._log.append((str(stmt), params))
+        return _EmptyResult()
+
+
+class _EmptyEngine(_Engine):
+    @contextmanager
+    def begin(self) -> Iterator[_Conn]:
+        yield _EmptyConn(self.log)
+
+
+def test_the_graph_step_ends_with_the_orphan_prune() -> None:
+    """Round 6 M-1: the prune's counts are in the step's result, so the prune ran."""
+    counts = erase_persona_graph(
+        _EmptyEngine(),  # type: ignore[arg-type]
+        owner_id="u1",
+        persona_id="persona_" + "a" * 32,
+    )
+
+    assert counts["orphan_mirrors_deleted"] == 0
+    assert counts["merge_records_pruned"] == 0
