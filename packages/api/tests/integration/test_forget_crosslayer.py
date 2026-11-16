@@ -302,8 +302,15 @@ def test_forget_scans_every_owned_persona(app_client: TestClient, migrated_engin
     assert _find_graph_node(app_client, contains="Balto") is None
 
 
-def test_forget_routes_404_for_a_missing_node(app_client: TestClient) -> None:
-    """Existence-disclosure-safe 404 (mirrors the K5 ``delete_node`` pattern)."""
+def test_a_missing_node_404s_the_preview_and_its_forget_is_idempotent(
+    app_client: TestClient,
+) -> None:
+    """The preview 404s (existence-disclosure-safe, the K5 ``delete_node`` pattern).
+
+    The forget answers 204 (R9-287 round 2 MEDIUM-1): a forget is idempotent, so its retry
+    after a failed evidence delete still removes the confirmed evidence. A node that is not
+    the caller's reads the same as one that never existed, so nothing is disclosed.
+    """
     missing = "does-not-exist"
     prev = app_client.post(f"/v1/memory/nodes/{missing}/forget-preview", headers=_auth())
     assert prev.status_code == 404
@@ -311,4 +318,4 @@ def test_forget_routes_404_for_a_missing_node(app_client: TestClient) -> None:
     commit = app_client.post(
         f"/v1/memory/nodes/{missing}/forget", headers=_auth(), json={"episodic": []}
     )
-    assert commit.status_code == 404
+    assert commit.status_code == 204
