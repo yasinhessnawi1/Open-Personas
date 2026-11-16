@@ -24,6 +24,7 @@ from persona.graph.models import (
     NodeKind,
     NodeProvenance,
     TypedLink,
+    _compute_node_hash,
     make_self_node_id,
 )
 from persona.graph.postgres import PostgresGraphBackend
@@ -173,6 +174,8 @@ def test_the_persona_leaves_the_graph_and_everything_else_stays(graph: Engine) -
         "entities_deleted": 1,
         "entities_unattributed": 1,
         "entity_aliases_removed": 1,
+        "orphan_mirrors_deleted": 0,
+        "merge_records_pruned": 0,
     }
 
 
@@ -808,12 +811,13 @@ def test_a_legacy_comma_reason_loses_only_the_doomed_name(
             _OWNER, _node(node_id, persona).model_copy(update={"concept_name": name}), vector
         )
         record = {"run_id": "r1", "canonical": "l_k", "mirrored_edges": [], "added_entities": []}
+        metadata = {"_k7_merge": json.dumps(record)}
         backend.set_merged_into(
             _OWNER,
             node_id,
             merged_into="l_k",
-            metadata={"_k7_merge": json.dumps(record)},
-            content_hash="h",
+            metadata=metadata,
+            content_hash=_compute_node_hash(name, f"about {node_id}", metadata),
         )
     with migrated_engine.begin() as conn:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
@@ -874,12 +878,13 @@ def test_a_co_members_stale_listing_does_not_keep_a_mirror(
     b = backend.get_node(_OWNER, "s_b")
     assert b is not None
     crashed = {**json.loads(b.metadata["_k7_merge"]), "state": "pending"}
+    metadata = {**b.metadata, "_k7_merge": json.dumps(crashed, sort_keys=True)}
     backend.set_merged_into(
         _OWNER,
         "s_b",
         merged_into="s_c",
-        metadata={**b.metadata, "_k7_merge": json.dumps(crashed, sort_keys=True)},
-        content_hash="h",
+        metadata=metadata,
+        content_hash=_compute_node_hash(b.concept_name, b.content, metadata),
     )
     assert _open_edges(migrated_engine, "s_c") == {"s_c::causal::s_x"}
 
