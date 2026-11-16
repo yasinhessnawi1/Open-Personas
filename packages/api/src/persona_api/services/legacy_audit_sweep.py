@@ -93,6 +93,15 @@ class LegacySweepCounts:
     kept_known: int = 0
     scrubbed_backlog: int = 0
 
+    def acted(self) -> bool:
+        """Whether it claimed or scrubbed anything (``already_clean`` and ``kept_*`` are not)."""
+        return bool(
+            self.claimed
+            or self.scrubbed_unknown_owner
+            or self.scrubbed_ambiguous_owner
+            or self.scrubbed_backlog
+        )
+
     def lines(self) -> list[str]:
         return [f"{f.name}={getattr(self, f.name)}" for f in fields(self)]
 
@@ -346,7 +355,7 @@ def run_legacy_sweep_logged(engine: Engine, audit_root: Path | None) -> None:
     except Exception as exc:  # noqa: BLE001 - must not stop the process; logged loudly
         _log.error("legacy audit sweep failed error={err}", err=type(exc).__name__)
         return
-    if counts != LegacySweepCounts(kept_known=counts.kept_known):
+    if counts.acted():  # review L5: only what it did, never a quiet re-run
         _log.warning("legacy audit sweep {counts}", counts=" ".join(counts.lines()))
 
 

@@ -512,3 +512,30 @@ def test_the_cli_reports_a_failure_by_its_type_only(
     out = capsys.readouterr()
     assert "OSError" in out.err
     assert _GONE not in out.err + out.out
+
+
+@pytest.mark.parametrize(
+    ("counts", "warned"),
+    [
+        (LegacySweepCounts(claimed=1), True),
+        (LegacySweepCounts(scrubbed_unknown_owner=1), True),
+        (LegacySweepCounts(scrubbed_ambiguous_owner=1), True),
+        (LegacySweepCounts(scrubbed_backlog=1), True),
+        (LegacySweepCounts(already_clean=3, kept_known=2, kept_recent=1), False),
+    ],
+)
+def test_the_start_warns_only_when_the_sweep_did_something(
+    monkeypatch: pytest.MonkeyPatch,
+    counts: LegacySweepCounts,
+    warned: bool,  # noqa: FBT001
+) -> None:
+    """Review L5: a re-run that finds everything clean is not worth a warning."""
+    said: list[str] = []
+    monkeypatch.setattr(legacy_audit_sweep, "sweep_legacy_audit_files", lambda *_a: counts)
+    monkeypatch.setattr(
+        legacy_audit_sweep, "_log", type("L", (), {"warning": lambda _s, m, **_k: said.append(m)})()
+    )
+
+    legacy_audit_sweep.run_legacy_sweep_logged(None, None)  # type: ignore[arg-type]
+
+    assert bool(said) is warned
