@@ -9,6 +9,7 @@ Clerk steps' decisions with fakes. Nothing reaches Stripe or Clerk.
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -243,3 +244,96 @@ def test_our_route_without_clerk_configured_refuses(engine: Engine) -> None:
 def test_an_unknown_origin_is_refused(engine: Engine) -> None:
     with pytest.raises(ErasureRecordError):
         ae.begin_account_erasure(engine, owner_id=_OWNER, origin="elsewhere")
+
+
+# ---- the users row (H1, M19) and waiting for persona erasures (M7) ---------------------
+
+
+class _RowConn:
+    """Records each statement of the row step; ``personas`` is what the re-list finds."""
+
+    def __init__(self, personas: list[str], *, user: bool = True) -> None:
+        from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+        self.dialect = postgresql.dialect()
+        self.personas = personas
+        self.user = user
+        self.sql: list[str] = []
+
+    def execute(self, stmt: Any, params: Any = None) -> Any:  # noqa: ANN401, ARG002
+        sql = str(stmt.compile(dialect=self.dialect)) if hasattr(stmt, "compile") else str(stmt)
+        self.sql.append(" ".join(sql.split()))
+        rows: list[Any] = []
+        if sql.startswith("SELECT users.id"):
+            rows = [("x",)] if self.user else []
+        elif sql.startswith("SELECT personas.id"):
+            rows = [(p,) for p in self.personas]
+
+        class _R:
+            rowcount = 1
+
+            def first(self) -> Any:  # noqa: ANN401
+                return rows[0] if rows else None
+
+            def scalars(self) -> list[Any]:
+                return [r[0] for r in rows]
+
+        return _R()
+
+
+class _RowEngine:
+    def __init__(self, conn: _RowConn) -> None:
+        self.conn = conn
+
+    def begin(self) -> Any:  # noqa: ANN401
+        from contextlib import nullcontext  # noqa: PLC0415
+
+        return nullcontext(self.conn)
+
+
+def _row_step(conn: _RowConn) -> dict[str, int]:
+    deps = _deps(_RowEngine(conn))  # type: ignore[arg-type]
+    erasure = SimpleNamespace(owner_id=_OWNER)
+    return ae._step_row(deps, erasure)  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_the_row_step_locks_the_graph_then_the_user_then_relists_then_deletes() -> None:
+    conn = _RowConn([])
+
+    assert _row_step(conn) == {"users": 1}
+
+    assert "pg_advisory_xact_lock" in conn.sql[0], "the graph maintenance lock first"
+    assert conn.sql[1].startswith("SELECT users.id")
+    assert conn.sql[1].endswith("FOR UPDATE"), "no persona insert can commit past this"
+    assert conn.sql[2].startswith("SELECT personas.id"), "the personas listed again under it"
+    assert conn.sql[3].startswith("DELETE FROM users")
+
+
+def test_a_persona_created_during_the_erasure_stops_the_row_delete() -> None:
+    conn = _RowConn(["persona_late"])
+
+    with pytest.raises(ae.AccountErasureRaceError):
+        _row_step(conn)
+
+    assert not [s for s in conn.sql if s.startswith("DELETE")], "nothing cascaded away"
+
+
+def test_a_row_already_gone_deletes_nothing() -> None:
+    conn = _RowConn([], user=False)
+
+    assert _row_step(conn) == {"users": 0}
+    assert not [s for s in conn.sql if s.startswith("DELETE")]
+
+
+def test_the_account_waits_for_an_unfinished_persona_erasure(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer's survivor M7: a persona erasure held elsewhere is not finished, so the
+    personas step raises and the users row is not reached."""
+    ErasureLedger(engine).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id="persona_x", captured={}
+    )
+    monkeypatch.setattr(ae, "erase_persona", lambda *_a: None)  # another run holds its lock
+
+    with pytest.raises(ae.AccountErasurePendingError):
+        ae._erase_one_persona(_deps(engine), _OWNER, "persona_x")  # noqa: SLF001

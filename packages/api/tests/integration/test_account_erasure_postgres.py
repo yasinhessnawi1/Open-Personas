@@ -314,3 +314,48 @@ def test_clerks_own_deletion_skips_the_clerk_call(
 
     assert clerk.deleted == []
     assert _naming(seeded.engine, OWNER) == {}
+
+
+_LATE = "persona_dddddddddddddddddddddddddddddddd"
+
+
+def test_a_persona_created_during_the_erasure_is_erased_before_the_account_row(
+    seeded: Seeded,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H1: a persona committed after the personas step must not be cascaded away with
+    its memory, audit and files left behind. The row step finds it under the users-row lock and
+    stops; the resumed run erases it through the persona erasure, then deletes the row."""
+    real = dict(ae.STEPS)
+
+    def _billing_then_a_new_persona(deps: ae.AccountEraseDeps, erasure: Any) -> dict[str, int]:  # noqa: ANN401
+        with seeded.engine.begin() as conn:
+            row(conn, "personas", id=_LATE, owner_id=OWNER)
+        return real["billing"](deps, erasure)
+
+    monkeypatch.setattr(
+        ae,
+        "STEPS",
+        tuple((n, _billing_then_a_new_persona if n == "billing" else s) for n, s in ae.STEPS),
+    )
+    erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
+
+    with pytest.raises(ae.AccountErasureRaceError):
+        ae.erase_account(_deps(seeded, platform, embedder), erasure)
+    with seeded.engine.connect() as conn:
+        still = conn.execute(
+            text("SELECT count(*) FROM users WHERE id = :o"), {"o": OWNER}
+        ).scalar_one()
+    assert still == 1, "the row was not deleted with the new persona under it"
+
+    monkeypatch.setattr(ae, "STEPS", tuple(real.items()))
+    failed = ErasureLedger(seeded.engine).get(SubjectKind.ACCOUNT, OWNER)
+    assert failed is not None
+    ae.erase_account(_deps(seeded, platform, embedder), failed)
+
+    late = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, _LATE)
+    assert late is not None
+    assert late.state is ErasureState.COMPLETE, "it went through the persona erasure"
+    assert _naming(seeded.engine, OWNER) == {}

@@ -62,6 +62,7 @@ __all__ = [
     "STEPS",
     "AccountEraseDeps",
     "AccountErasurePendingError",
+    "AccountErasureRaceError",
     "begin_account_erasure",
     "erase_account",
 ]
@@ -100,6 +101,10 @@ class AccountEraseDeps:
 
 class AccountErasurePendingError(RuntimeError):
     """A persona erasure the account waits on has not finished (another run holds it)."""
+
+
+class AccountErasureRaceError(RuntimeError):
+    """A persona appeared after the personas step; the next run erases it before the row."""
 
 
 Step = Callable[[AccountEraseDeps, Erasure], dict[str, int]]
@@ -297,9 +302,25 @@ def _step_clerk(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
 
 
 def _step_row(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
+    """Delete the ``users`` row, and with it every row that names the owner (the cascade).
+
+    In one transaction: the owner's graph maintenance lock first (no consolidation interleaves
+    with the cascade), then the users row ``FOR UPDATE``. A persona insert needs a key share on
+    that row, so from here none can commit; the personas are listed again under the lock, and
+    if one was created after the personas step it is not cascaded away with its memory, audit
+    and files left behind: the step raises, and the resumed run erases it first.
+    """
+    owner = erasure.owner_id
     with deps.engine.begin() as conn:
-        take_graph_maintenance_lock(conn, erasure.owner_id)
-        users = conn.execute(delete(users_t).where(users_t.c.id == erasure.owner_id)).rowcount
+        take_graph_maintenance_lock(conn, owner)
+        held = conn.execute(
+            select(users_t.c.id).where(users_t.c.id == owner).with_for_update()
+        ).first()
+        if held is None:
+            return {"users": 0}
+        if _ids(conn, select(personas_t.c.id).where(personas_t.c.owner_id == owner)):
+            raise AccountErasureRaceError("a persona was created during the erasure")
+        users = conn.execute(delete(users_t).where(users_t.c.id == owner)).rowcount
     return {"users": int(users or 0)}
 
 
