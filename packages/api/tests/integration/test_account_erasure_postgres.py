@@ -115,6 +115,19 @@ def seeded(migrated_engine: Engine, embedder: object, tmp_path: Path) -> Seeded:
             target="x",
             metadata={"verbatim_ask": "what the user typed", "kept": "label"},
         )
+        row(
+            conn,
+            "store_audit_events",
+            id="sa_alice",
+            persona_id=OWNER,
+            action="write",
+            store="graph",
+            source="system",
+            written_by=PERSONA,
+            reason="the model's words",
+            timestamp=datetime.now(UTC),
+            metadata={"verbatim_ask": "typed", "label": "kept"},
+        )
     return seeded
 
 
@@ -173,8 +186,35 @@ def _naming(engine: Engine, owner: str) -> dict[str, int]:
         users = conn.execute(
             text("SELECT count(*) FROM users WHERE id = :o"), {"o": owner}
         ).scalar_one()
+        # Review M1: the graph's store-audit events carry the owner's id as their persona id.
+        store = conn.execute(
+            text("SELECT count(*) FROM store_audit_events WHERE persona_id = :o"), {"o": owner}
+        ).scalar_one()
     if users:
         found["users.id"] = int(users)
+    if store:
+        found["store_audit_events.persona_id"] = int(store)
+    return found
+
+
+def _anywhere(engine: Engine, needle: str) -> dict[str, int]:
+    """Every column of every table (the ledger aside) whose text holds ``needle``: ids inside
+    node ids, JSON, trails, anything. Cheap on a test database."""
+    found: dict[str, int] = {}
+    with engine.connect() as conn:
+        for table in metadata.sorted_tables:
+            if table.name == "erasures":
+                continue
+            for column in table.columns:
+                n = conn.execute(
+                    text(
+                        f'SELECT count(*) FROM {table.name} WHERE CAST("{column.name}" AS text) '  # noqa: S608
+                        "LIKE :pattern"
+                    ),
+                    {"pattern": f"%{needle}%"},
+                ).scalar_one()
+                if n:
+                    found[f"{table.name}.{column.name}"] = int(n)
     return found
 
 
@@ -200,6 +240,7 @@ def test_nothing_of_the_account_remains_and_the_neighbour_keeps_all(
     ae.erase_account(_deps(seeded, platform, embedder, stripe=stripe, clerk=clerk), erasure)
 
     assert _naming(seeded.engine, OWNER) == {}, "nothing names the erased account"
+    assert _anywhere(seeded.engine, OWNER) == {}, "the id is nowhere, not even inside a value"
     assert _naming(seeded.engine, OTHER_OWNER) == bob_before, "the neighbour keeps all"
     ledger = ErasureLedger(seeded.engine)
     done = ledger.get(SubjectKind.ACCOUNT, OWNER)
@@ -359,3 +400,25 @@ def test_a_persona_created_during_the_erasure_is_erased_before_the_account_row(
     assert late is not None
     assert late.state is ErasureState.COMPLETE, "it went through the persona erasure"
     assert _naming(seeded.engine, OWNER) == {}
+
+
+def test_the_owners_store_audit_is_rekeyed_and_scrubbed(
+    seeded: Seeded,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review M1: the graph's events ride the owner's id as their persona id."""
+    erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
+
+    ae.erase_account(_deps(seeded, platform, embedder), erasure)
+
+    with seeded.engine.connect() as conn:
+        mine = conn.execute(
+            text(
+                "SELECT persona_id, reason, metadata FROM store_audit_events WHERE id = 'sa_alice'"
+            )
+        ).one()
+    assert mine.persona_id == erasure.id
+    assert mine.reason is None
+    assert mine.metadata == {"label": "kept"}
+    assert not (seeded.audit_root / f"{OWNER}.jsonl").exists()

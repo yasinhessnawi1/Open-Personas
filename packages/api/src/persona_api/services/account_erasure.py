@@ -43,6 +43,10 @@ from persona_api.db.models import users as users_t
 from persona_api.errors import ErasureRecordError
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services import audit_service
+from persona_api.services.account_erasure_audit import (
+    rekey_store_audit_file,
+    rekey_store_audit_rows,
+)
 from persona_api.services.erasure_ledger import Erasure, ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_lock import erasure_lock
 from persona_api.services.erasure_service import (
@@ -313,7 +317,19 @@ def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
         rekeyed = conn.execute(
             update(audit_log_t).where(audit.user_id == erasure.owner_id).values(user_id=erasure.id)
         ).rowcount
-    return {"rekeyed": int(rekeyed or 0), "scrubbed": scrubbed}
+        # Review M1: the graph's store-audit events carry the owner's id as their persona id.
+        store_rekeyed = rekey_store_audit_rows(
+            conn, owner_id=erasure.owner_id, erasure_id=erasure.id
+        )
+    store_lines = rekey_store_audit_file(
+        deps.persona.audit_root, owner_id=erasure.owner_id, erasure_id=erasure.id
+    )
+    return {
+        "rekeyed": int(rekeyed or 0),
+        "scrubbed": scrubbed,
+        "store_rekeyed": store_rekeyed,
+        "store_lines": store_lines,
+    }
 
 
 def _step_clerk(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
