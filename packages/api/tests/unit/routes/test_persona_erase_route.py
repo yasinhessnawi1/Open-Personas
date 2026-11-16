@@ -373,6 +373,7 @@ def test_a_persona_deleted_before_the_ledger_is_erased_at_the_next_start(seeded:
         audit_root=seeded.audit_root,
         job_queue=None,
         in_process_worker=None,
+        erasure_ledger_writable=True,  # the boot's probe passed (review H1 a)
     )
     ledger = ErasureLedger(seeded.engine)
 

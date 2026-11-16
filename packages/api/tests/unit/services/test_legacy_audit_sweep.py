@@ -310,3 +310,74 @@ def test_only_the_users_own_events_name_an_owner(engine: Engine, root: Path) -> 
 
     assert counts == LegacySweepCounts(claimed=1)
     assert _erasures(engine) == [(_OWNER, _GONE, ErasureState.PENDING.value)]
+
+
+def test_an_engine_that_cannot_see_every_row_is_refused_and_nothing_changes(
+    engine: Engine, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review H1 b: under row level security every live persona would look like a leftover."""
+    store, tools = _logs(root, _GONE, "author")
+    before = store.read_bytes()
+    monkeypatch.setattr(legacy_audit_sweep, "sees_every_row", lambda _engine: False)
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(refused=1)
+    assert tools.exists()
+    assert store.read_bytes() == before
+    assert _erasures(engine) == []
+
+
+@pytest.mark.parametrize(("granted", "sees"), [(True, True), (False, False), (None, False)])
+def test_on_postgres_the_role_must_be_a_superuser_or_bypass_rls(
+    granted: bool | None,  # noqa: FBT001
+    sees: bool,  # noqa: FBT001
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    asked: list[str] = []
+
+    class _Conn:
+        def __enter__(self) -> _Conn:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, stmt: object) -> SimpleNamespace:
+            asked.append(str(stmt))
+            return SimpleNamespace(scalar=lambda: granted)
+
+    fake = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"), connect=_Conn)
+
+    assert legacy_audit_sweep.sees_every_row(fake) is sees  # type: ignore[arg-type]
+    assert "rolsuper OR rolbypassrls" in asked[0]
+
+
+def test_a_claim_that_fails_partway_touches_no_file(
+    engine: Engine, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review H1 c: every claim is written before any file is cleaned."""
+    first = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    second = "persona_cccccccccccccccccccccccccccccccc"
+    unknown = "persona_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # between the two claims, in order
+    _logs(root, first, _OWNER)
+    _logs(root, second, _OTHER)
+    _logs(root, unknown, "author")
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    real = ErasureLedger.claim
+    calls: list[str] = []
+
+    def _fails_second(self: ErasureLedger, **kwargs: Any) -> Any:  # noqa: ANN401
+        calls.append(kwargs["subject_id"])
+        if len(calls) == 2:
+            msg = "the database went away"
+            raise RuntimeError(msg)
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(ErasureLedger, "claim", _fails_second)
+
+    with pytest.raises(RuntimeError, match="went away"):
+        sweep_legacy_audit_files(engine, root)
+
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before, "no file was touched"

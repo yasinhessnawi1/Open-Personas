@@ -19,6 +19,12 @@ say so. This one-off sweep finds them and hands each to the existing erasure:
 
 Safe to repeat: a claimed persona has a ledger row and is skipped from then on, and a cleaned
 log has nothing left to clean. It reports counts only, never a file name or an owner id.
+
+It trusts nothing it cannot see (review H1). It runs only on an engine that sees every row
+(a superuser or ``BYPASSRLS``; any other refuses with an OPERATOR ALERT and changes nothing),
+since under row level security every live persona would look like a leftover. And it decides
+first and acts second: every claim is written before any file is touched, so a claim that
+fails leaves every file as it was.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from persona_api.db.models import erasures as erasures_t
 from persona_api.db.models import personas as personas_t
@@ -53,6 +59,7 @@ __all__ = [
     "legacy_persona_ids",
     "main",
     "owner_candidates",
+    "sees_every_row",
     "sweep_legacy_audit_files",
 ]
 
@@ -78,6 +85,7 @@ class LegacySweepCounts:
     """What one sweep did (or, in a dry run, would do). Counts only."""
 
     claimed: int = 0
+    refused: int = 0
     scrubbed_unknown_owner: int = 0
     scrubbed_ambiguous_owner: int = 0
     already_clean: int = 0
@@ -153,6 +161,20 @@ def _users(engine: Engine, candidates: set[str]) -> set[str]:
         )
 
 
+_SEES_EVERY_ROW = text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+
+
+def sees_every_row(engine: Engine) -> bool:
+    """Whether ``engine``'s role sees every row: a superuser or ``BYPASSRLS`` (review H1 b).
+
+    Off Postgres (the legacy SQLite edition) there is no row level security to hide a row.
+    """
+    if engine.dialect.name != "postgresql":
+        return True
+    with engine.connect() as conn:
+        return bool(conn.execute(_SEES_EVERY_ROW).scalar())
+
+
 def _quiet(audit_root: Path, persona_id: str, now: float) -> bool:
     for name in (f"{persona_id}{_STORE}", f"{persona_id}{_TOOLS}"):
         path = audit_root / name
@@ -198,34 +220,52 @@ def sweep_legacy_audit_files(
     dry_run: bool = False,
     clock: Callable[[], float] = time.time,
 ) -> LegacySweepCounts:
-    """Claim an erasure for each legacy persona with a known owner; clean the rest in place."""
+    """Claim an erasure for each legacy persona with a known owner; clean the rest in place.
+
+    Refuses (``refused=1``, an OPERATOR ALERT, nothing changed) on an engine that cannot see
+    every row. Decides first, then writes every claim, then cleans files: a claim that fails
+    raises before any file is touched.
+    """
     if audit_root is None:
         return LegacySweepCounts()
+    if not sees_every_row(engine):
+        _log.error(
+            "OPERATOR ALERT: legacy audit sweep refused: its database role is neither a "
+            "superuser nor BYPASSRLS, so it cannot tell a live persona from a leftover; "
+            "nothing was changed"
+        )
+        return LegacySweepCounts(refused=1)
     ids = legacy_persona_ids(audit_root)
     leftovers = _unknown_to_the_database(engine, ids)
     now = clock()
     counts = {f.name: 0 for f in fields(LegacySweepCounts)}
     counts["kept_known"] = len(ids) - len(leftovers)
-    ledger = ErasureLedger(engine)
-    for pid in leftovers:
+    claims: list[tuple[str, str]] = []
+    cleans: list[tuple[str, bool]] = []
+    for pid in leftovers:  # decide: reads only
         if not _quiet(audit_root, pid, now):
             counts["kept_recent"] += 1
             continue
         owners = _users(engine, owner_candidates(audit_root / f"{pid}{_STORE}", pid))
         if len(owners) == 1:
-            if not dry_run:
-                ledger.claim(
-                    owner_id=next(iter(owners)),
-                    subject_kind=SubjectKind.PERSONA,
-                    subject_id=pid,
-                    captured=_CAPTURED,
-                )
-            counts["claimed"] += 1
-            continue
+            claims.append((pid, next(iter(owners))))
+        else:
+            cleans.append((pid, bool(owners)))
+    if not dry_run:  # the database first: a claim that fails stops the sweep here
+        ledger = ErasureLedger(engine)
+        for pid, owner in claims:
+            ledger.claim(
+                owner_id=owner,
+                subject_kind=SubjectKind.PERSONA,
+                subject_id=pid,
+                captured=_CAPTURED,
+            )
+    counts["claimed"] = len(claims)
+    for pid, ambiguous in cleans:  # then the files
         changed = _has_content(audit_root, pid) if dry_run else _clean_in_place(audit_root, pid)
         if not changed:
             counts["already_clean"] += 1
-        elif owners:
+        elif ambiguous:
             counts["scrubbed_ambiguous_owner"] += 1
         else:
             counts["scrubbed_unknown_owner"] += 1
@@ -265,7 +305,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         engine.dispose()
     for line in counts.lines():
         print(line)  # noqa: T201 - a CLI
-    return 0
+    return 1 if counts.refused else 0
 
 
 if __name__ == "__main__":

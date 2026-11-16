@@ -209,8 +209,11 @@ def resume_persona_erasures_on_startup(
 
     async def _loop() -> None:
         # R9-290: personas deleted before the ledger left audit files; claim their erasures
-        # (or clean the files in place) once, before the first resume picks them up.
-        await asyncio.to_thread(run_legacy_sweep_logged, deps.engine, deps.audit_root)
+        # (or clean the files in place) once, before the first resume picks them up. Only
+        # where the ledger is known writable (review H1 a): a boot that fell back to a
+        # row-level-security engine would see no persona and mistake every one for a leftover.
+        if getattr(state, "erasure_ledger_writable", None) is True:
+            await asyncio.to_thread(run_legacy_sweep_logged, deps.engine, deps.audit_root)
         while True:
             await asyncio.to_thread(_once)
             if _worker_sweeps():
