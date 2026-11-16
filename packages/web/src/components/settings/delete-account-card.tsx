@@ -21,6 +21,26 @@ import { Input } from "@/components/ui/input";
 import { ACCOUNT_DELETED_PATH, unwrap } from "@/lib/api/client";
 import { useApi } from "@/lib/api/use-api";
 
+/** How long the card waits on the wallet read or the sign-out before going on (round 3 LOW-7). */
+export const SETTLE_TIMEOUT_MS = 10_000;
+
+/** ``promise``, or a rejection once ``ms`` has passed without it settling. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function DeleteAccountCard() {
   const t = useTranslations("settings");
   const api = useApi();
@@ -58,7 +78,10 @@ export function DeleteAccountCard() {
     let live = true;
     void (async () => {
       try {
-        const wallet = await unwrap(await api.GET("/v1/me/wallet"));
+        // A wallet that has not answered in time counts as unknown: the line shows.
+        const wallet = await unwrap(
+          await within(api.GET("/v1/me/wallet"), SETTLE_TIMEOUT_MS),
+        );
         if (live) {
           setPaid(
             wallet.plan_code !== "free" ||
@@ -93,7 +116,12 @@ export function DeleteAccountCard() {
     // lands on the goodbye page itself. Whatever sign-out does, the account is gone, so the
     // user is always taken there (review L-6).
     try {
-      await account.signOut?.({ redirectUrl: ACCOUNT_DELETED_PATH });
+      await within(
+        Promise.resolve(
+          account.signOut?.({ redirectUrl: ACCOUNT_DELETED_PATH }),
+        ),
+        SETTLE_TIMEOUT_MS,
+      );
     } catch {
       // A failed sign-out leaves a session for an account that no longer exists; the API
       // refuses it (410) and the goodbye page holds nothing of it.

@@ -283,4 +283,59 @@ describe("delete account card", () => {
     );
     expect(signOut).toHaveBeenCalledWith({ redirectUrl: "/account-deleted" });
   });
+
+  it("counts a wallet that has not answered in 10 s as unknown", async () => {
+    // Round 3 LOW-7: the line shows and the delete is allowed, instead of waiting forever.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiGet.mockImplementation((path: string) =>
+        path === "/v1/me/wallet"
+          ? new Promise(() => undefined) // never answers
+          : Promise.resolve({
+              response: new Response(null, { status: 200 }),
+              data: { confirm: "ann@example.test" },
+            }),
+      );
+      renderCard();
+      await openAndType("ann@example.test");
+      expect(
+        (slot("delete-account-submit") as HTMLButtonElement).disabled,
+      ).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await waitFor(() => expect(slot("delete-account-refund")).not.toBeNull());
+      expect(
+        (slot("delete-account-submit") as HTMLButtonElement).disabled,
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves for the goodbye page when sign-out has not settled in 10 s", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      signOut.mockImplementation(() => new Promise<void>(() => undefined));
+      apiPost.mockResolvedValue({
+        response: new Response(null, { status: 202 }),
+        data: { erasure_id: "erasure_1", state: "pending" },
+      });
+      expects("ann@example.test");
+      renderCard();
+      await openAndType("ann@example.test");
+
+      fireEvent.click(slot("delete-account-submit"));
+      await waitFor(() => expect(signOut).toHaveBeenCalledOnce());
+      expect(replace).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await waitFor(() =>
+        expect(replace).toHaveBeenCalledWith("/account-deleted"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -146,3 +146,33 @@ describe("billing entry point (R9-137)", () => {
     expect(href).toBe("/settings/billing");
   });
 });
+
+describe("sign-out that fails (R9-284 T9, round 3 LOW-7)", () => {
+  it("is caught, not left as an unhandled rejection", () => {
+    // The menu must attach a handler to the promise sign-out returns.
+    const failed = Promise.reject(new Error("clerk is down"));
+    failed.catch(() => undefined); // this test's own copy never goes unhandled
+    const handled = vi.spyOn(failed, "then");
+    // A plain function: vi.fn would itself call .then on what it returns, to track it.
+    let calls = 0;
+    const signOut = () => {
+      calls += 1;
+      return failed;
+    };
+    account = {
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut,
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    fireEvent.click(screen.getByText("Sign out"));
+
+    expect(calls).toBe(1);
+    expect(handled).toHaveBeenCalled();
+  });
+});

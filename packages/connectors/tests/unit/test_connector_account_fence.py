@@ -119,18 +119,33 @@ async def test_build_connectors_gives_every_adapter_the_fenced_verifier(
     from unittest.mock import MagicMock  # noqa: PLC0415
 
     from persona_api.config import APIConfig, Edition  # noqa: PLC0415
+    from persona_connectors import discord as discord_adapter  # noqa: PLC0415
     from persona_connectors import service  # noqa: PLC0415
+    from persona_connectors import slack as slack_adapter  # noqa: PLC0415
 
     monkeypatch.setattr(service, "account_erased", lambda _engine, user_id: user_id == "user_gone")
-    built: list[Any] = []
-    real = service._build_connector_verifier  # noqa: SLF001
+    # What each adapter's app is actually built with (round 3 LOW-7): by the verifier it gets,
+    # not by how many verifiers were made.
+    given: dict[str, Any] = {}
 
-    def _recording(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        verify = real(*args, **kwargs)
-        built.append(verify)
-        return verify
+    def _capturing(name: str, real: Any) -> Any:  # noqa: ANN401
+        def build(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            given[name] = kwargs["verify_jwt"]
+            return real(*args, **kwargs)
 
-    monkeypatch.setattr(service, "_build_connector_verifier", _recording)
+        return build
+
+    monkeypatch.setattr(
+        service, "build_telegram_app", _capturing("telegram", service.build_telegram_app)
+    )
+    monkeypatch.setattr(
+        discord_adapter,
+        "build_discord_app",
+        _capturing("discord", discord_adapter.build_discord_app),
+    )
+    monkeypatch.setattr(
+        slack_adapter, "build_slack_app", _capturing("slack", slack_adapter.build_slack_app)
+    )
     config = ConnectorConfig(  # type: ignore[call-arg]
         edition="cloud",
         jwt_secret="test-jwt-secret",
@@ -165,10 +180,14 @@ async def test_build_connectors_gives_every_adapter_the_fenced_verifier(
             http=http,
         )
 
-    assert len(built) >= 3, "telegram, discord and slack each built a verifier"
-    gone = jwt.encode(
-        {"sub": "user_gone", "exp": int(time.time()) + 60}, "test-jwt-secret", algorithm="HS256"
-    )
-    for verify in built:
+    assert set(given) == {"telegram", "discord", "slack"}, "every configured adapter was built"
+
+    def _token(user_id: str) -> str:
+        return jwt.encode(
+            {"sub": user_id, "exp": int(time.time()) + 60}, "test-jwt-secret", algorithm="HS256"
+        )
+
+    for name, verify in given.items():
         with pytest.raises(AccountErasedTokenError):
-            await verify(gone)
+            await verify(_token("user_gone"))
+        assert (await verify(_token("user_live"))).id == "user_live", name
