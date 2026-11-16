@@ -146,6 +146,10 @@ def test_each_rewrite_has_its_own_temporary_and_syncs_it(
     synced: list[int] = []
     real_fsync = os.fsync
     monkeypatch.setattr(erasure_audit.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    # The directory sync is its own (round 2 LOW-3) and calls os.fsync on Linux only, so it is
+    # counted apart: os.fsync here is the temporary file's alone, on every platform.
+    directories: list[Path] = []
+    monkeypatch.setattr(erasure_audit, "_fsync_dir", directories.append)
     names: list[str] = []
     real_replace = Path.replace
 
@@ -159,7 +163,8 @@ def test_each_rewrite_has_its_own_temporary_and_syncs_it(
         log.write_text(json.dumps({"persona_id": _PERSONA, "reason": said}) + "\n", "utf-8")
         scrub_store_audit_files(tmp_path, owner_id=_OWNER, persona_id=_PERSONA)
 
-    assert len(synced) == 2
+    assert len(synced) == 2, "each temporary is synced once"
+    assert directories == [tmp_path, tmp_path], "and the directory after each rename"
     assert len(set(names)) == 2, "never the same temporary twice"
     assert all(n.startswith(f"{_PERSONA}.jsonl.{os.getpid()}.") for n in names)
     assert not list(tmp_path.glob("*.erasing"))
