@@ -121,6 +121,7 @@ class _Engine:
         self.log: list[tuple[int, str]] = []
         self.statements: list[tuple[int, str]] = []
         self.objects: list[Any] = []
+        self.rolled_back: list[int] = []
         self.rowcount = 1
         self._next = 0
 
@@ -130,7 +131,12 @@ class _Engine:
 
     @contextmanager
     def begin(self) -> Iterator[_Conn]:
-        yield self._open()
+        conn = self._open()
+        try:
+            yield conn
+        except BaseException:
+            self.rolled_back.append(conn._txn)  # noqa: SLF001 - the fake's own connection
+            raise
 
     @contextmanager
     def connect(self) -> Iterator[_Conn]:
@@ -592,3 +598,20 @@ def test_a_supersede_whose_trail_changed_under_a_matching_hash_writes_nothing() 
         )
 
     assert [s for _, s in engine.statements if s.startswith(("INSERT", "UPDATE"))] == []
+
+
+def test_a_supersede_whose_update_matched_no_row_rolls_the_version_back() -> None:
+    """Round 12 LOW-2: the UPDATE must report the row it wrote. If it matched none, the
+    supersede raises inside its transaction, so the version insert is rolled back with it."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    engine = _Engine()
+    engine.rowcount = 0  # the UPDATE returns no surrogate
+
+    with pytest.raises(GraphStaleWriteError):
+        _supersede(engine, "h")
+
+    (txn,) = {t for t, s in engine.statements if s.startswith("INSERT INTO graph_node_versions")}
+    assert engine.rolled_back == [txn], "the version insert's transaction rolled back"
+    update = next(o for o in engine.objects if str(o).startswith("UPDATE graph_nodes"))
+    assert "RETURNING graph_nodes.surrogate" in str(update)

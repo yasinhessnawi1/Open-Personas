@@ -807,14 +807,20 @@ class PostgresGraphBackend:
                 if metadata == dict(node.metadata)
                 else _compute_node_hash(node.concept_name, node.content, metadata)
             )
-            conn.execute(
+            surrogate = conn.execute(
                 self._update_node_statement(
                     owner_id, node, embedding, embedding_model, metadata, content_hash
                 ).where(
                     graph_nodes.c.content_hash == expected_content_hash,
                     trail_is(expected_provenance),
                 )
-            )
+            ).scalar_one_or_none()
+            if surrogate is None:
+                # The locked row passed the check, so this is not expected; refuse inside
+                # the transaction so the version inserted above rolls back with it.
+                raise GraphStaleWriteError(
+                    "the node changed since it was read", context={"node_id": node.id}
+                )
         return version_key
 
     def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
