@@ -655,7 +655,10 @@ def _failing_stub(name: str, match: str) -> str:
     Every other call goes on to the real command (the stub's directory leads PATH), or, for
     install, to the mkdir that STUB_INSTALL does.
     """
-    rest = 'mkdir -p "${@: -1}"' if name == "install" else f'PATH="${{PATH#*:}}" exec {name} "$@"'
+    rest = {
+        "install": 'mkdir -p "${@: -1}"',
+        "systemctl": 'echo "$*" >> "${STUB_DIR}/systemctl.log"',
+    }.get(name, f'PATH="${{PATH#*:}}" exec {name} "$@"')
     return f'#!/usr/bin/env bash\ncase " $* " in *{match}*) exit 1 ;; esac\n{rest}\n'
 
 
@@ -669,6 +672,8 @@ def _apply(
     containers: str = "",
     docker_down: bool = False,
     held: str | None = None,
+    bak: str | None = None,
+    stuck_dropin_tmp: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """apply_containerd_root on files under tmp_path, with docker and systemctl stubbed."""
     stubs = tmp_path / "stubs"
@@ -695,6 +700,11 @@ def _apply(
         (etc / "config.toml").write_text(config, encoding="utf-8", newline="\n")
     if dropin is not None:
         (etc / "dropin.conf").write_text(dropin, encoding="utf-8", newline="\n")
+    if bak is not None:
+        (etc / "config.toml.bak-r9289").write_text(bak, encoding="utf-8", newline="\n")
+    if stuck_dropin_tmp:  # a temporary nothing may write: the drop-in's printf fails
+        (etc / "dropin.conf.tmp").write_text("stale", encoding="utf-8", newline="\n")
+        (etc / "dropin.conf.tmp").chmod(0o444)
     result = _bash(
         # A POSIX path for PATH: a "C:/..." entry would split at its colon.
         f'set -eu; export STUB_DIR="{stubs.as_posix()}"; '
@@ -952,3 +962,58 @@ def test_preflight_reads_containerds_root_in_either_quote_style(tmp_path: Path, 
 def test_preflight_fails_an_empty_or_other_root(tmp_path: Path, dump: str) -> None:
     result = _preflight_root_check(tmp_path, dump)
     assert result.stdout.startswith("BAD containerd's root is"), result.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("failing", "stuck", "calls"),
+    [
+        ((), True, []),  # the drop-in's printf
+        ((("mv", "dropin.conf.tmp"),), False, []),  # the drop-in's mv
+        ((("systemctl", "daemon-reload"),), False, []),
+    ],
+    ids=["drop-in printf", "drop-in mv", "daemon-reload"],
+)
+def test_a_failing_drop_in_step_fails_the_whole(
+    tmp_path: Path,
+    failing: tuple[tuple[str, str], ...],
+    stuck: bool,  # noqa: FBT001
+    calls: list[str],
+) -> None:
+    """Round 2 LOW-2: the drop-in's own steps, on the live host's state (root already set)."""
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(
+        tmp_path,
+        config=config,
+        images="sha256:abc\n",
+        dropin=None,
+        failing=failing,
+        stuck_dropin_tmp=stuck,
+    )
+    assert result.returncode == 1
+    assert systemctl == calls
+
+
+@needs_bash
+def test_a_failing_restart_fails_the_whole(tmp_path: Path) -> None:
+    result, systemctl = _apply(
+        tmp_path,
+        config=CONTAINERD_DEFAULT,
+        images="",
+        dropin=DROPIN,
+        failing=(("systemctl", "restart"),),
+    )
+    assert result.returncode == 1
+    assert systemctl == ["daemon-reload"]
+
+
+@needs_bash
+def test_an_existing_backup_survives_a_rewrite(tmp_path: Path) -> None:
+    """Round 2 LOW-2: the first backup is the package's config; it is never overwritten."""
+    result, _ = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None, bak="the first backup\n"
+    )
+    assert result.returncode == 0, result.stderr
+    bak = tmp_path / "etc" / "config.toml.bak-r9289"
+    assert bak.read_text(encoding="utf-8") == "the first backup\n"
