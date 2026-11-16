@@ -310,10 +310,12 @@ sudo docker images | grep 'open-persona/api' | grep current
 
 # 10. the app, then /healthz 200 (waited for: the api takes a while to start)
 sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
+healthy=0
 for _ in $(seq 1 60); do
-  curl -fsS -o /dev/null http://127.0.0.1:8000/healthz && { echo "healthz 200"; break; }
+  curl -fsS -o /dev/null http://127.0.0.1:8000/healthz && { healthy=1; break; }
   sleep 5
 done
+[ "${healthy}" = 1 ] && echo "healthz 200" || echo "healthz NOT 200 after 5 minutes: roll back (below)"
 
 # 11. preflight
 sudo -u deploy deploy/server/bin/preflight.sh </dev/null
