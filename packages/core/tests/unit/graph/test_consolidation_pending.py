@@ -194,3 +194,26 @@ def test_a_done_record_and_one_without_a_state_are_left_alone() -> None:
     backend.nodes["m"] = node.model_copy(update={"metadata": {"_k7_merge": json.dumps(legacy)}})
 
     assert backend.pending_merges("u1") == []
+
+
+def test_one_pending_member_that_cannot_be_given_back_does_not_stop_the_others() -> None:
+    """Round 6 L-1: each pending member is given back on its own."""
+    backend = _Backend(deadlocks=1, broken_reopens=1)
+    consolidation = _pass(backend)
+    consolidation.run("u1")
+    assert _state(backend) == "pending"
+    real_pending, real_get = backend.pending_merges, backend.get_node
+
+    def _get(owner: str, node_id: str) -> ConceptNode | None:
+        if node_id == "ghost":
+            raise RuntimeError("cannot read it")
+        return real_get(owner, node_id)
+
+    backend.pending_merges = lambda owner: ["ghost", *real_pending(owner)]  # type: ignore[method-assign]
+    backend.get_node = _get  # type: ignore[method-assign]
+    backend.events.clear()
+
+    report = consolidation.run("u1")
+
+    assert backend.events[:2] == ["reopen m", "record m cleared"], "m is given back anyway"
+    assert report.clusters_formed == 1

@@ -46,6 +46,7 @@ from persona.graph.models import (
     make_edge_id,
 )
 from persona.graph.salience import SALIENCE_EXCLUDED_KINDS
+from persona.logging import get_logger
 from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
@@ -60,6 +61,8 @@ __all__ = ["ConsolidationPass", "ConsolidationReport", "MergeGroup", "SkippedCan
 
 #: Reserved member-metadata key holding the JSON reversal record (K7-D-4.5). Present
 #: ⇔ the node is a consolidated member; unmerge reads it to invert precisely.
+_log = get_logger("graph.consolidation")
+
 _MERGE_KEY = "_k7_merge"
 #: Reserved canonical-metadata key holding the accreted alias list (K7-D-4.4).
 _ALIAS_KEY = "_k7_aliases"
@@ -244,7 +247,15 @@ class ConsolidationPass:
         # A member whose merge act stopped part way (its record still "pending") is given
         # back first, so this run starts from whole merges only (D-R9-284-graph-mutex).
         for node_id in self._backend.pending_merges(owner_id):
-            self._unmerge(owner_id, node_id)
+            try:
+                self._unmerge(owner_id, node_id)
+            except Exception as exc:  # noqa: BLE001 - still pending: the next run tries again
+                # One member's failure must not stop the others or the run (round 6 L-1).
+                _log.warning(
+                    "pending merge not given back node={node} error={err}",
+                    node=node_id,
+                    err=type(exc).__name__,
+                )
         epoch, watermark = self._backend.get_marker(owner_id)
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
