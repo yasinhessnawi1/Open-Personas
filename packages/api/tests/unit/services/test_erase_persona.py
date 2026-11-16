@@ -440,6 +440,9 @@ def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -
     assert rows["graphaudit_aaaaaa"] == (None, ["node"], {"action": "created"})
     assert rows["store_bbbbbb"][0] == SECRET, "the sibling's audit is untouched"
     assert rows["graphaudit_bbbbbb"][0] == SECRET
+    # Round 2 MEDIUM-1: the content-key scrub of the rows is the persona's alone.
+    assert rows["store_bbbbbb"][2] == {"to_version": "2", "verbatim_ask": SECRET}
+    assert rows["graphaudit_bbbbbb"][2] == {"action": "created", "workspace_path": SECRET}
 
     own = (seeded.audit_root / f"{PERSONA}.jsonl").read_text(encoding="utf-8")
     graph = (seeded.audit_root / f"{OWNER}.jsonl").read_text(encoding="utf-8")
