@@ -123,3 +123,47 @@ def test_a_create_that_succeeds_is_not_erased(seeded: Seeded, embedder: object) 
     pid = resp.json()["id"]
     assert _owned(seeded) == {*before, pid}
     assert ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid) is None
+
+
+def test_an_undo_whose_erasure_fails_still_answers_500_and_leaves_it_to_the_sweep(
+    seeded: Seeded,
+    embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review LOW-5: a later erasure step raises. The create still answers 500; the row is
+    gone (the route's half of the erasure ran), and the ledger is left failed for the sweep."""
+    from persona_api.services import erasure_service  # noqa: PLC0415
+
+    real_load = PersonaRegistry.load_persona
+    created: list[str] = []
+
+    def _writes_then_fails(self: PersonaRegistry, persona: Any) -> None:  # noqa: ANN401
+        created.append(str(persona.persona_id))
+        real_load(self, persona)
+        msg = "the identity index went away"
+        raise RuntimeError(msg)
+
+    def _files_fail(*_a: Any) -> dict[str, int]:  # noqa: ANN401
+        msg = "the file store is down"
+        raise OSError(msg)
+
+    monkeypatch.setattr(PersonaRegistry, "load_persona", _writes_then_fails)
+    monkeypatch.setattr(
+        erasure_service,
+        "STEPS",
+        tuple(
+            (name, _files_fail if name == "files" else step) for name, step in erasure_service.STEPS
+        ),
+    )
+    before = _owned(seeded)
+
+    resp = _client(seeded, embedder).post(
+        "/v1/personas", json={"yaml": _YAML}, headers={"Authorization": f"Bearer {OWNER}"}
+    )
+
+    assert resp.status_code == 500
+    pid = created[0]
+    assert _owned(seeded) == before, "the row is gone"
+    erasure = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid)
+    assert erasure is not None
+    assert erasure.state is ErasureState.FAILED, "left for the sweep to finish"
