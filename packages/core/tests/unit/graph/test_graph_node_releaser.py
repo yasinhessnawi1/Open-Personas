@@ -173,3 +173,15 @@ def test_the_members_go_in_the_same_statement_and_the_node_keeps_its_surrogate()
     assert backend.delete_node("u1", "n1") == 7
 
     assert log[-2:] == ["delete n1,m1,m2", "after"]
+
+
+def test_the_backend_returns_every_node_it_deleted() -> None:
+    """Round 3 LOW-4: the node and its members, each with its surrogate, from the RETURNING."""
+    log: list[str] = []
+    backend = PostgresGraphBackend(
+        engine=_Engine(log),  # type: ignore[arg-type]
+        persona_guard=False,
+        node_releaser=_Releaser(log, members=("m1", "m2")),
+    )
+
+    assert backend.delete_node_and_members("u1", "n1") == {"n1": 7, "m1": 8, "m2": 9}
