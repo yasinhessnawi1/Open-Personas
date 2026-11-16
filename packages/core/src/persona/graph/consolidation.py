@@ -519,7 +519,8 @@ class ConsolidationPass:
                 NodeProvenance(
                     source=WriteSource.SYSTEM,
                     written_at=now,
-                    reason=f"consolidation:{run_id} aliases:{','.join(fresh)}",
+                    # The names as a JSON list: a name may hold a comma (R9-284 HIGH-3).
+                    reason=f"consolidation:{run_id} aliases:{json.dumps(fresh)}",
                 ),
             ),
             created_at=current.created_at,

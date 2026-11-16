@@ -59,6 +59,7 @@ __all__ = [
     "names_only_the_doomed_gave",
     "mirror_id_for",
     "mirrors_to_remove",
+    "split_alias_list",
     "plan_trails",
     "unmerged",
     "without_alias_names",
@@ -145,6 +146,15 @@ def names_only_the_doomed_gave(doomed: Iterable[str], surviving: Iterable[str]) 
     return sorted({n for n in doomed if n and n not in kept})
 
 
+def alias_list(metadata: Mapping[str, Any]) -> list[str]:
+    """The canonical's accreted alias names (``[]`` if absent or unreadable)."""
+    try:
+        aliases = json.loads(metadata.get(_ALIAS_KEY, "[]"))
+    except (TypeError, ValueError):
+        return []
+    return [a for a in aliases if isinstance(a, str)] if isinstance(aliases, list) else []
+
+
 def without_aliases(metadata: Mapping[str, Any], names: Iterable[str]) -> dict[str, Any] | None:
     """The metadata with ``names`` gone from the alias list, or ``None`` if nothing changes."""
     try:
@@ -175,14 +185,62 @@ def unmerged(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, 
 _ALIASES_MARK = " aliases:"
 
 
-def without_alias_names(trail: Iterable[Any], names: Iterable[str]) -> Trail | None:
+_Split = tuple[int, int, tuple[str, ...]]  # (unknown pieces, tokens, the tokens)
+
+
+def split_alias_list(listed: str, known: Iterable[str]) -> list[str]:
+    """The names in an alias list ``_accrete_aliases`` wrote (review HIGH-3).
+
+    Since HIGH-3 the list is JSON. Before it, the names were joined by ",", and a name may hold
+    a comma, so splitting on "," cut such a name into fragments: a doomed "Bergen, Norway" was
+    never removed, and a surviving "Oslo, Norway" lost its "Oslo" to a doomed "Oslo". A legacy
+    list is therefore tokenised against the names known to be in it (the doomed names and the
+    canonical's alias list), preferring the reading with the fewest pieces no known name
+    accounts for; such a piece runs to the next comma.
+    """
+    if listed.startswith("["):
+        try:
+            parsed = json.loads(listed)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list) and all(isinstance(n, str) for n in parsed):
+            return [n for n in parsed if n]
+    names = sorted({k for k in known if k})
+    end = len(listed)
+    best: list[_Split | None] = [None] * (end + 2)
+    best[end] = best[end + 1] = (0, 0, ())
+    for i in range(end - 1, -1, -1):
+        options: list[_Split] = []
+        for name in names:
+            stop = i + len(name)
+            fits = listed.startswith(name, i) and (stop == end or listed[stop] == ",")
+            rest = best[stop + 1] if fits else None
+            if rest is not None:
+                options.append((rest[0], rest[1] + 1, (name, *rest[2])))
+        comma = listed.find(",", i)
+        stop = end if comma < 0 else comma
+        rest = best[stop + 1]
+        if rest is not None and stop == i:
+            options.append(rest)  # an empty piece: nothing to keep
+        elif rest is not None:
+            options.append((rest[0] + 1, rest[1] + 1, (listed[i:stop], *rest[2])))
+        best[i] = min(options, key=lambda o: (o[0], o[1])) if options else None
+    found = best[0]
+    return list(found[2]) if found is not None else [n for n in listed.split(",") if n]
+
+
+def without_alias_names(
+    trail: Iterable[Any], names: Iterable[str], *, known: Iterable[str] = ()
+) -> Trail | None:
     """A trail whose consolidation entries no longer list ``names`` (review H-3).
 
-    ``_accrete_aliases`` records ``consolidation:{run} aliases:{a,b}`` on the canonical, so a
-    member's name survives there after it leaves ``_k7_aliases``. An entry left with no names
-    goes. ``None`` when nothing changes.
+    ``_accrete_aliases`` records ``consolidation:{run} aliases:[...]`` on the canonical, so a
+    member's name survives there after it leaves ``_k7_aliases``. ``known`` is the other names
+    a legacy, comma-joined list may hold (see ``split_alias_list``). An entry left with no
+    names goes; one that keeps names is rewritten as JSON. ``None`` when nothing changes.
     """
     gone = set(names)
+    vocabulary = [*gone, *known]
     trail = list(trail)
     out: Trail = []
     for entry in trail:
@@ -191,9 +249,12 @@ def without_alias_names(trail: Iterable[Any], names: Iterable[str]) -> Trail | N
             out.append(entry)
             continue
         head, _, listed = reason.partition(_ALIASES_MARK)
-        kept = [n for n in listed.split(",") if n and n not in gone]
-        if kept:
-            out.append({**entry, "reason": f"{head}{_ALIASES_MARK}{','.join(kept)}"})
+        listed_names = split_alias_list(listed, vocabulary)
+        kept = [n for n in listed_names if n not in gone]
+        if len(kept) == len(listed_names):
+            out.append(entry)
+        elif kept:
+            out.append({**entry, "reason": f"{head}{_ALIASES_MARK}{json.dumps(kept)}"})
     return None if out == trail else out
 
 
@@ -310,14 +371,23 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         if canonical is not None and metadata is not None:
             _set_metadata(conn, owner_id, canonical, metadata)
             cleaned += 1
-        _drop_alias_names_from_trails(conn, owner_id, canonical_id, names)
+        known = alias_list(canonical.metadata or {}) if canonical else []
+        _drop_alias_names_from_trails(conn, owner_id, canonical_id, names, known=known)
     return cleaned
 
 
 def _drop_alias_names_from_trails(
-    conn: Connection, owner_id: str, canonical_id: str, names: list[str]
+    conn: Connection,
+    owner_id: str,
+    canonical_id: str,
+    names: list[str],
+    *,
+    known: Iterable[str] = (),
 ) -> None:
-    """The names also leave the canonical's consolidation entries, and its snapshots'."""
+    """The names also leave the canonical's consolidation entries, and its snapshots'.
+
+    ``known`` is the canonical's alias list before this erasure rewrote it (review HIGH-3).
+    """
     for table, key in ((nodes_t, nodes_t.c.id), (versions_t, versions_t.c.version_key)):
         node_column = table.c.id if table is nodes_t else table.c.node_id
         rows = conn.execute(
@@ -327,7 +397,7 @@ def _drop_alias_names_from_trails(
             .with_for_update()
         ).all()
         for row_key, trail in rows:
-            rewritten = without_alias_names(trail or [], names)
+            rewritten = without_alias_names(trail or [], names, known=known)
             if rewritten is not None:
                 conn.execute(
                     update(table)

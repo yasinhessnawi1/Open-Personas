@@ -103,6 +103,7 @@ class _Backend:
 
     def update_node(self, _owner: str, node: ConceptNode, _emb: Any, **kw: Any) -> int:  # noqa: ANN401
         self.calls.append((f"update_node {node.id}", tuple(kw.get("guard_personas", ()))))
+        self.updated = node
         return 1
 
 
@@ -164,3 +165,10 @@ def test_a_record_with_nothing_to_narrow_is_written_once() -> None:
     backend = _merge()
 
     assert len(backend.records) == 1
+
+
+def test_the_accreted_alias_names_are_recorded_as_json() -> None:
+    """Review HIGH-3: a name may hold a comma, so the reason lists the names as JSON."""
+    backend = _merge()
+
+    assert backend.updated.provenance[-1].reason == 'consolidation:r1 aliases:["m"]'

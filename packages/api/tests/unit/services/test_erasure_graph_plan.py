@@ -16,6 +16,7 @@ from persona_api.services.erasure_graph import (
     mirrors_to_remove,
     names_only_the_doomed_gave,
     plan_trails,
+    split_alias_list,
     unmerged,
     without_alias_names,
     without_aliases,
@@ -218,7 +219,7 @@ def test_a_consolidation_entry_stops_listing_the_personas_names() -> None:
 
     rewritten = without_alias_names([other, both, only_mine], ["mine"])
 
-    assert rewritten == [other, {**both, "reason": "consolidation:r1 aliases:theirs"}]
+    assert rewritten == [other, {**both, "reason": 'consolidation:r1 aliases:["theirs"]'}]
     assert without_alias_names([other, both], ["nobody"]) is None
     assert (
         without_alias_names([{**_entry(_OTHER), "reason": "said aliases:mine"}], ["mine"]) is None
@@ -293,3 +294,37 @@ def test_mirrors_are_found_by_their_source_row_and_followed_down_a_chain() -> No
     assert mirrors_to_remove([], sources, rows) == []
     assert mirrors_to_remove([10], sources, {}) == [], "no mirror row left to remove"
     assert mirrors_to_remove([10], sources[:1], rows) == [11], "the chain ends at k1"
+
+
+def test_a_doomed_name_holding_a_comma_leaves_a_legacy_reason() -> None:
+    """Review HIGH-3: the pre-JSON list was joined by "," and a name may hold one."""
+    entry = {**_consolidation(), "reason": "consolidation:r1 aliases:Bergen, Norway,Tromso"}
+
+    rewritten = without_alias_names([entry], ["Bergen, Norway"], known=["Tromso"])
+
+    assert rewritten == [{**entry, "reason": 'consolidation:r1 aliases:["Tromso"]'}]
+
+
+def test_a_surviving_name_holding_a_doomed_name_as_a_fragment_stays_whole() -> None:
+    entry = {**_consolidation(), "reason": "consolidation:r1 aliases:Oslo, Norway,Oslo"}
+
+    rewritten = without_alias_names([entry], ["Oslo"], known=["Oslo, Norway", "Oslo"])
+
+    assert rewritten == [{**entry, "reason": 'consolidation:r1 aliases:["Oslo, Norway"]'}]
+
+
+def test_a_json_alias_list_is_read_as_json() -> None:
+    entry = {**_consolidation(), "reason": 'consolidation:r1 aliases:["a, b", "c"]'}
+
+    assert without_alias_names([entry], ["a, b"]) == [
+        {**entry, "reason": 'consolidation:r1 aliases:["c"]'}
+    ]
+    assert without_alias_names([entry], ["a"]) is None, "no fragment of a name matches"
+
+
+def test_split_alias_list_prefers_known_names_and_falls_back_to_commas() -> None:
+    assert split_alias_list("x,y", []) == ["x", "y"]
+    assert split_alias_list("a, b,c", ["a, b"]) == ["a, b", "c"]
+    assert split_alias_list("a,,b,", []) == ["a", "b"]
+    assert split_alias_list('["q"]', []) == ["q"]
+    assert split_alias_list("[not json,z", []) == ["[not json", "z"]
