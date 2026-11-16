@@ -35,6 +35,7 @@ the SQL runs in CI (tests/integration/test_erase_persona_graph_postgres.py).
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -190,10 +191,6 @@ def unmerged(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, 
 _ALIASES_MARK = " aliases:"
 
 
-# (unknown pieces, minus the doomed names it holds whole, tokens, the tokens)
-_Split = tuple[int, int, int, tuple[str, ...]]
-
-
 def split_alias_list(listed: str, known: Iterable[str], *, doomed: Iterable[str] = ()) -> list[str]:
     """The names in an alias list ``_accrete_aliases`` wrote (review HIGH-3).
 
@@ -216,30 +213,44 @@ def split_alias_list(listed: str, known: Iterable[str], *, doomed: Iterable[str]
             parsed = None
         if isinstance(parsed, list) and all(isinstance(n, str) for n in parsed):
             return [n for n in parsed if n]
-    names = sorted({k for k in known if k})
+    names = {k for k in known if k}
     gone = set(doomed)
     end = len(listed)
-    best: list[_Split | None] = [None] * (end + 2)
-    best[end] = best[end + 1] = (0, 0, 0, ())
-    for i in range(end - 1, -1, -1):
-        options: list[_Split] = []
-        for name in names:
-            stop = i + len(name)
-            fits = listed.startswith(name, i) and (stop == end or listed[stop] == ",")
-            rest = best[stop + 1] if fits else None
-            if rest is not None:
-                whole = 1 if name in gone else 0
-                options.append((rest[0], rest[1] - whole, rest[2] + 1, (name, *rest[3])))
-        comma = listed.find(",", i)
-        stop = end if comma < 0 else comma
+    # A token starts at 0 or just after a comma, and ends at a comma or the end (round 5
+    # LOW-3): only those positions are evaluated, and a known name only up to the longest.
+    stops = [j for j, c in enumerate(listed) if c == ","] + [end]
+    starts = [0] + [j + 1 for j in stops[:-1]]
+    longest = max((len(n) for n in names), default=0)
+    best: dict[int, tuple[int, int, int]] = {end: (0, 0, 0), end + 1: (0, 0, 0)}
+    step: dict[int, tuple[int, str | None]] = {}
+    for i in reversed(starts):
+        options: list[tuple[tuple[int, int, int], int, str | None]] = []
+        first = bisect_left(stops, i)
+        for stop in stops[first:]:
+            if stop - i > longest:
+                break
+            candidate = listed[i:stop]
+            if candidate in names:
+                rest = best[stop + 1]
+                whole = 1 if candidate in gone else 0
+                options.append(((rest[0], rest[1] - whole, rest[2] + 1), stop, candidate))
+        stop = stops[first]
         rest = best[stop + 1]
-        if rest is not None and stop == i:
-            options.append(rest)  # an empty piece: nothing to keep
-        elif rest is not None:
-            options.append((rest[0] + 1, rest[1], rest[2] + 1, (listed[i:stop], *rest[3])))
-        best[i] = min(options, key=lambda o: (o[0], o[1], o[2])) if options else None
-    found = best[0]
-    return list(found[3]) if found is not None else [n for n in listed.split(",") if n]
+        if stop == i:
+            options.append((rest, stop, None))  # an empty piece: nothing to keep
+        else:
+            options.append(((rest[0] + 1, rest[1], rest[2] + 1), stop, listed[i:stop]))
+        key, stop, chosen = min(options, key=lambda o: o[0])
+        best[i] = key
+        step[i] = (stop, chosen)
+    tokens: list[str] = []
+    i = 0
+    while i < end:
+        stop, kept = step[i]
+        if kept is not None:
+            tokens.append(kept)
+        i = stop + 1
+    return tokens
 
 
 def without_alias_names(

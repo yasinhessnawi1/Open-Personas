@@ -387,3 +387,19 @@ def test_a_tie_between_readings_goes_to_the_one_naming_more_doomed_names() -> No
         {**entry, "reason": 'consolidation:r1 aliases:["b"]'}
     ]
     assert without_alias_names([entry], ["a,b"], known=["a", "b"]) == []
+
+
+def test_a_long_legacy_list_is_tokenised_fast() -> None:
+    """Round 5 LOW-3: 1000 known names, about 47k characters, well inside a second."""
+    import time  # noqa: PLC0415
+
+    names = [f"name {i:04d}, of the place number {i:04d} in a town" for i in range(1000)]
+    listed = ",".join(names)
+    assert 40_000 < len(listed) < 50_000
+
+    started = time.perf_counter()
+    found = split_alias_list(listed, names, doomed=names[:10])
+    elapsed = time.perf_counter() - started
+
+    assert found == names
+    assert elapsed < 1.0, f"took {elapsed:.2f}s"
