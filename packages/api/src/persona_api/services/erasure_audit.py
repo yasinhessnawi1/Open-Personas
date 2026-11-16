@@ -10,6 +10,7 @@ ride the owner's id in their ``persona_id`` slot (CSA-1) and name the persona in
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from persona.audit import jsonl_file_lock
@@ -23,7 +24,12 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Connection
 
-__all__ = ["FREE_TEXT_FIELDS", "scrub_store_audit_files", "scrub_store_audit_rows"]
+__all__ = [
+    "FREE_TEXT_FIELDS",
+    "scrub_persona_log_in_place",
+    "scrub_store_audit_files",
+    "scrub_store_audit_rows",
+]
 
 #: The store-audit fields that can hold free text rather than ids and labels.
 FREE_TEXT_FIELDS = ("reason",)
@@ -70,10 +76,12 @@ def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
     (surrogateescape), so one bad byte cannot make the step fail forever.
     """
     with jsonl_file_lock(path):
-        return _scrub_held_file(path, owner_id=owner_id, persona_id=persona_id)
+        return _scrub_held_file(
+            path, lambda line: _scrubbed_line(line, owner_id=owner_id, persona_id=persona_id)
+        )
 
 
-def _scrub_held_file(path: Path, *, owner_id: str, persona_id: str) -> int:
+def _scrub_held_file(path: Path, clean_line: Callable[[str], str]) -> int:
     for _ in range(_FILE_ATTEMPTS):
         if not path.exists():
             return 0
@@ -84,7 +92,7 @@ def _scrub_held_file(path: Path, *, owner_id: str, persona_id: str) -> int:
         lines = text.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
-        clean = [_scrubbed_line(line, owner_id=owner_id, persona_id=persona_id) for line in lines]
+        clean = [clean_line(line) for line in lines]
         changed = sum(a != b for a, b in zip(lines, clean, strict=True))
         if not changed:
             return 0
@@ -111,3 +119,41 @@ def scrub_store_audit_files(audit_root: Path | None, *, owner_id: str, persona_i
         )
         for name in (persona_id, owner_id)
     )
+
+
+def _contentless_line(line: str, *, persona_id: str, content_keys: frozenset[str]) -> str:
+    """The persona's event without free text or content keys; any other line unchanged."""
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return line
+    if not isinstance(event, dict) or event.get("persona_id") != persona_id:
+        return line
+    meta = event.get("metadata")
+    kept = (
+        {k: v for k, v in meta.items() if k not in content_keys} if isinstance(meta, dict) else meta
+    )
+    if kept == meta and all(event.get(f) is None for f in FREE_TEXT_FIELDS):
+        return line
+    return json.dumps(
+        {**event, **dict.fromkeys(FREE_TEXT_FIELDS), "metadata": kept},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def scrub_persona_log_in_place(
+    audit_root: Path, *, persona_id: str, content_keys: frozenset[str]
+) -> int:
+    """Clear the persona's ``{persona}.jsonl`` of free text and content keys; lines changed.
+
+    For a persona whose owner is not known (R9-290): no ledger row can carry its erasure, so
+    the log is cleaned where it lies, by the same locked rewrite as the erasure's scrub. Ids,
+    labels and counts stay, as ruling 5 keeps them.
+    """
+    path = audit_root / f"{require_path_segment(persona_id, what='audit log')}.jsonl"
+    with jsonl_file_lock(path):
+        return _scrub_held_file(
+            path,
+            lambda line: _contentless_line(line, persona_id=persona_id, content_keys=content_keys),
+        )
