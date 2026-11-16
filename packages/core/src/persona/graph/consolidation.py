@@ -120,6 +120,7 @@ class _ConsolidationBackend(Protocol):
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
     def open_assertion_edges(self, owner_id: str, node_id: str) -> list[TypedLink]: ...
+    def open_assertion_edge_keys(self, owner_id: str, node_id: str) -> dict[str, int]: ...
     def upsert_edge(
         self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
     ) -> None: ...
@@ -326,7 +327,7 @@ class ConsolidationPass:
         tag = f"consolidation:{run_id}"
         for member in members:
             personas = _personas_of(member)
-            mirrors = self._plan_mirrors(owner_id, member, canonical, tag=tag, now=now)
+            mirrors, sources = self._plan_mirrors(owner_id, member, canonical, tag=tag, now=now)
             added = self._entities_to_copy(owner_id, member, canonical)
             # R9-284 (D-R9-284-write-guard): the merge record first, in a transaction that holds
             # the member's personas, listing the mirrors and entity links this merge will make.
@@ -340,6 +341,7 @@ class ConsolidationPass:
                 mirrored=[m.id for m in mirrors],
                 added=added,
                 personas=personas,
+                sources=sources,
             )
             # A mirror never overwrites an edge the canonical already has open (review
             # MEDIUM-1); the record then keeps only the mirrors actually made.
@@ -359,6 +361,7 @@ class ConsolidationPass:
                     mirrored=made,
                     added=added,
                     personas=personas,
+                    sources={m: sources[m] for m in made if m in sources},
                 )
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
@@ -406,9 +409,15 @@ class ConsolidationPass:
 
     def _plan_mirrors(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode, *, tag: str, now: datetime
-    ) -> list[TypedLink]:
-        """The mirrors of the member's open assertion edges onto the canonical, not yet written."""
+    ) -> tuple[list[TypedLink], dict[str, int]]:
+        """The mirrors of the member's open assertion edges onto the canonical, not yet written.
+
+        Also ``{mirror id: the source edge's edge_key}``, so an erasure of the persona that
+        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3).
+        """
         mirrors: list[TypedLink] = []
+        sources: dict[str, int] = {}
+        keys = self._backend.open_assertion_edge_keys(owner_id, member.id)
         for edge in self._backend.open_assertion_edges(owner_id, member.id):
             if edge.src_node_id == member.id:
                 src, dst = canonical.id, edge.dst_node_id
@@ -416,9 +425,12 @@ class ConsolidationPass:
                 src, dst = edge.src_node_id, canonical.id
             if src == dst:  # a self-loop after re-pointing onto the canonical — skip
                 continue
+            mirror_id = make_edge_id(src, dst, edge.link_type)
+            if edge.id in keys:
+                sources[mirror_id] = keys[edge.id]
             mirrors.append(
                 TypedLink(
-                    id=make_edge_id(src, dst, edge.link_type),
+                    id=mirror_id,
                     src_node_id=src,
                     dst_node_id=dst,
                     link_type=edge.link_type,
@@ -430,7 +442,7 @@ class ConsolidationPass:
                     valid_at=now,
                 )
             )
-        return mirrors
+        return mirrors, sources
 
     def _entities_to_copy(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode
@@ -449,12 +461,15 @@ class ConsolidationPass:
         mirrored: list[str],
         added: list[str],
         personas: Sequence[str] = (),
+        sources: dict[str, int] | None = None,
     ) -> None:
         record = {
             "run_id": run_id,
             "canonical": canonical.id,
             "mirrored_edges": mirrored,
             "added_entities": added,
+            # {mirror id: source edge_key} (R9-284 LOW-3); absent in records before it.
+            "mirror_sources": dict(sources or {}),
         }
         new_meta = {**member.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
         # content byte-untouched → content_hash recomputes over the new metadata only.

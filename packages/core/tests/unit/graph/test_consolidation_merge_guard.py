@@ -67,6 +67,9 @@ class _Backend:
             )
         ]
 
+    def open_assertion_edge_keys(self, _owner: str, node_id: str) -> dict[str, int]:
+        return {"m::causal::x": 7} if node_id == "m" else {}
+
     def entities_for_node(self, _owner: str, node_id: str) -> list[str]:
         return ["ent_m"] if node_id == "m" else []
 
@@ -133,6 +136,7 @@ def test_the_merge_record_is_written_before_any_mirror_or_entity_link() -> None:
     assert backend.record is not None
     assert backend.record["mirrored_edges"] == ["k::causal::x"], "precomputed in the record"
     assert backend.record["added_entities"] == ["ent_m"]
+    assert backend.record["mirror_sources"] == {"k::causal::x": 7}, "the source row (LOW-3)"
     assert names.index("mirror k::causal::x") > 0
     assert names.index("associate_entities ['ent_m']") > 0
 

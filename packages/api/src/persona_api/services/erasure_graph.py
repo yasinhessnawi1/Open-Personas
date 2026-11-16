@@ -58,6 +58,7 @@ __all__ = [
     "merge_record",
     "names_only_the_doomed_gave",
     "mirror_id_for",
+    "mirrors_to_remove",
     "plan_trails",
     "unmerged",
     "without_alias_names",
@@ -430,33 +431,101 @@ def mirror_id_for(
     return None if src == dst else make_edge_id(src, dst, LinkType(link_type))
 
 
+def mirrors_to_remove(
+    asserted_keys: Iterable[int],
+    mirror_sources: Iterable[tuple[str, str, int]],
+    mirror_rows: Mapping[tuple[str, str], Iterable[int]],
+) -> list[int]:
+    """The edge keys of every mirror row descended from the persona's edges (review LOW-3).
+
+    ``mirror_sources`` is each merge record's ``(mirror id, run id, source edge_key)``, and
+    ``mirror_rows`` the edge keys of each run's mirror rows, open or closed (a mirror on a
+    canonical that was itself merged later is closed, and is the source of the next mirror). A
+    mirror whose source is one of the persona's rows goes; so does a mirror whose source is
+    such a mirror's row, followed to the end of the chain.
+    """
+    keys = set(asserted_keys)
+    sources = list(mirror_sources)
+    found: set[int] = set()
+    grew = True
+    while grew:
+        grew = False
+        for mirror_id, run_id, source_key in sources:
+            rows = set(mirror_rows.get((mirror_id, run_id), ())) - found
+            if source_key in keys and rows:
+                found |= rows
+                keys |= rows
+                grew = True
+    return sorted(found)
+
+
+def _mirror_rows(conn: Connection, owner_id: str) -> dict[tuple[str, str], set[int]]:
+    """Every consolidation mirror row of the owner: ``{(edge id, run id): {edge_key}}``."""
+    rows = conn.execute(
+        select(graph_edges.c.id, graph_edges.c.edge_key, graph_edges.c.provenance).where(
+            graph_edges.c.owner_id == owner_id,
+            cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
+        )
+    ).all()
+    out: dict[tuple[str, str], set[int]] = {}
+    for edge_id, edge_key, provenance in rows:
+        reason = str((provenance or {}).get("reason") or "")
+        if reason.startswith("consolidation:"):
+            run_id = reason.removeprefix("consolidation:")
+            out.setdefault((str(edge_id), run_id), set()).add(int(edge_key))
+    return out
+
+
 def _mirrors_of_asserted(conn: Connection, owner_id: str, persona_id: str) -> int:
     """The mirrors on a canonical of edges the persona asserted on a member that stays.
 
     The persona's edge goes by the edge rule, but consolidation copied it onto the canonical as
-    a SYSTEM mirror, which would survive unattributed (review M-3). Deleted only while it is
-    still that merge's mirror.
+    a SYSTEM mirror, which would survive unattributed (review M-3). A record written since
+    LOW-3 names each mirror's source row, so the mirror rows are found by that, chains and
+    history rows included, and deleted by edge_key; an older record is matched by recomputing
+    the open mirror's id. Either way a row goes only while it carries the merge's provenance.
     """
     asserted = conn.execute(
-        select(graph_edges.c.src_node_id, graph_edges.c.dst_node_id, graph_edges.c.link_type)
+        select(
+            graph_edges.c.edge_key,
+            graph_edges.c.src_node_id,
+            graph_edges.c.dst_node_id,
+            graph_edges.c.link_type,
+        )
         .where(graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id))
-        .order_by(graph_edges.c.id)
+        .order_by(graph_edges.c.edge_key)
     ).all()
-    ends = sorted({n for e in asserted for n in (e.src_node_id, e.dst_node_id)})
-    members = conn.execute(
+    merged = conn.execute(
         select(nodes_t.c.id, nodes_t.c.metadata).where(
-            nodes_t.c.owner_id == owner_id,
-            nodes_t.c.id.in_(ends),
-            nodes_t.c.merged_into.is_not(None),
+            nodes_t.c.owner_id == owner_id, nodes_t.c.merged_into.is_not(None)
         )
     ).all()
-    records = {m.id: merge_record(m.metadata) for m in members}
+    records = {m.id: merge_record(m.metadata) for m in merged}
+    current = [r for r in records.values() if r is not None and "mirror_sources" in r]
+    legacy = {i: r for i, r in records.items() if r is not None and "mirror_sources" not in r}
+    keys = mirrors_to_remove(
+        (int(e.edge_key) for e in asserted),
+        (
+            (str(mirror), str(record.get("run_id")), int(key))
+            for record in current
+            for mirror, key in (record.get("mirror_sources") or {}).items()
+        ),
+        _mirror_rows(conn, owner_id),
+    )
     deleted = 0
+    if keys:
+        deleted += conn.execute(
+            delete(graph_edges).where(
+                graph_edges.c.owner_id == owner_id,
+                graph_edges.c.edge_key.in_(keys),
+                cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
+            )
+        ).rowcount
     for edge in asserted:
-        for member_id in {edge.src_node_id, edge.dst_node_id} & set(records):
-            record = records[member_id]
-            canonical = record.get("canonical") if record else None
-            if record is None or not isinstance(canonical, str):
+        for member_id in {edge.src_node_id, edge.dst_node_id} & set(legacy):
+            record = legacy[member_id]
+            canonical = record.get("canonical")
+            if not isinstance(canonical, str):
                 continue
             mirror = mirror_id_for(
                 edge.src_node_id,

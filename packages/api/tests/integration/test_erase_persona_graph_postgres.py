@@ -525,3 +525,51 @@ def test_erasing_the_merged_member_leaves_an_edge_another_persona_asserted_first
             {"o": _OWNER},
         ).scalar_one()
     assert kept == _OTHER
+
+
+def test_a_mirror_of_a_mirror_of_the_personas_edge_goes_too(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review LOW-3: m's edge (the persona's) mirrored onto c1, and c1 later merged into c2."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("c_m", "c_1", "c_2", "c_x"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("e_cm", "c_m", "c_x", _PERSONA))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+    for run, canonical, member in (("rc1", "c_1", "c_m"), ("rc2", "c_2", "c_1")):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, member)],
+            run_id=run,
+            now=_NOW,
+            epoch=1,
+        )
+    assert _open_edges(migrated_engine, "c_2") == {"c_2::causal::c_x"}, "the second mirror"
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    counts = erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert _open_edges(migrated_engine, "c_2") == set()
+    assert counts["mirrors_of_asserted_deleted"] >= 1

@@ -13,6 +13,7 @@ from persona_api.services.erasure_graph import (
     delete_mirrors,
     merge_record,
     mirror_id_for,
+    mirrors_to_remove,
     names_only_the_doomed_gave,
     plan_trails,
     unmerged,
@@ -273,3 +274,22 @@ def test_a_name_a_surviving_member_also_gave_stays() -> None:
     assert names_only_the_doomed_gave(["oslo", "bergen", ""], ["oslo"]) == ["bergen"]
     assert names_only_the_doomed_gave(["oslo"], ["oslo"]) == []
     assert names_only_the_doomed_gave(["b", "a", "a"], []) == ["a", "b"]
+
+
+def test_mirrors_are_found_by_their_source_row_and_followed_down_a_chain() -> None:
+    """Review LOW-3: a mirror of a mirror (its canonical merged again) goes with the first."""
+    sources = [
+        ("k1::causal::x", "r1", 10),  # mirrors the persona's edge, row 10
+        ("k2::causal::x", "r2", 11),  # mirrors k1's mirror, whose row (now closed) is 11
+        ("k3::causal::y", "r3", 99),  # mirrors someone else's edge
+    ]
+    rows = {
+        ("k1::causal::x", "r1"): [11],
+        ("k2::causal::x", "r2"): [12],
+        ("k3::causal::y", "r3"): [13],
+    }
+
+    assert mirrors_to_remove([10], sources, rows) == [11, 12]
+    assert mirrors_to_remove([], sources, rows) == []
+    assert mirrors_to_remove([10], sources, {}) == [], "no mirror row left to remove"
+    assert mirrors_to_remove([10], sources[:1], rows) == [11], "the chain ends at k1"
