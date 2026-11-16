@@ -8,6 +8,7 @@ memory row whose owner is gone. Runs in CI.
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +29,12 @@ from persona.errors import MemoryOwnerMissingError
 from persona.stores.postgres import PostgresBackend
 from persona_api.services import erasure_service
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
-from persona_api.services.erasure_service import PersonaEraseDeps, capture_persona, erase_persona
+from persona_api.services.erasure_service import (
+    AUDIT_CONTENT_KEYS,
+    PersonaEraseDeps,
+    capture_persona,
+    erase_persona,
+)
 from sqlalchemy import create_engine, event, text
 
 if TYPE_CHECKING:
@@ -190,6 +196,12 @@ def test_nothing_of_the_persona_remains_on_postgres_and_its_neighbours_keep_all(
     assert done is not None
     assert done.state is ErasureState.COMPLETE
     assert sum(done.counts["memory"].values()) == 7
+    # R9-291: the kept log keeps ids and labels, and no content key is left in it.
+    kept = (seeded.audit_root / f"{PERSONA}.jsonl").read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line) for line in kept]
+    assert events, "the log is kept"
+    assert all(not AUDIT_CONTENT_KEYS & (e.get("metadata") or {}).keys() for e in events)
+    assert all(e.get("reason") is None for e in events)
 
 
 def test_after_the_erasure_the_guard_refuses_new_memory_for_the_persona(

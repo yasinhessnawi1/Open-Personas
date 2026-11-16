@@ -445,6 +445,7 @@ def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -
     graph = (seeded.audit_root / f"{OWNER}.jsonl").read_text(encoding="utf-8")
     assert SECRET not in own
     assert json.loads(own)["chunk_ids"] == ["c"]
+    assert json.loads(own)["metadata"] == {"to_version": "2"}, "R9-291: content keys go"
     lines = [json.loads(line) for line in graph.splitlines()]
     assert {e["written_by"]: e["reason"] for e in lines} == {PERSONA: None, SIBLING: SECRET}
 

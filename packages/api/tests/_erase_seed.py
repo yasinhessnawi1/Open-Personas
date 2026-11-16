@@ -313,7 +313,16 @@ def _persona_files(seeded: Seeded, owner: str, pid: str) -> None:
     local_only.mkdir(parents=True, exist_ok=True)
     (local_only / "out.txt").write_text(SECRET, encoding="utf-8")
     (seeded.audit_root / f"{pid}.jsonl").write_text(
-        json.dumps({"persona_id": pid, "chunk_ids": ["c"], "reason": SECRET}) + "\n",
+        json.dumps(
+            {
+                "persona_id": pid,
+                "chunk_ids": ["c"],
+                "reason": SECRET,
+                # R9-291: a content key in the kept log's metadata, beside an id-like one.
+                "metadata": {"verbatim_ask": SECRET, "to_version": "2"},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     with (seeded.audit_root / f"{owner}.jsonl").open("a", encoding="utf-8") as graph_log:
