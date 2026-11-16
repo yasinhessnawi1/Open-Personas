@@ -368,6 +368,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         counts = sweep_legacy_audit_files(
             engine, args.audit_root or Path(config.audit_root), dry_run=args.dry_run
         )
+    except Exception as exc:  # noqa: BLE001 - the type only (review L4): a message can carry paths
+        print(f"legacy audit sweep failed: {type(exc).__name__}", file=sys.stderr)  # noqa: T201
+        return 1
     finally:
         engine.dispose()
     for line in counts.lines():

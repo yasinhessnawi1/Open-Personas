@@ -483,3 +483,32 @@ def test_a_dry_run_counts_the_backlog_and_changes_nothing(engine: Engine, root: 
 
     assert counts == LegacySweepCounts(kept_known=1, scrubbed_backlog=1)
     assert store.read_bytes() == before
+
+
+def test_the_cli_reports_a_failure_by_its_type_only(
+    engine: Engine,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review L4: no traceback and no message (a message can carry a path); exit 1."""
+    import persona_api.config  # noqa: PLC0415
+    import persona_api.db.engine  # noqa: PLC0415
+
+    class _Config:
+        database_url = "sqlite://"
+        audit_root = str(root)
+
+    def _broken(*_a: Any, **_k: Any) -> Any:  # noqa: ANN401
+        msg = f"cannot read {root / _GONE}"
+        raise OSError(msg)
+
+    monkeypatch.setattr(persona_api.config, "APIConfig", _Config)
+    monkeypatch.setattr(persona_api.db.engine, "create_db_engine", lambda _url: engine)
+    monkeypatch.setattr(legacy_audit_sweep, "sweep_legacy_audit_files", _broken)
+
+    assert legacy_audit_sweep.main([]) == 1
+
+    out = capsys.readouterr()
+    assert "OSError" in out.err
+    assert _GONE not in out.err + out.out
