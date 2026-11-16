@@ -195,19 +195,25 @@ def _reorganising(node_id: str) -> MemoryNodeChangedError:
 
 
 def _forget_composition(
-    request: Request, user: AuthenticatedUser, node_id: str
+    request: Request, user: AuthenticatedUser, node_id: str, *, require_node: bool = True
 ) -> tuple[GraphStore, Backend, AuditLogger, Engine]:
     """The four pieces a forget needs, or a 404 (node absent/not-owned, or composition
     incomplete — no graph, no episodic backend, or no RLS engine wired, e.g. the
     community/no-DB edition). Existence-disclosure-safe: both reasons read identically
-    to the caller (mirrors the K5 ``delete_node`` pattern)."""
+    to the caller (mirrors the K5 ``delete_node`` pattern).
+
+    ``require_node=False`` is the forget's (R9-287 round 2 MEDIUM-1): a forget whose node
+    went but whose evidence delete failed is retried with the same body, and the retry still
+    removes the confirmed evidence. Only an incomplete composition 404s then."""
     store = _graph_store(request)
-    detail = None if store is None else memory_service.node_detail(store, user.id, node_id)
+    missing_node = require_node and (
+        store is None or memory_service.node_detail(store, user.id, node_id) is None
+    )
     backend = _memory_backend(request)
     audit_logger = _audit_logger(request)
     rls_engine: Engine | None = getattr(request.app.state, "rls_engine", None)
     if (
-        detail is None
+        missing_node
         or store is None
         or backend is None
         or audit_logger is None
@@ -252,7 +258,9 @@ async def forget_node(
     resurrection guard, since a sleep-time consolidation pass can only re-distill from
     evidence that still exists. 404 when the node is not the caller's.
     """
-    store, backend, audit_logger, rls_engine = _forget_composition(request, user, node_id)
+    store, backend, audit_logger, rls_engine = _forget_composition(
+        request, user, node_id, require_node=False
+    )
     try:
         await asyncio.to_thread(
             memory_service.forget,

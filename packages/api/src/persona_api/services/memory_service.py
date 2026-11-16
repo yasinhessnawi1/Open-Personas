@@ -648,6 +648,10 @@ def forget(
     raw chunk covers (K8-D-14) and starves the sleep-time engine's re-distillation (the
     resurrection guard).
 
+    Idempotent (round 2 MEDIUM-1): a node already gone is no error, so a forget whose
+    evidence delete failed after the node went is retried with the same body and removes
+    the evidence then.
+
     ``rls_engine`` re-derives the owner's persona-id set (``list_personas``) and any
     pair naming a persona outside it is dropped before deletion — defense in depth
     on top of RLS (which already fails a foreign ``persona_id`` closed at the

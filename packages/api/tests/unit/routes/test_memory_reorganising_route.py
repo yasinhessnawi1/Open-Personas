@@ -38,7 +38,9 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(memory_routes.memory_service, "delete", _busy)
     monkeypatch.setattr(memory_routes.memory_service, "forget", _busy)
     monkeypatch.setattr(
-        memory_routes, "_forget_composition", lambda *_a: (object(), object(), object(), object())
+        memory_routes,
+        "_forget_composition",
+        lambda *_a, **_k: (object(), object(), object(), object()),
     )
     app.state.verify_token = _verify
     app.state.admin_engine = None
@@ -81,7 +83,9 @@ def _app_with(monkeypatch: pytest.MonkeyPatch, fake: Any) -> Any:  # noqa: ANN40
     monkeypatch.setattr(memory_routes.memory_service, "delete", fake)
     monkeypatch.setattr(memory_routes.memory_service, "forget", fake)
     monkeypatch.setattr(
-        memory_routes, "_forget_composition", lambda *_a: (object(), object(), object(), object())
+        memory_routes,
+        "_forget_composition",
+        lambda *_a, **_k: (object(), object(), object(), object()),
     )
     app.state.verify_token = _verify
     app.state.admin_engine = None
