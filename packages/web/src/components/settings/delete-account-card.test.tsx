@@ -188,4 +188,31 @@ describe("delete account card", () => {
     await waitFor(() => expect(apiGet).toHaveBeenCalledWith("/v1/me/wallet"));
     expect(slot("delete-account-refund")).toBeNull();
   });
+
+  it("signs out first, and only then leaves for the goodbye page", async () => {
+    // Review L6: the next page must not still hold the session.
+    let finishSignOut: () => void = () => undefined;
+    signOut.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSignOut = resolve;
+        }),
+    );
+    apiPost.mockResolvedValue({
+      response: new Response(null, { status: 202 }),
+      data: { erasure_id: "erasure_1", state: "pending" },
+    });
+    expects("ann@example.test");
+    renderCard();
+    await openAndType("ann@example.test");
+
+    fireEvent.click(slot("delete-account-submit"));
+
+    await waitFor(() => expect(signOut).toHaveBeenCalledOnce());
+    expect(replace).not.toHaveBeenCalled();
+    finishSignOut();
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/account-deleted"),
+    );
+  });
 });

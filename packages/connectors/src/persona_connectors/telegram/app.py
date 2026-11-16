@@ -26,6 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from persona.errors import AuthenticationError
 
+from persona_connectors.errors import AccountErasedTokenError
 from persona_connectors.telegram.webhook import TELEGRAM_SECRET_HEADER, verify_webhook_secret
 
 if TYPE_CHECKING:
@@ -108,6 +109,12 @@ def build_telegram_app(
         bearer = authorization.removeprefix("Bearer ").strip()
         try:
             user = await verify_jwt(bearer)
+        except AccountErasedTokenError:
+            # R9-284 T9 (review L6): a still-valid token for an erased account.
+            return JSONResponse(
+                {"error": "account_erased", "detail": "this account was deleted"},
+                status_code=410,
+            )
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         deep_link = await issue_deep_link(user.id)

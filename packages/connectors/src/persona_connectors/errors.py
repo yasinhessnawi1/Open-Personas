@@ -13,7 +13,7 @@ the base so T1's surface is real. Import-decoupled from persona_api.
 
 from __future__ import annotations
 
-from persona.errors import PersonaError
+from persona.errors import AuthenticationError, PersonaError
 
 __all__ = [
     "ConnectorError",
@@ -256,3 +256,11 @@ class SlackRateLimitError(SlackApiError):
         merged = {**(context or {}), "retry_after": str(retry_after)}
         super().__init__(message, context=merged)
         self.retry_after = retry_after
+
+
+class AccountErasedTokenError(AuthenticationError):
+    """A valid token for an account that was erased (R9-284 T9 review L6): answered 410.
+
+    A subclass of :class:`persona.errors.AuthenticationError`, so any route that does not
+    know it still refuses the caller (401) rather than letting it through.
+    """

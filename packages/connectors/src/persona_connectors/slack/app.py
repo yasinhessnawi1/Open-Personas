@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from persona.errors import AuthenticationError
 
-from persona_connectors.errors import LinkTokenInvalidError, SlackApiError
+from persona_connectors.errors import AccountErasedTokenError, LinkTokenInvalidError, SlackApiError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -82,6 +82,12 @@ def build_slack_app(
         bearer = authorization.removeprefix("Bearer ").strip()
         try:
             user = await verify_jwt(bearer)
+        except AccountErasedTokenError:
+            # R9-284 T9 (review L6): a still-valid token for an erased account.
+            return JSONResponse(
+                {"error": "account_erased", "detail": "this account was deleted"},
+                status_code=410,
+            )
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         authorize_url = await issue_authorize_url(user.id)

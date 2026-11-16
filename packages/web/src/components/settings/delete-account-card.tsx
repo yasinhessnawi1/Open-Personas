@@ -18,7 +18,7 @@ import { useAccount } from "@/auth";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { unwrap } from "@/lib/api/client";
+import { ACCOUNT_DELETED_PATH, unwrap } from "@/lib/api/client";
 import { useApi } from "@/lib/api/use-api";
 
 export function DeleteAccountCard() {
@@ -89,8 +89,9 @@ export function DeleteAccountCard() {
       setBusy(false);
       return;
     }
-    account.signOut?.();
-    router.replace("/account-deleted");
+    // The session goes first (review L6), so nothing on the next page still holds it.
+    await account.signOut?.();
+    router.replace(ACCOUNT_DELETED_PATH);
   }
 
   return (

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 from persona_api.errors import AccountErasedError
 from persona_api.services.erasure_ledger import ErasureLedger, SubjectKind
-from persona_api.services.user_service import ensure_user
+from persona_api.services.user_service import account_erased, ensure_user
 from sqlalchemy import text
 
 if TYPE_CHECKING:
@@ -88,3 +88,14 @@ def test_the_fence_probe_uses_the_subject_index(migrated_engine: Engine) -> None
             ).scalars()
         )
     assert "idx_erasures_subject" in plan
+
+
+def test_the_shared_fence_query_answers_for_open_and_finished_erasures(
+    migrated_engine: Engine,
+) -> None:
+    """Review L6: the connector service's check, the same probe as the upsert's."""
+    assert account_erased(migrated_engine, "user_q") is False
+    _erase(migrated_engine, "user_q", finish=False)
+    assert account_erased(migrated_engine, "user_q") is True
+    _erase(migrated_engine, "user_r", finish=True)
+    assert account_erased(migrated_engine, "user_r") is True

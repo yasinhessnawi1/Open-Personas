@@ -27,6 +27,7 @@ from persona.logging import get_logger
 
 from persona_connectors._postmark.webhook import guard_inbound
 from persona_connectors.email.inbound import missing_inbound_field, parse_inbound_email
+from persona_connectors.errors import AccountErasedTokenError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -131,6 +132,12 @@ def build_email_app(
         bearer = authorization.removeprefix("Bearer ").strip()
         try:
             user = await verify_jwt(bearer)
+        except AccountErasedTokenError:
+            # R9-284 T9 (review L6): a still-valid token for an erased account.
+            return JSONResponse(
+                {"error": "account_erased", "detail": "this account was deleted"},
+                status_code=410,
+            )
         except AuthenticationError:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         code = await issue_code(user.id)

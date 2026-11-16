@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { ApiError, readRateLimit, unwrap } from "./client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ApiError,
+  createApiClient,
+  isAccountErased,
+  readRateLimit,
+  unwrap,
+} from "./client";
 
 function headers(init: Record<string, string>): Headers {
   return new Headers(init);
@@ -79,5 +85,54 @@ describe("unwrap", () => {
     );
     expect(err.isRateLimited).toBe(true);
     expect(err.rateLimit.retryAfter).toBe(30);
+  });
+});
+
+describe("an erased account (R9-284 T9, review L6)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function answer(status: number, body: object) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("is a 410 with the account_erased code, and nothing else", async () => {
+    expect(
+      await isAccountErased(answer(410, { error: "account_erased" })),
+    ).toBe(true);
+    expect(await isAccountErased(answer(410, { error: "gone" }))).toBe(false);
+    expect(
+      await isAccountErased(answer(401, { error: "account_erased" })),
+    ).toBe(false);
+  });
+
+  it("sends the session away when the API says so", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answer(410, { error: "account_erased", detail: "x" })),
+    );
+    const onErased = vi.fn();
+    const client = createApiClient(async () => "token", onErased);
+
+    await client.GET("/v1/me/credits");
+
+    expect(onErased).toHaveBeenCalledOnce();
+  });
+
+  it("leaves every other answer alone", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answer(404, { error: "not_found" })),
+    );
+    const onErased = vi.fn();
+    const client = createApiClient(async () => "token", onErased);
+
+    await client.GET("/v1/me/credits");
+
+    expect(onErased).not.toHaveBeenCalled();
   });
 });

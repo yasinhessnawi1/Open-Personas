@@ -69,13 +69,44 @@ export class ApiError extends Error {
   }
 }
 
+/** Where an erased account's session is sent (R9-284 T9): the public goodbye page. */
+export const ACCOUNT_DELETED_PATH = "/account-deleted";
+
+/**
+ * True for the API's answer to an erased account's still-valid token: 410 with the
+ * `account_erased` code (R9-284 T9, review L6).
+ */
+export async function isAccountErased(response: Response): Promise<boolean> {
+  if (response.status !== 410) return false;
+  try {
+    const body = (await response.clone().json()) as ApiErrorBody;
+    return body?.error === "account_erased";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Build a typed API client. Pass a {@link TokenGetter} to inject
  * `Authorization: Bearer <jwt>` on every request (Clerk; T03). Omit it for
- * unauthenticated calls (e.g. health).
+ * unauthenticated calls (e.g. health). `onAccountErased` runs when the API says the
+ * account behind the token was erased (410 `account_erased`): the browser leaves for
+ * the goodbye page, the server redirects there.
  */
-export function createApiClient(getToken?: TokenGetter): Client<paths> {
+export function createApiClient(
+  getToken?: TokenGetter,
+  onAccountErased?: () => void,
+): Client<paths> {
   const client = createClient<paths>({ baseUrl: BASE_URL });
+  if (onAccountErased) {
+    const erased: Middleware = {
+      async onResponse({ response }) {
+        if (await isAccountErased(response)) onAccountErased();
+        return response;
+      },
+    };
+    client.use(erased);
+  }
   if (getToken) {
     const auth: Middleware = {
       async onRequest({ request }) {

@@ -104,6 +104,23 @@ _FENCED_UPSERT = text(
 )
 
 
+def account_erased(engine: Engine, user_id: str) -> bool:
+    """Whether this id has any account erasure, open or finished: one ``idx_erasures_subject``
+    probe. For callers that authenticate a user without the upsert (the connector service's
+    JWT path, review L6); needs an engine that can read the ledger row (BYPASSRLS)."""
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    "SELECT 1 FROM erasures WHERE subject_kind = 'account' "
+                    "AND subject_id = :id LIMIT 1"
+                ),
+                {"id": user_id},
+            ).first()
+            is not None
+        )
+
+
 def ensure_user(
     engine: Engine,
     *,
