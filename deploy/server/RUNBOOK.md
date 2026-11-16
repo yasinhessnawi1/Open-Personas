@@ -329,8 +329,12 @@ sudo systemctl start docker
 cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
 ```
 
-Then re-run `provision.sh`: it adds containerd's wait for the block volume (a drop-in and a
-`daemon-reload`, no restart) and is otherwise a no-op.
+After a rollback, `provision.sh` refuses (containerd's old root holds images again) until
+the move is redone from step 1; `/srv/containerd` still holds the first copy, which step 4's
+rsync brings up to date.
+
+Then, after a move that went through, re-run `provision.sh`: it adds containerd's wait for
+the block volume (a drop-in and a `daemon-reload`, no restart) and is otherwise a no-op.
 
 ## Step 4: the env files
 
