@@ -436,6 +436,10 @@ def _step_late_writes(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int
     }
 
 
+#: Steps that call another service (Stripe, Clerk). On a resume, one already recorded done is
+#: not called again (review L4); late_writes still re-runs the Stripe step on purpose.
+EXTERNAL_STEPS = frozenset({"stripe", "clerk"})
+
 STEPS: tuple[tuple[str, Step], ...] = (
     ("fence", _step_fence),
     ("stripe", _step_stripe),
@@ -477,6 +481,8 @@ def _erase_holding_the_lock(deps: AccountEraseDeps, erasure: Erasure) -> None:
         return
     for name, step in STEPS:
         current = ledger.get(SubjectKind.ACCOUNT, erasure.subject_id) or current
+        if name in EXTERNAL_STEPS and name in current.counts:
+            continue  # done on an earlier run: not called again
         try:
             counts = step(deps, current)
         except Exception as exc:

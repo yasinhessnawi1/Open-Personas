@@ -137,3 +137,64 @@ def test_boot_warns_for_each_missing_account_deletion_secret() -> None:
     config = APIConfig(edition=Edition.cloud, clerk_secret_key="sk_test_x")
 
     assert runner_mod.warn_missing_secrets(config) == ["PERSONA_CLERK_WEBHOOK_SECRET"]
+
+
+def test_a_failing_erasure_backs_off_doubling_up_to_an_hour(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L4: not every sweep; after SWEEP_SECONDS, then twice as long, capped."""
+    now = [1000.0]
+
+    def _boom(_d: object, _e: object) -> None:
+        raise RuntimeError("clerk is down")
+
+    monkeypatch.setattr(runner_mod, "erase_account", _boom)
+    runner = runner_mod.AccountEraseRunner(_deps(engine), clock=lambda: now[0])
+    erasure = _claim(engine, SubjectKind.ACCOUNT, "user_a")
+
+    delays = []
+    for _ in range(6):
+        runner._run(erasure)  # noqa: SLF001
+        assert runner.backing_off(erasure.id)
+        delays.append(runner._backoff[erasure.id][0])  # noqa: SLF001
+        now[0] += delays[-1]
+        assert not runner.backing_off(erasure.id), "free again once the delay has passed"
+
+    assert delays == [300.0, 600.0, 1200.0, 2400.0, 3600.0, 3600.0]
+
+
+def test_the_sweep_leaves_a_backing_off_erasure_alone(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+
+    def _boom(_d: object, _e: object) -> None:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(runner_mod, "erase_account", _boom)
+    runner = runner_mod.AccountEraseRunner(_deps(engine), clock=lambda: now[0])
+    erasure = _claim(engine, SubjectKind.ACCOUNT, "user_a")
+    runner._run(erasure)  # noqa: SLF001
+
+    assert runner.sweep() == 0
+    now[0] += runner_mod.SWEEP_SECONDS
+    assert runner.sweep() == 1
+    runner._executor.shutdown(wait=True)  # noqa: SLF001
+
+
+def test_a_success_clears_the_backoff(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    outcomes = [RuntimeError("once"), None]
+
+    def _flaky(_d: object, _e: object) -> None:
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    monkeypatch.setattr(runner_mod, "erase_account", _flaky)
+    runner = runner_mod.AccountEraseRunner(_deps(engine), clock=lambda: 0.0)
+    erasure = _claim(engine, SubjectKind.ACCOUNT, "user_a")
+
+    runner._run(erasure)  # noqa: SLF001
+    runner._run(erasure)  # noqa: SLF001
+
+    assert not runner.backing_off(erasure.id)

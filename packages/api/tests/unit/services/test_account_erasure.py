@@ -522,3 +522,21 @@ def test_each_kind_of_row_alone_compiles_too() -> None:
         {"erasure_id": "e", "source_table": "payg_grants", "source_id": "p", "credits": 1},
     ):
         str(ae.retained_insert([row]).compile(dialect=postgresql.dialect()))
+
+
+def test_a_resume_does_not_call_stripe_or_clerk_again(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L4: external steps recorded done on an earlier run are skipped."""
+    ran = _recording(monkeypatch)
+    erasure = _claim(engine)
+    ledger = ErasureLedger(engine)
+    ledger.record_step(erasure.id, "stripe", {"customers": 1})
+    ledger.record_step(erasure.id, "clerk", {"deleted": 1})
+    ledger.fail(erasure.id, "billing_failed")
+
+    ae.erase_account(_deps(engine), erasure)
+
+    assert "stripe" not in ran
+    assert "clerk" not in ran
+    assert "late_writes" in ran, "late_writes still runs (and re-runs Stripe itself)"

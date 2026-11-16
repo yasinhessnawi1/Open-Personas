@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,9 @@ _log = get_logger("api.erasure")
 
 #: How often each api process hands unfinished account erasures back to its runner.
 SWEEP_SECONDS = 300.0
+
+#: The longest a failing erasure waits between attempts (review L4); the stall alert covers it.
+MAX_BACKOFF_SECONDS = 3600.0
 
 # A year here is 366 days, so the retention is never shorter than the configured years.
 _DAYS_PER_YEAR = 366
@@ -94,10 +98,31 @@ def account_erase_deps_from_state(state: Any) -> AccountEraseDeps | None:  # noq
 class AccountEraseRunner:
     """Runs account erasures one at a time on a dedicated thread."""
 
-    def __init__(self, deps: AccountEraseDeps) -> None:
+    def __init__(self, deps: AccountEraseDeps, *, clock: Any = time.monotonic) -> None:  # noqa: ANN401
         self._deps = deps
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="account-erase")
         self._closed = threading.Event()
+        self._clock = clock
+        # A failing erasure is retried after SWEEP_SECONDS, then twice as long each time, up
+        # to MAX_BACKOFF_SECONDS (review L4), so it does not hit Stripe or Clerk every sweep.
+        self._backoff: dict[str, tuple[float, float]] = {}  # id -> (delay, not before)
+        self._lock = threading.Lock()
+
+    def backing_off(self, erasure_id: str) -> bool:
+        """Whether the sweep is leaving this erasure alone for now."""
+        with self._lock:
+            entry = self._backoff.get(erasure_id)
+        return entry is not None and self._clock() < entry[1]
+
+    def _failed(self, erasure_id: str) -> None:
+        with self._lock:
+            previous = self._backoff.get(erasure_id, (0.0, 0.0))[0]
+            delay = min(max(SWEEP_SECONDS, previous * 2), MAX_BACKOFF_SECONDS)
+            self._backoff[erasure_id] = (delay, self._clock() + delay)
+
+    def _succeeded(self, erasure_id: str) -> None:
+        with self._lock:
+            self._backoff.pop(erasure_id, None)
 
     def unready_reason(self, *, owner_id: str, origin: str) -> str | None:
         """Why this runner could not finish that account's erasure (``None``: it can)."""
@@ -114,7 +139,7 @@ class AccountEraseRunner:
         pending = [
             e
             for e in ErasureLedger(self._deps.engine).unfinished()
-            if e.subject_kind is SubjectKind.ACCOUNT
+            if e.subject_kind is SubjectKind.ACCOUNT and not self.backing_off(e.id)
         ]
         for erasure in pending:
             self.submit(erasure)
@@ -128,11 +153,14 @@ class AccountEraseRunner:
         try:
             erase_account(self._deps, erasure)
         except Exception as exc:  # noqa: BLE001 - recorded failed in the ledger; resumed
+            self._failed(erasure.id)
             _log.error(
                 "account erasure failed; the sweep resumes it erasure={eid} error={err}",
                 eid=erasure.id,
                 err=type(exc).__name__,
             )
+        else:
+            self._succeeded(erasure.id)
 
 
 def start_account_erasures(
