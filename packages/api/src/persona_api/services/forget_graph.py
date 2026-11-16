@@ -141,26 +141,33 @@ class ForgetReleaser:
             .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == node_id)
             .with_for_update()
         ).first()
+        if row is None:
+            return NodeRelease()  # review LOW-1: nothing to delete, nothing scanned
         members = merged_below(conn, owner_id, node_id)
         mirrors, records = _read_sources(conn, owner_id)
         doomed = {node_id, *members}
-        if row is not None:
-            _seed_incident(conn, owner_id, sorted(doomed), mirrors)
-            record = merge_record(row.metadata)
-            if record is not None:
-                others = [r for member, r in records.items() if member not in doomed]
-                kept = shared_legacy_mirrors(record, others)
-                if kept:
-                    # Hand _give_back a record without the mirrors another record still lists.
-                    record = {
-                        **record,
-                        "mirrored_edges": [
-                            m for m in record.get("mirrored_edges", []) if str(m) not in kept
-                        ],
-                    }
-                metadata = {**(row.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
-                given = SimpleNamespace(id=row.id, concept_name=row.concept_name, metadata=metadata)
-                _give_back(conn, owner_id, [given], doomed)
+        _seed_incident(conn, owner_id, sorted(doomed), mirrors)
+        record = merge_record(row.metadata)
+        named = {key for _, _, key in mirrors.sources}
+        if record is None and not members and not mirrors.seeds & named:
+            # Review LOW-1: never merged, nothing merged into it, and no record names one of
+            # its edges. The records read above answered that; the mirror and orphan scans
+            # after the delete would find nothing of it.
+            return NodeRelease()
+        if record is not None:
+            others = [r for member, r in records.items() if member not in doomed]
+            kept = shared_legacy_mirrors(record, others)
+            if kept:
+                # Hand _give_back a record without the mirrors another record still lists.
+                record = {
+                    **record,
+                    "mirrored_edges": [
+                        m for m in record.get("mirrored_edges", []) if str(m) not in kept
+                    ],
+                }
+            metadata = {**(row.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
+            given = SimpleNamespace(id=row.id, concept_name=row.concept_name, metadata=metadata)
+            _give_back(conn, owner_id, [given], doomed)
 
         def after() -> dict[str, int]:
             removed = _remove_mirrors(conn, owner_id, mirrors)
