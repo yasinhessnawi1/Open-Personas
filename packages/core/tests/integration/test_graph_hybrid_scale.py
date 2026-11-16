@@ -179,6 +179,7 @@ def test_full_stack_latency_recall_and_no_drop_at_scale(graph_engine: Engine, ba
             embedder=embedder,
             audit_logger=MemoryAuditLogger(),
             settings=settings,
+            persona_guard=False,
         )
         store.rebuild_index("u1")
         store.rebuild_index("u2")

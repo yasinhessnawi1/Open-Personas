@@ -73,7 +73,7 @@ class PostgresGraphBackend:
     statements. Vectors are supplied pre-computed (the store embeds once).
     """
 
-    def __init__(self, *, engine: Engine, persona_guard: bool = False) -> None:
+    def __init__(self, *, engine: Engine, persona_guard: bool) -> None:
         self._engine = engine
         # R9-284: hold each named persona's row in the write's own transaction. Off where the
         # schema has no ``personas`` table (the graph's own tests); the api turns it on.

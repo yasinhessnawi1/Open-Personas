@@ -84,7 +84,7 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     vector = embedder.encode(["x"])[0]
     for node in (
         _node("only", _PERSONA, _PERSONA),
@@ -205,7 +205,7 @@ def consolidated(migrated_engine: Engine, embedder: Any) -> tuple[Engine, Postgr
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
     vector = embedder.encode(["x"])[0]
     for node in (
         _node("p_canon", _PERSONA),

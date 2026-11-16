@@ -89,8 +89,9 @@ def env(
         embedder=bge_embedder,
         audit_logger=MemoryAuditLogger(),
         settings=GraphSettings(),
+        persona_guard=False,
     )
-    backend = PostgresGraphBackend(engine=_engine)
+    backend = PostgresGraphBackend(engine=_engine, persona_guard=False)
     yield cast("GraphStore", store), backend
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)

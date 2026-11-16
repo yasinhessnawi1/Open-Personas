@@ -119,7 +119,9 @@ def store(_engine: Engine) -> Iterator[PostgresGraphStore]:
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    yield build_graph_store(engine=_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger())
+    yield build_graph_store(
+        engine=_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger(), persona_guard=False
+    )
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)
 

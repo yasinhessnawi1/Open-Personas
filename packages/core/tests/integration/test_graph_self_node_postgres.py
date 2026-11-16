@@ -106,7 +106,11 @@ def store(request: pytest.FixtureRequest, _engine: Engine) -> Iterator[tuple[Gra
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
     built = build_graph_store(
-        engine=_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger(), settings=settings
+        engine=_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+        persona_guard=False,
     )
     yield cast("GraphStore", built), _engine
     with _engine.begin() as conn:

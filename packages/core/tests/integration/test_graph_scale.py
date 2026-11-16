@@ -142,6 +142,7 @@ def test_store_holds_and_queries_a_large_graph(graph_engine: Engine, backend: st
             embedder=embedder,
             audit_logger=MemoryAuditLogger(),
             settings=settings,
+            persona_guard=False,
         )
         store.rebuild_index("u1")  # build the index from Postgres at scale (criterion 9 + 12)
 

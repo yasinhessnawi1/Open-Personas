@@ -80,7 +80,10 @@ def index_and_backend(_engine: Engine) -> Iterator[tuple[PgvectorGraphIndex, Pos
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    yield PgvectorGraphIndex(engine=_engine), PostgresGraphBackend(engine=_engine)
+    yield (
+        PgvectorGraphIndex(engine=_engine),
+        PostgresGraphBackend(engine=_engine, persona_guard=False),
+    )
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)
 

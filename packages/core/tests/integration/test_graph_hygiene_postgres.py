@@ -160,7 +160,10 @@ def test_common_path_owner_scoped_no_in_list(clean: Engine) -> None:
     _bulk_insert(clean, "u1", 20)
     _bulk_insert(clean, "u2", 20)  # a second tenant
     store = build_graph_store(
-        engine=clean, embedder=_QueryEmbedder(), audit_logger=MemoryAuditLogger()
+        engine=clean,
+        embedder=_QueryEmbedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
     )
     # common path (allowlist=None) → only u1's nodes, and it used search_owner.
     hits = store.search_dense("u1", "u1:0", top_k=50)
@@ -176,7 +179,10 @@ def test_common_path_excludes_merged(clean: Engine) -> None:
             {"c": "u1::node::00000000", "m": "u1::node::00000001"},
         )
     store = build_graph_store(
-        engine=clean, embedder=_QueryEmbedder(), audit_logger=MemoryAuditLogger()
+        engine=clean,
+        embedder=_QueryEmbedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
     )
     ids = {n.id for n in store.search_dense("u1", "u1:1", top_k=50)}
     assert "u1::node::00000001" not in ids  # the merged node is invisible
@@ -185,7 +191,10 @@ def test_common_path_excludes_merged(clean: Engine) -> None:
 def test_k4_gated_allowlist_path_still_scopes(clean: Engine) -> None:
     _bulk_insert(clean, "u1", 10)
     store = build_graph_store(
-        engine=clean, embedder=_QueryEmbedder(), audit_logger=MemoryAuditLogger()
+        engine=clean,
+        embedder=_QueryEmbedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
     )
     # a K4-style positive allowlist (a subset) → only those nodes come back.
     allow = {"u1::node::00000002", "u1::node::00000003"}

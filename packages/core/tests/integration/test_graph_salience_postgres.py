@@ -130,9 +130,12 @@ def env(pg_engine: Engine):  # noqa: ANN201
     with pg_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=pg_engine)
+    backend = PostgresGraphBackend(engine=pg_engine, persona_guard=False)
     store = build_graph_store(
-        engine=pg_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger()
+        engine=pg_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
     )
     pass_ = ConsolidationPass(
         backend=backend,

@@ -127,7 +127,11 @@ def stack(request: pytest.FixtureRequest, _engine: Engine) -> Iterator[_Stack]:
         graph_metadata.create_all(conn)
     audit = MemoryAuditLogger()
     store = build_graph_store(
-        engine=_engine, embedder=_Embedder(), audit_logger=audit, settings=settings
+        engine=_engine,
+        embedder=_Embedder(),
+        audit_logger=audit,
+        settings=settings,
+        persona_guard=False,
     )
     yield store, audit, _engine
     with _engine.begin() as conn:
@@ -190,7 +194,7 @@ def test_merge_emits_exactly_one_audit(stack: _Stack) -> None:
 def test_neighbors_entity_thread(stack: _Stack) -> None:
     store, _audit, engine = stack
     registry = PostgresEntityRegistry(
-        backend=PostgresGraphBackend(engine=engine), embedder=_Embedder()
+        backend=PostgresGraphBackend(engine=engine, persona_guard=False), embedder=_Embedder()
     )
     ent = registry.create_entity("u1", canonical_name="Dr. Hansen")
     a = store.merge("u1", _cand("doctor visit one", entity_ids=(ent.id,)))  # type: ignore[attr-defined]

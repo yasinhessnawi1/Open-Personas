@@ -108,7 +108,7 @@ def backend(_graph_engine: Engine) -> Iterator[PostgresGraphBackend]:
     with _graph_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    yield PostgresGraphBackend(engine=_graph_engine)
+    yield PostgresGraphBackend(engine=_graph_engine, persona_guard=False)
     with _graph_engine.begin() as conn:
         graph_metadata.drop_all(conn)
 

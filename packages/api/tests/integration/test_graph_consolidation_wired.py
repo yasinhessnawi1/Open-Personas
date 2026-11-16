@@ -109,7 +109,7 @@ def owner_seeded(migrated_engine: Engine) -> Engine:
 
 def _seed_band_dup(engine: Engine, owner: str) -> None:
     """Seed a canonical + a true band-dup member + an external assertion target (superuser)."""
-    backend = PostgresGraphBackend(engine=engine)
+    backend = PostgresGraphBackend(engine=engine, persona_guard=False)
     c, m, x = f"{owner}::node::00000000", f"{owner}::node::00000001", f"{owner}::node::00000002"
     backend.insert_node(owner, _node(c, "Canonical", ev=2), _vec(0))
     backend.insert_node(owner, _node(m, "Member", ev=1), _vec(0, 0.85))
@@ -141,7 +141,7 @@ def _seed_band_dup(engine: Engine, owner: str) -> None:
 
 
 def _build_pass(app_engine: Engine, embedder: Embedder, audit_root: Path) -> ConsolidationPass:
-    backend = PostgresGraphBackend(engine=app_engine)
+    backend = PostgresGraphBackend(engine=app_engine, persona_guard=False)
     settings = GraphSettings()
     return ConsolidationPass(
         backend=backend,
@@ -276,7 +276,7 @@ def test_pass_under_persona_app_is_owner_scoped_and_fails_closed(
     # fail-closed: with NO owner GUC bound, the RLS-scoped candidate scan yields nothing
     # (the persona_app checkout listener sets an empty GUC → current_setting IS NULL →
     # matches no policy row). The pass can read no candidate under an unbound owner.
-    scoped_backend = PostgresGraphBackend(engine=app_engine)
+    scoped_backend = PostgresGraphBackend(engine=app_engine, persona_guard=False)
     assert scoped_backend.dirty_candidates(_OWNER, None) == []
 
 
@@ -415,7 +415,7 @@ class _PoisonBackend(PostgresGraphBackend):
     """Injects a failure when a specific member's edges are closed (mid-merge)."""
 
     def __init__(self, *, engine: Engine, poison_member: str) -> None:
-        super().__init__(engine=engine)
+        super().__init__(engine=engine, persona_guard=False)
         self._poison = poison_member
 
     def close_edges_incident(
@@ -431,7 +431,7 @@ def test_one_cluster_failure_does_not_abort_the_run(
 ) -> None:
     # two independent clusters A(00,01) + B(10,11); poison member 01 → cluster A fails,
     # cluster B still merges, and the report records A's failure honestly.
-    backend = PostgresGraphBackend(engine=owner_seeded)  # superuser seed
+    backend = PostgresGraphBackend(engine=owner_seeded, persona_guard=False)  # superuser seed
     a_c, a_m = f"{_OWNER}::node::00000000", f"{_OWNER}::node::00000001"
     b_c, b_m = f"{_OWNER}::node::00000010", f"{_OWNER}::node::00000011"
     backend.insert_node(_OWNER, _node(a_c, "A-can", ev=2), _vec(0))

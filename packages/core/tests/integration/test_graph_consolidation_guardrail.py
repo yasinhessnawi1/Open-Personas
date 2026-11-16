@@ -148,7 +148,7 @@ def env(pg_engine: Engine) -> Iterator[tuple[PostgresGraphBackend, Consolidation
     with pg_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=pg_engine)
+    backend = PostgresGraphBackend(engine=pg_engine, persona_guard=False)
     pass_ = ConsolidationPass(
         backend=backend, index=_FakeIndex(), embedder=_Embedder(), audit_logger=MemoryAuditLogger()
     )

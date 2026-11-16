@@ -695,7 +695,7 @@ def build_graph_store(
     embedder: Embedder,
     audit_logger: AuditLogger,
     settings: GraphSettings | None = None,
-    persona_guard: bool = False,
+    persona_guard: bool,
 ) -> PostgresGraphStore:
     """Composition root: wire the transport, index, merge engine, and store.
 

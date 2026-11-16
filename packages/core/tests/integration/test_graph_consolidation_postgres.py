@@ -150,7 +150,7 @@ def env(pg_engine: Engine) -> Iterator[tuple[PostgresGraphBackend, _FakeIndex, C
     with pg_engine.begin() as conn:
         graph_metadata.drop_all(conn)
         graph_metadata.create_all(conn)
-    backend = PostgresGraphBackend(engine=pg_engine)
+    backend = PostgresGraphBackend(engine=pg_engine, persona_guard=False)
     index = _FakeIndex()
     pass_ = ConsolidationPass(
         backend=backend, index=index, embedder=_Embedder(), audit_logger=MemoryAuditLogger()

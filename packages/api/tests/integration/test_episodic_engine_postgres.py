@@ -55,7 +55,9 @@ def env(pg_engine: Engine, embedder: HashEmbedder384) -> dict[str, object]:
             text("INSERT INTO personas (id, owner_id, yaml) VALUES ('p1', 'u1', 'name: p1')")
         )
     backend = PostgresBackend(engine=pg_engine, embedder=embedder)
-    graph = build_graph_store(engine=pg_engine, embedder=embedder, audit_logger=MemoryAuditLogger())
+    graph = build_graph_store(
+        engine=pg_engine, embedder=embedder, audit_logger=MemoryAuditLogger(), persona_guard=False
+    )
     engine = EpisodicConsolidationEngine(
         backend=backend,
         pyramid=EpisodicPyramid(backend=backend, audit_logger=MemoryAuditLogger()),

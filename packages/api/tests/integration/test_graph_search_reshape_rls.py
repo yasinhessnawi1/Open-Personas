@@ -94,7 +94,10 @@ def test_reshaped_common_path_is_rls_isolated(migrated_engine: Engine, app_engin
     _seed(migrated_engine, "rls_u1", 15)  # superuser seed (bypasses RLS)
     _seed(migrated_engine, "rls_u2", 15)
     store = build_graph_store(
-        engine=app_engine, embedder=_Embedder(), audit_logger=MemoryAuditLogger()
+        engine=app_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
     )
 
     # bound to u1 (as the request/worker does): the no-IN-list common path returns
