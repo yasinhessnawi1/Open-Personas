@@ -49,7 +49,8 @@ def _node_row() -> dict[str, Any]:
         "embedding": _VECTOR,
         "embedding_model": "m",
         "content_hash": "h",
-        "provenance": [{"source": "system", "persona_id": _P, "written_at": _NOW.isoformat()}],
+        # As stored: a pydantic dump of the entry (the node CAS compares trails as written).
+        "provenance": [_by(_P).model_dump(mode="json")],
     }
 
 
@@ -100,6 +101,7 @@ class _Conn:
     def execute(self, stmt: Any, params: dict[str, str] | None = None) -> _Result:  # noqa: ANN401
         sql = str(stmt)
         self._engine.statements.append((self._txn, sql))
+        self._engine.objects.append(stmt)
         if "FOR KEY SHARE" in sql:
             assert params is not None
             self._engine.log.append((self._txn, f"hold {params['p']}"))
@@ -118,6 +120,7 @@ class _Engine:
         self.gone = set(gone)
         self.log: list[tuple[int, str]] = []
         self.statements: list[tuple[int, str]] = []
+        self.objects: list[Any] = []
         self.rowcount = 1
         self._next = 0
 
@@ -201,6 +204,19 @@ _WRITES = {
     "add_alias": (
         lambda b: b.add_alias("u1", "x", EntityAlias(surface="my doctor", persona_id=_P)),
         "update",
+    ),
+    "supersede_node": (
+        lambda b: b.supersede_node(
+            "u1",
+            _node(_P),
+            _VECTOR,
+            expected_content_hash="h",
+            expected_provenance=(_by(_P),),
+            valid_at=_NOW,
+            invalid_at=_NOW,
+            invalidated_by=None,
+        ),
+        "insert",
     ),
     # Round 7: every other method that takes guard_personas.
     "associate_entities": (
@@ -463,3 +479,49 @@ def test_a_stale_write_on_an_existing_row_is_a_stale_write_error() -> None:
         _CAS_WRITES["update_node"](_backend(engine))
     with pytest.raises(GraphStaleWriteError):
         _CAS_WRITES["set_merged_into"](_backend(engine))
+
+
+def _supersede(engine: _Engine, expected_hash: str) -> int | None:
+    return _backend(engine).supersede_node(
+        "u1",
+        _node(_P),
+        _VECTOR,
+        expected_content_hash=expected_hash,
+        expected_provenance=(_by(_P),),
+        valid_at=_NOW,
+        invalid_at=_NOW,
+        invalidated_by="superseded",
+    )
+
+
+def test_a_supersede_is_one_transaction_locked_and_checked_before_the_version() -> None:
+    """Round 11 MEDIUM-1: hold, lock, CAS, version, write; nothing outside it."""
+    engine = _Engine()
+
+    assert _supersede(engine, "h") == 1
+
+    assert len({txn for txn, _ in engine.log}) == 1, "one transaction"
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    sqls = [
+        str(o.compile(dialect=postgresql.dialect()))
+        for o in engine.objects
+        if "FOR KEY SHARE" not in str(o)
+    ]
+    assert sqls[0].startswith("SELECT graph_nodes.id")
+    assert sqls[0].endswith("FOR NO KEY UPDATE"), "the row is locked before it is read"
+    assert sqls[1].startswith("INSERT INTO graph_node_versions")
+    assert sqls[2].startswith("UPDATE graph_nodes")
+    assert engine.entries()[0] == f"hold {_P}", "the personas first"
+
+
+def test_a_supersede_that_lost_the_cas_writes_no_version() -> None:
+    """Round 11 MEDIUM-2: the row changed since it was read, so nothing is inserted."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    engine = _Engine()
+
+    with pytest.raises(GraphStaleWriteError):
+        _supersede(engine, "read before someone else wrote")
+
+    assert [s for _, s in engine.statements if s.startswith(("INSERT", "UPDATE"))] == []

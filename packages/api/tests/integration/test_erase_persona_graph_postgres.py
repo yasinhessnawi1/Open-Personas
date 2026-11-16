@@ -1751,3 +1751,65 @@ def test_an_extend_read_before_a_trail_only_erasure_is_refused_and_redone(
     assert extended is not None
     assert "and something new" in extended.content
     assert not [p for p in extended.provenance if p.reason and "t_pname" in p.reason]
+
+
+def test_a_supersede_read_before_the_erasure_leaves_no_version_with_the_name(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 11 MEDIUM-1: a contradiction read C (P's member's name in its alias list), P was
+    erased, then it superseded. The snapshot and the write are one CAS'd transaction, so it
+    is refused whole: no version of the pre-erasure row is left to restore the name from."""
+    import json  # noqa: PLC0415
+
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+    consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "r_c"),
+        [backend.get_node(_OWNER, "r_m")],
+        run_id="rs11",
+        now=_NOW,
+        epoch=1,
+    )
+    read = backend.get_node(_OWNER, "r_c")
+    assert read is not None
+    assert "r_m" in json.loads(read.metadata["_k7_aliases"])
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    contradiction = ConceptNode(
+        id=read.id,
+        node_kind=read.node_kind,
+        concept_name=read.concept_name,
+        content="the new account",
+        metadata=dict(read.metadata),
+        provenance=tuple(p for p in read.provenance if p.persona_id != _PERSONA),
+        created_at=read.created_at,
+    )
+    with pytest.raises(GraphStaleWriteError):
+        backend.supersede_node(
+            _OWNER,
+            contradiction,
+            embedder.encode(["x"])[0],
+            expected_content_hash=read.content_hash,
+            expected_provenance=read.provenance,
+            valid_at=_NOW,
+            invalid_at=_NOW + timedelta(seconds=1),
+            invalidated_by="contradicted",
+        )
+
+    with migrated_engine.connect() as conn:
+        holding = conn.execute(
+            text(
+                "SELECT count(*) FROM graph_node_versions WHERE owner_id = :o "
+                "AND node_id = 'r_c' AND metadata::text LIKE '%r_m%'"
+            ),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert holding == 0, "no version holds the erased member's name"
+    after = backend.get_node(_OWNER, "r_c")
+    assert after is not None
+    assert after.content != "the new account", "nothing was written"

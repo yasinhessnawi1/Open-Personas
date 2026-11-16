@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import math
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from persona.graph import merge as merge_module
@@ -162,6 +163,33 @@ class _FakeBackend:
             (self._next_version_key, node_id, node, list(emb), valid_at, invalid_at, invalidated_by)
         )
         return self._next_version_key
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+        valid_at: datetime,
+        invalid_at: datetime,
+        invalidated_by: str | None,
+    ) -> int | None:
+        """One transaction, as on Postgres: the CAS first, then the version, then the write."""
+        if node.id not in self.nodes:
+            return None
+        if self.nodes[node.id][0].content_hash != expected_content_hash:
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        version_key = self.snapshot_node_version(
+            owner_id,
+            node.id,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
+            invalidated_by=invalidated_by,
+        )
+        self.nodes[node.id] = (node, list(embedding))
+        return version_key
 
     def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
         invalids = [v[5] for v in self.versions if v[1] == node_id]
@@ -564,3 +592,65 @@ def test_a_write_that_keeps_losing_gives_up_after_three_tries() -> None:
         _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
 
     assert b.writes == 3
+
+
+class _RacedSupersede(_FakeBackend):
+    """Round 11: just before the first supersede, another writer appends to the node."""
+
+    def __init__(self, source: WriteSource) -> None:
+        super().__init__()
+        self.source = source
+        self.raced = False
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        if not self.raced:
+            self.raced = True
+            current, vector = self.nodes[node.id]
+            raced = current.model_dump(exclude={"content_hash"})
+            raced["content"] = current.content + " and also likes walks"
+            raced["provenance"] = [
+                *current.provenance,
+                NodeProvenance(source=self.source, written_at=NOW, reason="concurrent"),
+            ]
+            self.nodes[node.id] = (ConceptNode.model_validate(raced), vector)
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+@pytest.mark.parametrize("source", [WriteSource.PERSONA_SELF, WriteSource.USER, WriteSource.SYSTEM])
+def test_a_supersede_retry_leaves_no_orphan_version_and_decides_on_the_fresh_row(
+    source: WriteSource,
+) -> None:
+    """The reviewer's probe (round 11 MEDIUM-2): a lost CAS used to leave the stale snapshot,
+    which made every retry a tie and turned the contradiction into an accumulation."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona.graph.protocol import UpdateIntent  # noqa: PLC0415
+
+    b = _RacedSupersede(source)
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = eng.merge("u1", _cand("works at Acme")).node_id
+    later = NodeProvenance(
+        source=WriteSource.PERSONA_SELF, written_at=NOW + timedelta(days=1), interaction_id="i2"
+    )
+
+    out = eng.merge(
+        "u1",
+        _cand(
+            "left Acme",
+            update_intent=UpdateIntent.CONTRADICT,
+            target_node_id=node_id,
+            provenance=later,
+        ),
+    )
+
+    node, _ = b.nodes[node_id]
+    assert out.action is MergeAction.EVOLVED, "still a contradiction"
+    assert node.content == "left Acme"
+    assert len(b.versions) == 1, "no orphan version from the lost attempt"
+    assert b.versions[0][2].content == "works at Acme and also likes walks", "the fresh row"

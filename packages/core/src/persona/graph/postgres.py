@@ -88,6 +88,21 @@ def trail_is(expected: Sequence[NodeProvenance]) -> Any:  # noqa: ANN401 - SQL
     )
 
 
+def _without_nulls(value: object) -> object:
+    """``jsonb_strip_nulls`` in Python: object fields whose value is null go, recursively."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(v) for v in value]
+    return value
+
+
+def trail_matches(stored: object, expected: Sequence[NodeProvenance]) -> bool:
+    """:func:`trail_is` for a row already read (the supersede's locked row)."""
+    read = [p.model_dump(mode="json", exclude_none=True) for p in expected]
+    return _without_nulls(stored or []) == _without_nulls(read)
+
+
 def _refuse_if_stale(conn: Connection, owner_id: str, node_id: str, exists: bool | None) -> None:
     """A CAS that wrote nothing: raise if the row is there (it changed), else it is absent."""
     if exists is None:
@@ -711,6 +726,96 @@ class PostgresGraphBackend:
                 .returning(graph_node_versions.c.version_key)
             )
             return int(conn.execute(ins).scalar_one())
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+        valid_at: datetime,
+        invalid_at: datetime,
+        invalidated_by: str | None,
+        embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        guard_personas: Sequence[str] = (),
+    ) -> int | None:
+        """Snapshot the node as a closed version and write ``node`` over it, in one commit.
+
+        The supersede (K7-D-1) under the node CAS (R9-284 round 11): the personas are held,
+        the row is locked ``FOR NO KEY UPDATE``, its hash and trail are checked against the
+        caller's read (:class:`GraphStaleWriteError` on a mismatch, before anything is
+        written), the version is inserted from the locked row, and the update runs. A lost
+        CAS leaves no version behind, and a version is never taken of a row an erasure has
+        since rewritten. Returns the version key, or ``None`` if the node is gone.
+        """
+        self._check_dim(embedding, node.id)
+        with self._engine.begin() as conn:
+            self._hold_personas(
+                conn,
+                owner_id,
+                [
+                    *(p.persona_id for p in node.provenance),
+                    *(p.persona_id for p in expected_provenance),
+                    *guard_personas,
+                ],
+            )
+            row = (
+                conn.execute(
+                    select(graph_nodes)
+                    .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
+                    .with_for_update(key_share=True)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            if row["content_hash"] != expected_content_hash or not trail_matches(
+                row["provenance"], expected_provenance
+            ):
+                raise GraphStaleWriteError(
+                    "the node changed since it was read", context={"node_id": node.id}
+                )
+            version_key = int(
+                conn.execute(
+                    pg_insert(graph_node_versions)
+                    .values(
+                        owner_id=owner_id,
+                        node_id=node.id,
+                        node_kind=row["node_kind"],
+                        concept_name=row["concept_name"],
+                        content=row["content"],
+                        metadata=dict(row["metadata"]),
+                        wellbeing_category=row["wellbeing_category"],
+                        embedding=list(row["embedding"]),
+                        embedding_model=row["embedding_model"],
+                        content_hash=row["content_hash"],
+                        provenance=row["provenance"],
+                        valid_at=valid_at,
+                        invalid_at=invalid_at,
+                        invalidated_by=invalidated_by,
+                        invalidated_at=datetime.now(UTC),
+                    )
+                    .returning(graph_node_versions.c.version_key)
+                ).scalar_one()
+            )
+            metadata = keep_merge_record(dict(node.metadata), row["metadata"])
+            content_hash = (
+                node.content_hash
+                if metadata == dict(node.metadata)
+                else _compute_node_hash(node.concept_name, node.content, metadata)
+            )
+            conn.execute(
+                self._update_node_statement(
+                    owner_id, node, embedding, embedding_model, metadata, content_hash
+                ).where(
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+            )
+        return version_key
 
     def latest_version_invalid_at(self, owner_id: str, node_id: str) -> datetime | None:
         """The max ``invalid_at`` across a node's versions — when its CURRENT account began.

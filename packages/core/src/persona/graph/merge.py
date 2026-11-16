@@ -112,11 +112,14 @@ class _MergeBackend(Protocol):
         expected_content_hash: str,
         expected_provenance: Sequence[NodeProvenance],
     ) -> int | None: ...
-    def snapshot_node_version(
+    def supersede_node(
         self,
         owner_id: str,
-        node_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
         *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         valid_at: datetime,
         invalid_at: datetime,
         invalidated_by: str | None,
@@ -189,9 +192,9 @@ class MergeEngine:
     ) -> MergeOutcome:
         """:meth:`_evolve`, read afresh and tried again when the target changed meanwhile.
 
-        D-R9-284-node-cas: the write is a compare-and-set on the hash read. A supersede
-        that lost it has already snapshotted the version it read; that row stays, a true
-        record of the content that was current then.
+        D-R9-284-node-cas: the write is a compare-and-set on the hash and trail read. A
+        supersede is one transaction (``supersede_node``), so one that lost the CAS wrote
+        nothing, no version included, and the retry decides again on the fresh row.
         """
         for attempt in range(STALE_WRITE_ATTEMPTS):
             try:
@@ -448,22 +451,20 @@ class MergeEngine:
             else current_valid_at + timedelta(microseconds=1)
         )
         invalidated_by = candidate.provenance.interaction_id or str(candidate.provenance.source)
-        version_key = self._backend.snapshot_node_version(
-            owner_id,
-            target.id,
-            valid_at=current_valid_at,
-            invalid_at=invalid_at,
-            invalidated_by=invalidated_by,
-        )
         node = self._rebuilt(
             target, content=candidate.content, candidate=candidate, superseded=target.content
         )
-        self._backend.update_node(
+        # The snapshot and the overwrite are one transaction under the node CAS (R9-284
+        # round 11): a version is only ever taken of the row this decision read.
+        version_key = self._backend.supersede_node(
             owner_id,
             node,
             vec,
             expected_content_hash=target.content_hash,
             expected_provenance=target.provenance,
+            valid_at=current_valid_at,
+            invalid_at=invalid_at,
+            invalidated_by=invalidated_by,
         )
         link_ids = self._form_semantic_links(owner_id, node, vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
