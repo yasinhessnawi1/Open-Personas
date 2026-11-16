@@ -589,14 +589,25 @@ async def create_persona(
         yaml_str=body.yaml,
         generate_avatar=wants_portrait and not queue_avatar,
     )
+    queued = False
     if queue_avatar and job_queue is not None:
-        enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+        # Best-effort (R9-293 review LOW-6): the persona is complete by now, so a queue
+        # that fails costs it its portrait, never the create (a 500 for a persona that exists).
+        try:
+            enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+            queued = True
+        except Exception as exc:  # noqa: BLE001 - logged; the persona stands without a portrait
+            _LOG.warning(
+                "avatar job not queued after create persona={pid} error={err}",
+                pid=persona_id,
+                err=type(exc).__name__,
+            )
     row = persona_service.get_persona(rls_engine=state.rls_engine, persona_id=persona_id)
     # "pending" only when something will actually draw: the queue, or the inline
     # hook with an image backend to call. Without either, saying pending would
     # keep the web polling for an avatar that can never arrive.
-    avatar_pending = queue_avatar or (
-        wants_portrait and getattr(state, "image_backend", None) is not None
+    avatar_pending = queued or (
+        wants_portrait and not queue_avatar and getattr(state, "image_backend", None) is not None
     )
     return _persona_detail(
         row,
