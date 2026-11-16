@@ -639,13 +639,14 @@ def forget(
     node_id: str,
     episodic: list[tuple[str, str]],
 ) -> None:
-    """Commit a cross-layer forget (Spec K11, D-K11-2): episodic evidence, then the node.
+    """Commit a cross-layer forget (Spec K11, D-K11-2): the node, then its episodic evidence.
 
-    The confirmed ``episodic`` pairs (``(persona_id, chunk_id)``, grouped per persona)
-    are deleted FIRST via ``episodic.remove_documents`` — the primary act, since it
-    already cascades every gist the raw chunk covers (K8-D-14) and starves the
-    sleep-time engine's re-distillation (the resurrection guard). The concept node's
-    delete rides along in the same operation.
+    The concept node goes first (R9-287 review LOW-4): its delete may wait on the owner's graph
+    lock and give up (``GraphNodeBusyError``, a 409), and a forget that gives up must leave
+    nothing half forgotten. Then the confirmed ``episodic`` pairs (``(persona_id, chunk_id)``,
+    grouped per persona) go via ``episodic.remove_documents``, which cascades every gist the
+    raw chunk covers (K8-D-14) and starves the sleep-time engine's re-distillation (the
+    resurrection guard).
 
     ``rls_engine`` re-derives the owner's persona-id set (``list_personas``) and any
     pair naming a persona outside it is dropped before deletion — defense in depth
@@ -655,6 +656,7 @@ def forget(
     DELETE the database would no-op anyway.
     """
     owned_persona_ids = {str(row["id"]) for row in _list_all_owner_personas(rls_engine)}
+    delete(graph_store, owner_id, node_id)
     store = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
     by_persona: dict[str, list[str]] = {}
     for persona_id, chunk_id in episodic:
@@ -663,7 +665,6 @@ def forget(
         by_persona.setdefault(persona_id, []).append(chunk_id)
     for persona_id, chunk_ids in by_persona.items():
         store.remove_documents(persona_id, chunk_ids)
-    delete(graph_store, owner_id, node_id)
 
 
 def episodic_window(
