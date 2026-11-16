@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
@@ -116,7 +117,41 @@ def _scrub_file(
         )
 
 
+#: A temporary this old was left by a rewrite that died; the next pass removes it (L3).
+_STALE_TEMPORARY = 3600.0
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in ``directory`` durable; a no-op where the OS cannot (Windows)."""
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _remove_stale_temporaries(path: Path) -> int:
+    """Remove this log's ``*.erasing`` temporaries older than an hour (round 2 LOW-3).
+
+    A rewrite that died between writing its temporary and replacing the log left it; a live
+    rewrite's is never that old.
+    """
+    removed = 0
+    now = time.time()
+    for temporary in path.parent.glob(f"{path.name}.*.erasing"):
+        try:
+            if now - temporary.stat().st_mtime > _STALE_TEMPORARY:
+                temporary.unlink()
+                removed += 1
+        except FileNotFoundError:
+            continue
+    return removed
+
+
 def _scrub_held_file(path: Path, clean_line: Callable[[str], str]) -> int:
+    _remove_stale_temporaries(path)
     for _ in range(_FILE_ATTEMPTS):
         if not path.exists():
             return 0
@@ -142,6 +177,7 @@ def _scrub_held_file(path: Path, clean_line: Callable[[str], str]) -> int:
             temporary.unlink()
             continue
         temporary.replace(path)
+        _fsync_dir(path.parent)  # the rename is durable too (round 2 LOW-3)
         return changed
     msg = "the audit log kept growing while it was scrubbed"
     raise OSError(msg)
