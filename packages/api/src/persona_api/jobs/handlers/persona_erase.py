@@ -289,6 +289,15 @@ def resume_persona_erasures(
 #: An erasure unfinished for longer than this is stalled: the operator is told.
 STALL_AFTER = timedelta(minutes=15)
 
+#: The graph backstop's every-sweep look covers erasures completed this recently ...
+BACKSTOP_RECENT = timedelta(hours=24)
+#: ... and it looks at every completed erasure this often (review MEDIUM-3).
+BACKSTOP_FULL_EVERY = timedelta(hours=24)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
 
 def stalled_persona_erasures(engine: Engine, *, now: datetime) -> list[Erasure]:
     """Unfinished persona erasures that failed, or that have been running too long."""
@@ -309,6 +318,12 @@ class PersonaEraseSweep:
     Each stalled erasure is reported once per process, as an ERROR log line starting
     ``OPERATOR ALERT``: the api cannot reach the host's alert marker, so the host's own
     ``bin/erasurecheck.sh`` timer is what raises the kit's alert (deploy/server).
+
+    The graph backstop's full pass is timed in this object, not in a row (review MEDIUM-3).
+    The pass is idempotent and only a backstop to the write guard, so a full pass more than
+    once a day costs a query, never correctness: a process start runs one (the first sweep),
+    and there is one sweep per worker process. A row would hold the day across restarts, at
+    the price of a migration and a write per pass for a value nothing else reads.
     """
 
     def __init__(
@@ -317,18 +332,22 @@ class PersonaEraseSweep:
         engine: Engine,
         run: Callable[[Erasure, str], object],
         grace: timedelta = RESUME_GRACE,
-        find_leftovers: Callable[[Engine], list[tuple[str, str]]] = erased_personas_in_graph,
+        find_leftovers: Callable[..., list[tuple[str, str]]] = erased_personas_in_graph,
+        clock: Callable[[], datetime] = _utcnow,
     ) -> None:
         self._engine = engine
         self._run = run
         self._grace = grace
         self._reported: set[str] = set()
         self._find_leftovers = find_leftovers
+        self._clock = clock
+        self._last_full_pass: datetime | None = None
+        self._retry: set[tuple[str, str]] = set()
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
         self._graph_backstop()
-        for erasure in stalled_persona_erasures(self._engine, now=datetime.now(UTC)):
+        for erasure in stalled_persona_erasures(self._engine, now=self._clock()):
             if erasure.id in self._reported:
                 continue
             self._reported.add(erasure.id)
@@ -343,28 +362,38 @@ class PersonaEraseSweep:
     def _graph_backstop(self) -> None:
         """Take out of the graph any erased persona something still names (review H-2).
 
-        Recurring and idempotent: every sweep asks the graph which completed erasures it still
-        names (nodes, versions, edges, entities and their aliases), and runs the graph step for
-        each. Nothing is marked, so a persona whose step fails is found again next sweep, and
-        one erasure's failure is logged and does not stop the others or the stall alerts. The
-        write guard is what keeps new writes out; this catches anything written before it, or
-        by a path it does not cover.
+        Recurring and idempotent: each sweep asks the graph which erasures completed in the
+        last day it still names (nodes, versions, edges, entities and their aliases), and once
+        a day which of all completed erasures it does; the graph step runs for each (review
+        MEDIUM-3). A persona whose step fails is kept and tried again on the next sweep,
+        whichever look found it, and one failure is logged and does not stop the others or the
+        stall alerts. The write guard is what keeps new writes out; this catches anything
+        written before it, or by a path it does not cover.
         """
+        now = self._clock()
+        full = self._last_full_pass is None or now - self._last_full_pass >= BACKSTOP_FULL_EVERY
         try:
-            leftovers = self._find_leftovers(self._engine)
+            found = self._find_leftovers(
+                self._engine, since=None if full else now - BACKSTOP_RECENT
+            )
         except Exception as exc:  # noqa: BLE001 - logged; the sweep goes on to its alerts
             _log.error("graph backstop could not look error={err}", err=type(exc).__name__)
-            return
-        for owner_id, persona_id in leftovers:
+            found = []
+        else:
+            if full:
+                self._last_full_pass = now
+        for owner_id, persona_id in sorted({*found, *self._retry}):
             try:
                 counts = erase_persona_graph(self._engine, owner_id=owner_id, persona_id=persona_id)
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
+                self._retry.add((owner_id, persona_id))
                 _log.error(
                     "graph backstop failed persona={pid} error={err}",
                     pid=persona_id,
                     err=type(exc).__name__,
                 )
                 continue
+            self._retry.discard((owner_id, persona_id))
             _log.warning(
                 "graph backstop removed what an erased persona left persona={pid} counts={counts}",
                 pid=persona_id,

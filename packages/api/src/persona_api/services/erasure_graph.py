@@ -48,6 +48,8 @@ from persona_api.db.models import graph_node_versions as versions_t
 from persona_api.db.models import graph_nodes as nodes_t
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.engine import Connection, Engine
 
 __all__ = [
@@ -683,6 +685,7 @@ _LEFTOVERS = text("""
     SELECT e.owner_id, e.subject_id
     FROM erasures e
     WHERE e.subject_kind = 'persona' AND e.state = 'complete'
+      AND (CAST(:since AS timestamptz) IS NULL OR e.completed_at >= CAST(:since AS timestamptz))
       AND NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = e.subject_id)
       AND (
         EXISTS (SELECT 1 FROM graph_nodes n WHERE n.owner_id = e.owner_id
@@ -703,15 +706,19 @@ _LEFTOVERS = text("""
 """)
 
 
-def erased_personas_in_graph(engine: Engine) -> list[tuple[str, str]]:
-    """``(owner, persona)`` for every completed erasure the graph still names. Postgres only.
+def erased_personas_in_graph(
+    engine: Engine, *, since: datetime | None = None
+) -> list[tuple[str, str]]:
+    """``(owner, persona)`` for each completed erasure the graph still names. Postgres only.
 
-    A persona whose row exists is never returned, so a live persona is never touched.
+    ``since`` limits it to erasures completed from then on (review MEDIUM-3: the sweep looks
+    at the last day's every pass, and at all of them once a day); ``None`` looks at all. A
+    persona whose row exists is never returned, so a live persona is never touched.
     """
     if engine.dialect.name != "postgresql":
         return []
     with engine.connect() as conn:
-        return [(str(o), str(p)) for o, p in conn.execute(_LEFTOVERS)]
+        return [(str(o), str(p)) for o, p in conn.execute(_LEFTOVERS, {"since": since})]
 
 
 def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:

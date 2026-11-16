@@ -145,7 +145,7 @@ def test_the_graph_backstop_runs_every_sweep_and_marks_nothing(
         engine=engine,
         grace=timedelta(0),
         run=lambda _e, _t: None,
-        find_leftovers=lambda _engine: sorted(left),
+        find_leftovers=lambda _engine, **_kw: sorted(left),
     )
 
     sweep()
@@ -167,7 +167,7 @@ def test_a_backstop_failure_does_not_skip_the_stall_alerts(
     )
     monkeypatch.setattr(persona_erase, "datetime", _FrozenClock)
 
-    def _cannot_look(_engine: Engine) -> list[tuple[str, str]]:
+    def _cannot_look(_engine: Engine, **_kw: object) -> list[tuple[str, str]]:
         raise RuntimeError("the graph query failed")
 
     sweep = PersonaEraseSweep(
@@ -207,7 +207,7 @@ def test_a_backstop_aborted_by_postgres_is_tried_again_next_sweep(
         engine=engine,
         grace=timedelta(0),
         run=lambda _e, _t: None,
-        find_leftovers=lambda _engine: sorted(left),
+        find_leftovers=lambda _engine, **_kw: sorted(left),
     )
 
     sweep()
@@ -215,3 +215,108 @@ def test_a_backstop_aborted_by_postgres_is_tried_again_next_sweep(
 
     assert tries == [_persona("a"), _persona("a")]
     assert left == set()
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = _NOW
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def test_the_backstop_looks_at_the_last_day_each_sweep_and_at_everything_once_a_day(
+    engine: Engine,
+) -> None:
+    """Review MEDIUM-3: the full scan ran every 30 seconds."""
+    looks: list[datetime | None] = []
+
+    def _find(_engine: Engine, *, since: datetime | None) -> list[tuple[str, str]]:
+        looks.append(since)
+        return []
+
+    clock = _Clock()
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=_find,
+        clock=clock,
+    )
+
+    sweep()  # a process's first sweep: everything
+    clock.now = _NOW + timedelta(minutes=1)
+    sweep()
+    clock.now = _NOW + timedelta(hours=23, minutes=59)
+    sweep()
+    clock.now = _NOW + timedelta(hours=24)
+    sweep()  # a day on: everything again
+    clock.now = _NOW + timedelta(hours=24, minutes=1)
+    sweep()
+
+    day = timedelta(hours=24)
+    assert looks == [
+        None,
+        _NOW + timedelta(minutes=1) - day,
+        _NOW + timedelta(hours=23, minutes=59) - day,
+        None,
+        _NOW + timedelta(hours=24, minutes=1) - day,
+    ]
+
+
+def test_a_failed_full_pass_look_is_tried_again_next_sweep(engine: Engine) -> None:
+    looks: list[datetime | None] = []
+
+    def _find(_engine: Engine, *, since: datetime | None) -> list[tuple[str, str]]:
+        looks.append(since)
+        if len(looks) == 1:
+            raise RuntimeError("the graph query failed")
+        return []
+
+    clock = _Clock()
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=_find,
+        clock=clock,
+    )
+
+    sweep()
+    clock.now = _NOW + timedelta(minutes=1)
+    sweep()
+
+    assert looks == [None, None], "the day's full pass has not happened yet"
+
+
+def test_a_persona_only_the_full_pass_found_is_retried_on_the_next_sweep(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure is not left for tomorrow's full pass: the windowed look does not see it."""
+    old = (_OWNER, _persona("a"))
+    tries: list[str] = []
+
+    def _find(_engine: Engine, *, since: datetime | None) -> list[tuple[str, str]]:
+        return [old] if since is None else []
+
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:  # noqa: ARG001
+        tries.append(persona_id)
+        if len(tries) == 1:
+            raise RuntimeError("a lock timed out")
+        return {"nodes_deleted": 1}
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
+    clock = _Clock()
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=_find,
+        clock=clock,
+    )
+
+    for minute in range(3):
+        clock.now = _NOW + timedelta(minutes=minute)
+        sweep()
+
+    assert tries == [_persona("a"), _persona("a")], "retried once, then done"

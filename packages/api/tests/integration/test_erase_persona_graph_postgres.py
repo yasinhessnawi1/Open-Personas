@@ -8,7 +8,7 @@ goes when nothing links to it and otherwise loses the attribution. Runs in CI.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -362,6 +362,20 @@ def test_the_backstop_finds_what_a_finished_erasure_left_and_nothing_else(graph:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
 
     assert erased_personas_in_graph(graph) == [(_OWNER, _PERSONA)]
+    # Review MEDIUM-3: the every-sweep look covers what completed since a moment.
+    with graph.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE erasures SET completed_at = now() - interval '2 days' WHERE subject_id = :p"
+            ),
+            {"p": _PERSONA},
+        )
+    a_day_ago = datetime.now(UTC) - timedelta(days=1)
+    assert erased_personas_in_graph(graph, since=a_day_ago) == []
+    assert erased_personas_in_graph(graph, since=a_day_ago - timedelta(days=2)) == [
+        (_OWNER, _PERSONA)
+    ]
+    assert erased_personas_in_graph(graph) == [(_OWNER, _PERSONA)], "the full pass still does"
 
     erase_persona_graph(graph, owner_id=_OWNER, persona_id=_PERSONA)
 
