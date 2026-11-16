@@ -282,6 +282,10 @@ Edit the files in `~/op-env`:
     keys > the JWT public key, PEM format. The same PEM in both.
   - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersonas.si/.well-known/jwks.json`.
   - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line.
+  - `PERSONA_CLERK_SECRET_KEY` (Configure > API keys > the secret key) and
+    `PERSONA_CLERK_WEBHOOK_SECRET` (Webhooks > the `user.deleted` endpoint's signing secret,
+    `whsec_...`): paste from the production instance, or set empty to leave account deletion
+    off (every deletion then answers 503, and preflight and the api's boot log say so).
   - Check under Configure > JWT templates that the `persona-api` template has
     `aud` = `persona-api`.
 - `PERSONA_VOICE_SERVICE_URL` stays **empty**: voice is not up yet, and the api answers its
