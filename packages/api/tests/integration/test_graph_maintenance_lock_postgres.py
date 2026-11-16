@@ -98,11 +98,13 @@ def _naming(engine: Engine, persona_id: str) -> int:
             conn.execute(
                 text(
                     "SELECT (SELECT count(*) FROM graph_nodes WHERE owner_id = :o AND "
-                    "  provenance @> jsonb_build_array(jsonb_build_object('persona_id', :p))) "
+                    "  provenance @> jsonb_build_array(jsonb_build_object('persona_id', "
+                    "  CAST(:p AS text)))) "
                     "+ (SELECT count(*) FROM graph_node_versions WHERE owner_id = :o AND "
-                    "  provenance @> jsonb_build_array(jsonb_build_object('persona_id', :p))) "
+                    "  provenance @> jsonb_build_array(jsonb_build_object('persona_id', "
+                    "  CAST(:p AS text)))) "
                     "+ (SELECT count(*) FROM graph_edges WHERE owner_id = :o AND "
-                    "  provenance @> jsonb_build_object('persona_id', :p))"
+                    "  provenance @> jsonb_build_object('persona_id', CAST(:p AS text)))"
                 ),
                 params,
             ).scalar_one()
@@ -114,7 +116,7 @@ def _open_mirrors(engine: Engine, run_id: str) -> set[str]:
         rows = conn.execute(
             text(
                 "SELECT id FROM graph_edges WHERE owner_id = :o AND invalid_at IS NULL "
-                "AND provenance @> jsonb_build_object('reason', :r)"
+                "AND provenance @> jsonb_build_object('reason', CAST(:r AS text))"
             ),
             {"o": _OWNER, "r": f"consolidation:{run_id}"},
         )
