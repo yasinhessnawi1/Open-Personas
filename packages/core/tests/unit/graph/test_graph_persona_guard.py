@@ -525,3 +525,47 @@ def test_a_supersede_that_lost_the_cas_writes_no_version() -> None:
         _supersede(engine, "read before someone else wrote")
 
     assert [s for _, s in engine.statements if s.startswith(("INSERT", "UPDATE"))] == []
+
+
+def test_a_supersede_versions_the_locked_row_not_the_incoming_node() -> None:
+    """The version holds the account being superseded: every field from the locked row,
+    none from the caller's new node (which would lose the history and store whatever the
+    caller carried)."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    engine = _Engine()
+    row = _node_row()
+    incoming = ConceptNode(
+        id="n1",
+        node_kind=NodeKind.FACT,
+        concept_name="a new name",
+        content="the new account",
+        metadata={"k": "v"},
+        provenance=(_by(_P), _by(_Q)),
+        created_at=_NOW,
+    )
+    assert incoming.concept_name != row["concept_name"]
+    assert incoming.content != row["content"]
+    assert dict(incoming.metadata) != row["metadata"]
+    assert incoming.content_hash != row["content_hash"]
+    assert [p.model_dump(mode="json") for p in incoming.provenance] != row["provenance"]
+
+    _backend(engine).supersede_node(
+        "u1",
+        incoming,
+        _VECTOR,
+        expected_content_hash=row["content_hash"],
+        expected_provenance=(_by(_P),),
+        valid_at=_NOW,
+        invalid_at=_NOW,
+        invalidated_by="superseded",
+    )
+
+    (insert,) = [o for o in engine.objects if str(o).startswith("INSERT INTO graph_node_versions")]
+    bound = insert.compile(dialect=postgresql.dialect()).params
+    stored = {
+        k: bound[k] for k in ("concept_name", "content", "metadata", "content_hash", "provenance")
+    }
+    assert stored == {
+        k: row[k] for k in ("concept_name", "content", "metadata", "content_hash", "provenance")
+    }, "the version is the locked row"
