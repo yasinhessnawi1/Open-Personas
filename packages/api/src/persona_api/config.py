@@ -240,6 +240,17 @@ class APIConfig(BaseSettings):
     )
     stripe_secret_key: str = Field(default="", validation_alias="PERSONA_STRIPE_SECRET_KEY")
     stripe_webhook_secret: str = Field(default="", validation_alias="PERSONA_STRIPE_WEBHOOK_SECRET")
+    # R9-284 T9 (D-R9-284-account-erase): how long an erased account's paid billing rows are
+    # kept in ``retained_billing_records``. Five years until the owner confirms the period with
+    # an accountant; one value, so the change is one setting.
+    billing_retention_years: int = Field(
+        default=5, ge=1, le=20, validation_alias="PERSONA_BILLING_RETENTION_YEARS"
+    )
+    # R9-284 T9: Clerk's Backend API secret key, for deleting the Clerk user of an account
+    # erased through our route. Owner-supplied; never logged.
+    clerk_secret_key: SecretStr | None = Field(
+        default=None, repr=False, validation_alias="PERSONA_CLERK_SECRET_KEY"
+    )
     stripe_publishable_key: str = Field(
         default="", validation_alias="PERSONA_STRIPE_PUBLISHABLE_KEY"
     )

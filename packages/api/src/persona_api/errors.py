@@ -189,6 +189,13 @@ class ChainHeadIndexInvalidError(PersonaError):
     """
 
 
+class ClerkCallError(PersonaError):
+    """A call to Clerk's Backend API failed (R9-284 T9 account erasure).
+
+    ``context`` carries the HTTP ``status`` only: a response body may hold personal data.
+    """
+
+
 class ErasureRecordError(PersonaError):
     """The erasure ledger refused a write (R9-284).
 
