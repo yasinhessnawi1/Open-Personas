@@ -252,13 +252,16 @@ anything but its own `op-data` filesystem, and refuses to mount over a non-empty
 Docker keeps its image layers in containerd's snapshotter, under containerd's root, not under
 Docker's data root. `provision.sh` puts that root on the block volume (`OP_CONTAINERD_ROOT`,
 `/srv/containerd` on Oracle) on a fresh host. It refuses to move a root that must change
-while Docker holds containers or images, and it is a clean no-op on a host already on the
-root (no change, no restart).
+while Docker holds containers or images. On a host already on the root it never restarts
+containerd: at most it adds containerd's wait for the block volume (a drop-in and a
+`daemon-reload`, taking effect at the next start).
 
 **The Oracle core host was moved by hand on 2026-11-16, 17:22 to 17:28 UTC**, with the
 owner's approval, by the steps below: its `/etc/containerd/config.toml` starts with
 `root = "/srv/containerd"`, the original is kept as `/etc/containerd/config.toml.bak-r9289`,
-and `/var/lib/containerd` is gone. Re-running `provision.sh` there changes nothing.
+and `/var/lib/containerd` is gone. The first re-run of `provision.sh` there adds containerd's
+wait for the block volume (a drop-in and a `daemon-reload`, no restart); later re-runs change
+nothing.
 
 For any other host that already holds images on the boot disk: as ubuntu, with sudo,
 outside call hours. **Stop the app first.** `daemon.json` sets `live-restore: true`, so
@@ -323,8 +326,8 @@ sudo systemctl start docker
 cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
 ```
 
-Then re-run `provision.sh`: it adds containerd's wait for the block volume and is otherwise
-a no-op.
+Then re-run `provision.sh`: it adds containerd's wait for the block volume (a drop-in and a
+`daemon-reload`, no restart) and is otherwise a no-op.
 
 ## Step 4: the env files
 

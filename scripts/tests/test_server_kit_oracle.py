@@ -708,3 +708,18 @@ def test_a_fresh_host_gets_the_root_the_drop_in_and_one_restart(tmp_path: Path) 
     assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
     assert (tmp_path / "srv-containerd").is_dir()
     assert systemctl == ["daemon-reload", "restart containerd"]
+
+
+@needs_bash
+def test_the_live_hosts_first_re_run_reloads_and_never_restarts(tmp_path: Path) -> None:
+    """Review H1, the Oracle host as it is: root set by hand, no drop-in, images present.
+
+    The re-run writes the drop-in and reloads systemd; containerd keeps running.
+    """
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=None)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
+    assert systemctl == ["daemon-reload"], "no restart under the running app"

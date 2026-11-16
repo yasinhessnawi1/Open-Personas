@@ -48,9 +48,11 @@ containerd_config_with_root() {
 #   * the config must change: refused (status 1) while Docker holds containers or images,
 #     which the move would orphan; otherwise the config is rewritten;
 #   * the drop-in makes containerd wait for the block volume, as docker.service does.
-# containerd restarts only when something changed.
+# systemd reloads when either changed; containerd restarts only when its config changed (a
+# drop-in alone takes effect at the next start, and restarting containerd under a running app
+# is not what a re-provision should do).
 apply_containerd_root() {
-  local config="$1" root="$2" mount="$3" dropin="$4" wanted unit changed=0
+  local config="$1" root="$2" mount="$3" dropin="$4" wanted unit config_changed=0 dropin_changed=0
   wanted="$(containerd_config_with_root "${config}" "${root}")" || return 1
   if [ "${wanted}" != "$(cat "${config}" 2>/dev/null || true)" ]; then
     if [ -n "$(docker ps -aq 2>/dev/null)$(docker images -q 2>/dev/null)" ]; then
@@ -61,7 +63,7 @@ apply_containerd_root() {
     install -d -m 0755 "$(dirname "${config}")"
     printf '%s\n' "${wanted}" > "${config}"
     chmod 0644 "${config}"
-    changed=1
+    config_changed=1
   fi
   if [ -n "${mount}" ]; then
     unit="$(printf '[Unit]\nRequiresMountsFor=%s' "${mount}")"
@@ -69,11 +71,13 @@ apply_containerd_root() {
       install -d -m 0755 "$(dirname "${dropin}")"
       printf '%s\n' "${unit}" > "${dropin}"
       chmod 0644 "${dropin}"
-      changed=1
+      dropin_changed=1
     fi
   fi
-  if [ "${changed}" = 1 ]; then
+  if [ "${config_changed}" = 1 ] || [ "${dropin_changed}" = 1 ]; then
     systemctl daemon-reload
+  fi
+  if [ "${config_changed}" = 1 ]; then
     systemctl restart containerd
   fi
 }
