@@ -252,12 +252,15 @@ def test_an_unknown_origin_is_refused(engine: Engine) -> None:
 class _RowConn:
     """Records each statement of the row step; ``personas`` is what the re-list finds."""
 
-    def __init__(self, personas: list[str], *, user: bool = True) -> None:
+    def __init__(
+        self, personas: list[str], *, user: bool = True, paid: list[str] | None = None
+    ) -> None:
         from sqlalchemy.dialects import postgresql  # noqa: PLC0415
 
         self.dialect = postgresql.dialect()
         self.personas = personas
         self.user = user
+        self.paid = paid or []
         self.sql: list[str] = []
 
     def execute(self, stmt: Any, params: Any = None) -> Any:  # noqa: ANN401, ARG002
@@ -268,9 +271,31 @@ class _RowConn:
             rows = [("x",)] if self.user else []
         elif sql.startswith("SELECT personas.id"):
             rows = [(p,) for p in self.personas]
+        elif sql.startswith("SELECT credit_transactions.id"):
+            # Honour the reason filter: only rows whose reason the query asks for come back.
+            asked = str(stmt.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
+            rows = (
+                []
+                if "'auto_topup'" not in asked
+                else [
+                    SimpleNamespace(
+                        id=i,
+                        reason="auto_topup",
+                        delta=1000,
+                        billing_key="bk",
+                        cost_cents=1000.0,
+                        created_at=None,
+                    )
+                    for i in self.paid
+                ]
+            )
+        added = len(self.paid) if sql.startswith("INSERT INTO retained_billing_records") else 1
 
         class _R:
-            rowcount = 1
+            rowcount = added
+
+            def __iter__(self) -> Any:  # noqa: ANN401
+                return iter(rows)
 
             def first(self) -> Any:  # noqa: ANN401
                 return rows[0] if rows else None
@@ -293,20 +318,20 @@ class _RowEngine:
 
 def _row_step(conn: _RowConn) -> dict[str, int]:
     deps = _deps(_RowEngine(conn))  # type: ignore[arg-type]
-    erasure = SimpleNamespace(owner_id=_OWNER)
+    erasure = SimpleNamespace(owner_id=_OWNER, id="erasure_1", captured={})
     return ae._step_row(deps, erasure)  # type: ignore[arg-type]  # noqa: SLF001
 
 
 def test_the_row_step_locks_the_graph_then_the_user_then_relists_then_deletes() -> None:
     conn = _RowConn([])
 
-    assert _row_step(conn) == {"users": 1}
+    assert _row_step(conn) == {"users": 1, "retained": 0}
 
     assert "pg_advisory_xact_lock" in conn.sql[0], "the graph maintenance lock first"
     assert conn.sql[1].startswith("SELECT users.id")
     assert conn.sql[1].endswith("FOR UPDATE"), "no persona insert can commit past this"
     assert conn.sql[2].startswith("SELECT personas.id"), "the personas listed again under it"
-    assert conn.sql[3].startswith("DELETE FROM users")
+    assert conn.sql[-1].startswith("DELETE FROM users"), "the delete is last"
 
 
 def test_a_persona_created_during_the_erasure_stops_the_row_delete() -> None:
@@ -421,3 +446,19 @@ def test_no_paid_subscription_retains_nothing(billing_engine: Engine) -> None:
     erasure = ae.begin_account_erasure(billing_engine, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE)
 
     assert ae.retained_subscription(erasure) is None
+
+
+def test_a_paid_row_written_after_the_billing_step_is_copied_before_the_delete() -> None:
+    """Review M3 (and the reviewer's survivor M5): an auto top-up that landed between the
+    billing and row steps is retained, copied under the users-row lock before the cascade."""
+    conn = _RowConn([], paid=["ct_late"])
+
+    counts = _row_step(conn)
+
+    assert counts == {"users": 1, "retained": 1}
+    insert_at = next(
+        i for i, s in enumerate(conn.sql) if s.startswith("INSERT INTO retained_billing_records")
+    )
+    delete_at = next(i for i, s in enumerate(conn.sql) if s.startswith("DELETE FROM users"))
+    lock_at = next(i for i, s in enumerate(conn.sql) if s.endswith("FOR UPDATE"))
+    assert lock_at < insert_at < delete_at, "copied under the lock, before the cascade"

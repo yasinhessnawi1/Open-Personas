@@ -313,19 +313,25 @@ def _retained_rows(conn: Connection, erasure: Erasure, until: datetime) -> list[
     ]
 
 
+def _copy_billing(conn: Connection, erasure: Erasure, retention: timedelta) -> int:
+    """Copy the paid rows into the retained table; how many were new (ON CONFLICT: repeatable).
+
+    The retention runs from the erasure, the later of the two bounds.
+    """
+    rows = _retained_rows(conn, erasure, datetime.now(UTC) + retention)
+    if not rows:
+        return 0
+    added = conn.execute(
+        pg_insert(retained_t)
+        .values(rows)
+        .on_conflict_do_nothing(index_elements=["erasure_id", "source_table", "source_id"])
+    ).rowcount
+    return int(added or 0)
+
+
 def _step_billing(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
-    """Copy the paid rows; the retention runs from the erasure, the later of the two bounds."""
-    until = datetime.now(UTC) + deps.retention
     with deps.engine.begin() as conn:
-        rows = _retained_rows(conn, erasure, until)
-        if not rows:
-            return {"retained": 0}
-        added = conn.execute(
-            pg_insert(retained_t)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["erasure_id", "source_table", "source_id"])
-        ).rowcount
-    return {"retained": int(added or 0)}
+        return {"retained": _copy_billing(conn, erasure, deps.retention)}
 
 
 def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
@@ -385,8 +391,11 @@ def _step_row(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
             return {"users": 0}
         if _ids(conn, select(personas_t.c.id).where(personas_t.c.owner_id == owner)):
             raise AccountErasureRaceError("a persona was created during the erasure")
+        # Review M3: a paid row written after the billing step (an auto top-up that landed in
+        # between) is copied here, under the same lock, before the cascade would take it.
+        retained = _copy_billing(conn, erasure, deps.retention)
         users = conn.execute(delete(users_t).where(users_t.c.id == owner)).rowcount
-    return {"users": int(users or 0)}
+    return {"users": int(users or 0), "retained": retained}
 
 
 def _step_late_writes(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:

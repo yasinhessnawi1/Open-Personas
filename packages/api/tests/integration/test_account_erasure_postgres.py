@@ -422,3 +422,37 @@ def test_the_owners_store_audit_is_rekeyed_and_scrubbed(
     assert mine.reason is None
     assert mine.metadata == {"label": "kept"}
     assert not (seeded.audit_root / f"{OWNER}.jsonl").exists()
+
+
+def test_a_paid_row_written_between_billing_and_row_is_retained(
+    seeded: Seeded,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review M3: an auto top-up landing after the billing step is not lost to the cascade."""
+    real = dict(ae.STEPS)
+
+    def _audit_after_a_top_up(deps: ae.AccountEraseDeps, erasure: Any) -> dict[str, int]:  # noqa: ANN401
+        with seeded.engine.begin() as conn:
+            row(
+                conn,
+                "credit_transactions",
+                id="ct_late",
+                user_id=OWNER,
+                delta=1000,
+                reason="auto_topup",
+                billing_key="bk_late",
+            )
+        return real["audit"](deps, erasure)
+
+    monkeypatch.setattr(
+        ae, "STEPS", tuple((n, _audit_after_a_top_up if n == "audit" else s) for n, s in ae.STEPS)
+    )
+    erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
+
+    ae.erase_account(_deps(seeded, platform, embedder), erasure)
+
+    kept = {(r["source_table"], r["source_id"]) for r in _retained(seeded.engine)}
+    assert ("credit_transactions", "ct_late") in kept
+    assert _naming(seeded.engine, OWNER) == {}
