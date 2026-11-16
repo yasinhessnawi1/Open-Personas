@@ -66,6 +66,7 @@ __all__ = [
     "merge_record",
     "names_only_the_doomed_gave",
     "mirror_id_for",
+    "mirror_row_deletes",
     "mirrors_to_remove",
     "orphaned_mirrors",
     "source_keys",
@@ -679,20 +680,44 @@ def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
     )
     doomed, rewrites = orphaned_mirrors(records, rows, existing)
     deleted = 0
-    if doomed:
-        deleted = conn.execute(
-            delete(graph_edges).where(
-                graph_edges.c.owner_id == owner_id,
-                graph_edges.c.edge_key.in_(doomed),
-                cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
-            )
-        ).rowcount
+    deleted = sum(
+        conn.execute(stmt).rowcount for stmt in mirror_row_deletes(owner_id, doomed, rows)
+    )
     by_id = {m.id: m for m in members}
     for member_id, record in rewrites.items():
         member = by_id[member_id]
         metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
         _set_metadata(conn, owner_id, member, metadata)
     return {"orphan_mirrors_deleted": deleted, "merge_records_pruned": len(rewrites)}
+
+
+def mirror_row_deletes(
+    owner_id: str,
+    keys: Iterable[int],
+    mirror_rows: Mapping[tuple[str, str], Iterable[int]],
+) -> list[Any]:
+    """One DELETE per run for these mirror rows, matching that run's tag (round 7 LOW-2).
+
+    Each row goes only while it still carries ``{"source": "system", "reason":
+    "consolidation:<run>"}``, as :func:`delete_mirrors` does by id: another run's mirror, or
+    an edge that became someone's own, is never taken by its key alone.
+    """
+    wanted = set(keys)
+    by_run: dict[str, list[int]] = {}
+    for (_mirror, run_id), row_keys in mirror_rows.items():
+        hit = sorted(wanted & set(row_keys))
+        if hit:
+            by_run.setdefault(run_id, []).extend(hit)
+    return [
+        delete(graph_edges).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.edge_key.in_(sorted(run_keys)),
+            cast(graph_edges.c.provenance, JSONB).contains(
+                {"source": "system", "reason": f"consolidation:{run_id}"}
+            ),
+        )
+        for run_id, run_keys in sorted(by_run.items())
+    ]
 
 
 def _mirror_rows(conn: Connection, owner_id: str) -> dict[tuple[str, str], set[int]]:
@@ -800,14 +825,7 @@ def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
     existing = mirrors.existing | {k for keys in rows.values() for k in keys}
     keys = mirrors_to_remove(mirrors.seeds, mirrors.sources, rows, existing)
     deleted = 0
-    if keys:
-        deleted += conn.execute(
-            delete(graph_edges).where(
-                graph_edges.c.owner_id == owner_id,
-                graph_edges.c.edge_key.in_(keys),
-                cast(graph_edges.c.provenance, JSONB).contains({"source": "system"}),
-            )
-        ).rowcount
+    deleted += sum(conn.execute(stmt).rowcount for stmt in mirror_row_deletes(owner_id, keys, rows))
     for edge in mirrors.asserted:
         for member_id in {edge.src_node_id, edge.dst_node_id} & set(mirrors.legacy):
             record = mirrors.legacy[member_id]

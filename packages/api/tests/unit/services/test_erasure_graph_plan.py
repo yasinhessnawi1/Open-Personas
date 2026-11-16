@@ -15,6 +15,7 @@ from persona_api.services.erasure_graph import (
     delete_mirrors,
     merge_record,
     mirror_id_for,
+    mirror_row_deletes,
     mirrors_to_remove,
     names_only_the_doomed_gave,
     orphaned_mirrors,
@@ -503,3 +504,20 @@ def test_an_orphan_chain_is_pruned_to_its_end() -> None:
     assert doomed == [11, 12]
     assert rewrites["c1"]["mirrored_edges"] == [], "M2 lost its source, M1's row"
     assert rewrites["x"]["mirrored_edges"] == []
+
+
+def test_a_mirror_row_is_deleted_only_under_its_own_runs_tag() -> None:
+    """Round 7 LOW-2: one DELETE per run, each matching that run's consolidation tag."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    rows = {("m", "r1"): {9}, ("m", "r2"): {10}, ("n", "r1"): {11}}
+
+    statements = mirror_row_deletes("u1", [9, 10, 11, 99], rows)
+
+    params = [s.compile(dialect=postgresql.dialect()).params for s in statements]
+    assert len(statements) == 2, "one per run; key 99 is no mirror row and is not deleted"
+    assert [(p["edge_key_1"], p["param_1"]) for p in params] == [
+        ([9, 11], {"source": "system", "reason": "consolidation:r1"}),
+        ([10], {"source": "system", "reason": "consolidation:r2"}),
+    ]
+    assert mirror_row_deletes("u1", [], rows) == []
