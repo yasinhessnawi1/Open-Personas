@@ -81,6 +81,7 @@ from persona_api.middleware.rls_context import make_rls_engine
 from persona_api.realtime.channel import UserEventChannel
 from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
+    account_erase,
     approvals,
     artifacts,
     autonomy,
@@ -1341,6 +1342,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(calls.router)  # spec V9: voice-call history
     app.include_router(runs.router)
     app.include_router(me.router)
+    app.include_router(account_erase.router)  # R9-284 T9: POST /v1/me/erase (cloud only)
     app.include_router(health.router)
     app.include_router(tools.router)
     app.include_router(documents.router)

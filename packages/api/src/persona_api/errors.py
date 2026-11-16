@@ -189,6 +189,14 @@ class ChainHeadIndexInvalidError(PersonaError):
     """
 
 
+class AccountEraseConfirmationError(PersonaError):
+    """The account delete's confirmation did not match the account (→ 422; R9-284 T9)."""
+
+
+class AccountErasureUnavailableError(PersonaError):
+    """This process cannot run an account erasure (no runner or platform engine) (→ 503)."""
+
+
 class ClerkCallError(PersonaError):
     """A call to Clerk's Backend API failed (R9-284 T9 account erasure).
 
@@ -646,6 +654,30 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_body("run_not_found", exc.message or "run not found", exc.context),
+        )
+
+    @app.exception_handler(AccountEraseConfirmationError)
+    async def _account_erase_confirm_422(
+        _: Request, exc: AccountEraseConfirmationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_body(
+                "account_erase_unconfirmed",
+                exc.message or "the confirmation does not match",
+                {},
+            ),
+        )
+
+    @app.exception_handler(AccountErasureUnavailableError)
+    async def _account_erasure_503(_: Request, exc: AccountErasureUnavailableError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=_body(
+                "account_erasure_unavailable",
+                exc.message or "account deletion is not available",
+                {},
+            ),
         )
 
     @app.exception_handler(AccountErasedError)
