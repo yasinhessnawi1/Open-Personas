@@ -326,7 +326,9 @@ def _copy_billing(conn: Connection, erasure: Erasure, retention: timedelta) -> i
     rows = _retained_rows(conn, erasure, datetime.now(UTC) + retention)
     if not rows:
         return 0
-    return int(conn.execute(retained_insert(rows)).rowcount or 0)
+    # Counted from RETURNING: the rowcount of a multi-row INSERT ... ON CONFLICT can come back
+    # as -1 from the driver, which the ledger rightly refuses as a count (CI on 8913376a).
+    return len(conn.execute(retained_insert(rows)).all())
 
 
 #: Every column a retained row is written with (the table's own id and timestamps aside).
@@ -358,6 +360,7 @@ def retained_insert(rows: list[dict[str, Any]]) -> Any:  # noqa: ANN401 - an Ins
         pg_insert(retained_t)
         .values(full)
         .on_conflict_do_nothing(index_elements=["erasure_id", "source_table", "source_id"])
+        .returning(retained_t.c.id)
     )
 
 

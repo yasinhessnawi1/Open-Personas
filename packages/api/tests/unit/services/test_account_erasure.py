@@ -291,13 +291,19 @@ class _RowConn:
                     for i in self.paid
                 ]
             )
-        added = len(self.paid) if sql.startswith("INSERT INTO retained_billing_records") else 1
+        added = 1
+        if sql.startswith("INSERT INTO retained_billing_records"):
+            rows = [(f"retained_{i}",) for i in self.paid]
+            added = -1  # what the driver may report for this INSERT: never to be trusted
 
         class _R:
             rowcount = added
 
             def __iter__(self) -> Any:  # noqa: ANN401
                 return iter(rows)
+
+            def all(self) -> list[Any]:
+                return list(rows)
 
             def first(self) -> Any:  # noqa: ANN401
                 return rows[0] if rows else None
@@ -513,6 +519,7 @@ def test_the_retained_insert_compiles_for_every_kind_of_row_together() -> None:
 
     assert sql.startswith("INSERT INTO retained_billing_records")
     assert "ON CONFLICT (erasure_id, source_table, source_id) DO NOTHING" in sql
+    assert sql.rstrip().endswith("RETURNING retained_billing_records.id"), "counted by RETURNING"
 
 
 def test_each_kind_of_row_alone_compiles_too() -> None:

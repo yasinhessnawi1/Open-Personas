@@ -277,7 +277,7 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
         admin_engine=request.app.state.admin_engine,
         credits_policy=request.app.state.credits_policy,
         config=request.app.state.config,
-        stripe_client=gateway.client,
+        stripe_client=getattr(gateway, "client", None),
     )
     try:
         # In the threadpool: the handlers read the database and, for an erased account's
