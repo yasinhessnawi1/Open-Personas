@@ -32,7 +32,7 @@ from __future__ import annotations
 import functools
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -67,6 +67,11 @@ _log = get_logger("graph.consolidation")
 _MERGE_KEY = "_k7_merge"
 #: Reserved canonical-metadata key holding the accreted alias list (K7-D-4.4).
 _ALIAS_KEY = "_k7_aliases"
+
+#: A pending member whose give back failed this many runs in a row is an operator alert,
+#: repeated at most this often while it stays stuck (R9-284 round 8 MEDIUM-A).
+GIVE_BACK_ALERT_AFTER = 5
+GIVE_BACK_ALERT_EVERY = timedelta(hours=24)
 
 #: A merge record's state: the act is still running, or it finished (R9-284).
 _PENDING = "pending"
@@ -251,6 +256,7 @@ class ConsolidationPass:
         # A member whose merge act stopped part way (its record still "pending") is given
         # back first, so this run starts from whole merges only (D-R9-284-graph-mutex).
         stuck: list[str] = []
+        now = datetime.now(UTC)
         for node_id in self._backend.pending_merges(owner_id):
             try:
                 self._unmerge(owner_id, node_id)
@@ -262,19 +268,26 @@ class ConsolidationPass:
                     node=node_id,
                     err=type(exc).__name__,
                 )
+                self._note_failed_give_back(owner_id, node_id, now=now)
         epoch, watermark = self._backend.get_marker(owner_id)
         if stuck:
             # A member still pending could be clustered again, or its canonical could, from a
-            # half-made state: this run merges nothing, and does not advance the marker, so the
-            # next run gives it back and considers the same candidates (round 7 MEDIUM-1).
+            # half-made state: this run merges nothing (round 7 MEDIUM-1). Disuse still decays,
+            # at a new epoch, but the watermark stays, so the next run gives the members back
+            # and considers the same candidates (round 8 MEDIUM-A).
             _log.warning(
                 "consolidation merge phase skipped: pending merges not given back count={n}",
                 n=len(stuck),
             )
+            self._apply_disuse(owner_id, epoch + 1)
+            if watermark is not None:
+                self._backend.advance_marker(
+                    owner_id, epoch=epoch + 1, watermark=watermark, last_run_at=now
+                )
             return ConsolidationReport(
-                run_id=f"{owner_id}:{epoch}",
+                run_id=f"{owner_id}:{epoch + 1}",
                 owner_id=owner_id,
-                epoch=epoch,
+                epoch=epoch + 1,
                 candidates_considered=0,
                 clusters_formed=0,
                 nodes_merged=0,
@@ -362,6 +375,51 @@ class ConsolidationPass:
             },
         )
         return report
+
+    def _note_failed_give_back(self, owner_id: str, node_id: str, *, now: datetime) -> None:
+        """Count a failed give back in the pending record; alert once stuck (round 8 MEDIUM-A).
+
+        From the fifth failure in a row an OPERATOR ALERT is logged, once, then again at most
+        every 24 hours while it stays stuck. Kept in the record, so it survives restarts. A
+        record that cannot be read or written is left as it is: the next run counts again.
+        """
+        try:
+            current = self._backend.get_node(owner_id, node_id)
+            record = json.loads(current.metadata[_MERGE_KEY]) if current is not None else None
+            if current is None or not isinstance(record, dict):
+                return
+            failures = int(record.get("give_back_failures", 0)) + 1
+            last = record.get("give_back_alerted_at")
+            due = failures >= GIVE_BACK_ALERT_AFTER and (
+                not isinstance(last, str)
+                or now - datetime.fromisoformat(last) >= GIVE_BACK_ALERT_EVERY
+            )
+            record = {**record, "give_back_failures": failures}
+            if due:
+                record["give_back_alerted_at"] = now.isoformat()
+            metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+            self._backend.set_merged_into(
+                owner_id,
+                node_id,
+                merged_into=str(record.get("canonical")),
+                metadata=metadata,
+                content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+            )
+        except Exception as exc:  # noqa: BLE001 - counted again by the next run
+            _log.warning(
+                "failed give back not counted node={node} error={err}",
+                node=node_id,
+                err=type(exc).__name__,
+            )
+            return
+        if due:
+            _log.error(
+                "OPERATOR ALERT: consolidation give back stuck owner={owner} node={node} "
+                "failures={n}",
+                owner=owner_id,
+                node=node_id,
+                n=failures,
+            )
 
     def _give_back_cluster(
         self, owner_id: str, members: Sequence[ConceptNode], *, run_id: str

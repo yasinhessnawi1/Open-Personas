@@ -22,6 +22,8 @@ from persona.schema.chunks import WriteSource
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    import pytest
+
 _NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 _P = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -51,6 +53,8 @@ class _Backend:
         self._deadlocks = deadlocks
         self._broken_reopens = broken_reopens
         self._broken_accretions = broken_accretions
+        self.marker: tuple[int, datetime | None] = (0, None)
+        self.disuse: list[int] = []
 
     @contextmanager
     def maintenance_lock(self, _owner: str) -> Iterator[None]:
@@ -74,8 +78,8 @@ class _Backend:
     def existing_edge_keys(self, _owner: str, keys: Any) -> set[int]:  # noqa: ANN401
         return set(keys)
 
-    def get_marker(self, _owner: str) -> tuple[int, None]:
-        return 0, None
+    def get_marker(self, _owner: str) -> tuple[int, datetime | None]:
+        return self.marker
 
     def dirty_candidates(self, _owner: str, _watermark: object) -> list[ConceptNode]:
         return [self.nodes["k"]]
@@ -151,11 +155,11 @@ class _Backend:
         self.nodes[node.id] = node
         return 1
 
-    def apply_disuse_decay(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
-        return None
+    def apply_disuse_decay(self, *_a: Any, **kw: Any) -> None:  # noqa: ANN401
+        self.disuse.append(kw["current_epoch"])
 
-    def advance_marker(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
-        return None
+    def advance_marker(self, _owner: str, **kw: Any) -> None:  # noqa: ANN401
+        self.marker = (kw["epoch"], kw["watermark"])
 
 
 def _pass(backend: _Backend) -> ConsolidationPass:
@@ -253,7 +257,7 @@ def test_a_failed_give_back_means_no_merge_that_run() -> None:
 
     assert stuck.clusters_formed == 0
     assert [c.node_id for c in stuck.skipped] == ["m"]
-    assert backend.events == [], "nothing merged, nothing given back"
+    assert backend.events == ["record m pending"], "nothing merged; the failure is counted"
 
     backend.events.clear()
     healthy = consolidation.run("u1")
@@ -270,3 +274,56 @@ def test_a_done_member_is_marked_pending_before_its_give_back() -> None:
 
     assert backend.events[-3:] == ["close m", "record m done", "record m pending"]
     assert _state(backend) == "pending", "so the next run gives it back"
+
+
+def test_a_run_that_skips_its_merges_still_decays_and_keeps_its_watermark() -> None:
+    """Round 8 MEDIUM-A (a): disuse decays at a new epoch; the candidates stay dirty."""
+    backend = _Backend(deadlocks=1, broken_reopens=2)
+    consolidation = _pass(backend)
+    consolidation.run("u1")  # m left pending; the marker now has a watermark
+    epoch, watermark = backend.marker
+    assert watermark is not None
+    backend.disuse.clear()
+
+    report = consolidation.run("u1")  # the give back fails: merges skipped
+
+    assert report.clusters_formed == 0
+    assert backend.disuse, "disuse ran"
+    assert set(backend.disuse) == {epoch + 1}
+    assert backend.marker == (epoch + 1, watermark), "a new epoch, the same watermark"
+
+
+class _Clock(datetime):
+    now_at = _NOW
+
+    @classmethod
+    def now(cls, _tz: object = None) -> datetime:  # type: ignore[override]
+        return cls.now_at
+
+
+def test_a_give_back_stuck_five_times_alerts_once_then_daily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 8 MEDIUM-A (b): the count lives in the pending record."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona.graph import consolidation as module  # noqa: PLC0415
+
+    alerts: list[str] = []
+    monkeypatch.setattr(module._log, "error", lambda msg, **_k: alerts.append(msg))  # noqa: SLF001
+    monkeypatch.setattr(module, "datetime", _Clock)
+    backend = _Backend(deadlocks=1, broken_reopens=100)
+    consolidation = _pass(backend)
+    consolidation.run("u1")  # m pending (its in-run give back failed too)
+
+    for run in range(1, 7):
+        _Clock.now_at = _NOW + timedelta(minutes=run)
+        consolidation.run("u1")
+        record = json.loads(backend.nodes["m"].metadata["_k7_merge"])
+        assert record["give_back_failures"] == run
+    assert len(alerts) == 1, "the fifth failure alerts, the sixth does not"
+    assert alerts[0].startswith("OPERATOR ALERT: consolidation give back stuck")
+
+    _Clock.now_at = _NOW + timedelta(hours=25)
+    consolidation.run("u1")
+    assert len(alerts) == 2, "again after a day"
