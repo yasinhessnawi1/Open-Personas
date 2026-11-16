@@ -170,6 +170,7 @@ class _ConsolidationBackend(Protocol):
         *,
         member_id: str,
         merged_into: str,
+        replaces: str,
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]: ...
@@ -509,7 +510,7 @@ class ConsolidationPass:
             # a pending record lists none, so a give back removes none.
             # An erasure landing at any later point finds them through the record; one that has
             # already landed refuses this write, and nothing below happens.
-            self._mark_merged(
+            pending = self._mark_merged(
                 owner_id,
                 member,
                 canonical,
@@ -543,6 +544,7 @@ class ConsolidationPass:
                 to_copy,
                 member_id=member.id,
                 merged_into=canonical.id,
+                replaces=pending,
                 record=functools.partial(
                     self._done_metadata,
                     member,
@@ -656,7 +658,8 @@ class ConsolidationPass:
         personas: Sequence[str] = (),
         sources: dict[str, list[int]] | None = None,
         state: str = _DONE,
-    ) -> None:
+    ) -> str:
+        """Write the member's merge record; return the record as written (for the CAS)."""
         metadata, content_hash = self._merge_metadata(
             member,
             canonical,
@@ -674,6 +677,7 @@ class ConsolidationPass:
             content_hash=content_hash,
             guard_personas=personas,
         )
+        return metadata[_MERGE_KEY]
 
     def _done_metadata(
         self,

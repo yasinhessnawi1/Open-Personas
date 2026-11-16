@@ -103,6 +103,16 @@ class GraphPersonaGoneError(GraphError):
     """
 
 
+class GraphMergeConflictError(GraphError):
+    """A merge's done write found the member changed since its pending record (R9-284).
+
+    The done write is a compare-and-set: the member must still be merged into the canonical
+    with the very pending record this merge wrote. If it is not (deleted, given back, merged
+    again), the write is refused and the entity links it was committing with roll back.
+    ``context`` carries the member id.
+    """
+
+
 class GraphRebuildError(GraphError):
     """Raised when rebuilding the dense index from Postgres fails (criterion 9).
 

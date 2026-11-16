@@ -39,7 +39,7 @@ from persona.graph._schema import (
     graph_node_versions,
     graph_nodes,
 )
-from persona.graph.errors import GraphIndexError, GraphPersonaGoneError
+from persona.graph.errors import GraphIndexError, GraphMergeConflictError, GraphPersonaGoneError
 from persona.graph.maintenance_lock import graph_maintenance_held
 from persona.graph.models import (
     CanonicalEntity,
@@ -1020,6 +1020,7 @@ class PostgresGraphBackend:
         *,
         member_id: str,
         merged_into: str,
+        replaces: str,
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]:
@@ -1029,6 +1030,10 @@ class PostgresGraphBackend:
         the insert actually made and returns the member's metadata and content hash, so the
         record lists exactly those. One transaction holding ``guard_personas``: if the guard
         refuses, or anything fails, neither the links nor the record land.
+
+        The record write is a compare-and-set (round 8 LOW-1): the member must still be merged
+        into ``merged_into`` with exactly the pending record ``replaces``. Otherwise
+        :class:`GraphMergeConflictError` is raised and the links roll back with it.
         """
         now = datetime.now(UTC)
         rows = [
@@ -1049,16 +1054,26 @@ class PostgresGraphBackend:
                     ).scalars()
                 ]
             metadata, content_hash = record(added)
-            conn.execute(
+            written = conn.execute(
                 update(graph_nodes)
-                .where(graph_nodes.c.id == member_id, graph_nodes.c.owner_id == owner_id)
+                .where(
+                    graph_nodes.c.id == member_id,
+                    graph_nodes.c.owner_id == owner_id,
+                    graph_nodes.c.merged_into == merged_into,
+                    graph_nodes.c.metadata["_k7_merge"].astext == replaces,
+                )
                 .values(
                     merged_into=merged_into,
                     metadata=metadata,
                     content_hash=content_hash,
                     updated_at=datetime.now(UTC),
                 )
-            )
+            ).rowcount
+            if written != 1:
+                raise GraphMergeConflictError(
+                    "the member changed since its pending merge record",
+                    context={"node_id": member_id},
+                )
         return added
 
     def nodes_for_entity(self, owner_id: str, entity_id: str) -> list[ConceptNode]:

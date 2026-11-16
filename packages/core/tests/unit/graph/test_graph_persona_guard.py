@@ -67,9 +67,12 @@ class _Mappings:
 
 
 class _Result:
-    def __init__(self, row: object = (1,), mapping: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, row: object = (1,), mapping: dict[str, Any] | None = None, rowcount: int = 1
+    ) -> None:
         self._row = row
         self._mapping = mapping
+        self.rowcount = rowcount
 
     def first(self) -> object:
         return self._row
@@ -107,7 +110,7 @@ class _Conn:
             return _Result(mapping=_entity_row())
         if verb == "select":
             return _Result(mapping=_node_row())
-        return _Result()
+        return _Result(rowcount=self._engine.rowcount)
 
 
 class _Engine:
@@ -115,6 +118,7 @@ class _Engine:
         self.gone = set(gone)
         self.log: list[tuple[int, str]] = []
         self.statements: list[tuple[int, str]] = []
+        self.rowcount = 1
         self._next = 0
 
     def _open(self) -> _Conn:
@@ -209,6 +213,7 @@ _WRITES = {
             ["x"],
             member_id="m",
             merged_into="k",
+            replaces="the pending record",
             record=lambda added: ({"_k7_merge": str(added)}, "h"),
             guard_personas=[_P],
         ),
@@ -302,3 +307,28 @@ def test_a_reopen_never_makes_a_second_open_row_for_an_id() -> None:
     assert "NOT (EXISTS (SELECT open_twin.id" in sql
     compiled = str(reopen_statement("u1", "m", "t").compile(dialect=postgresql.dialect()))
     assert "open_twin.id = graph_edges.id AND open_twin.invalid_at IS NULL" in compiled
+
+
+def test_the_done_write_is_a_compare_and_set_that_rolls_the_links_back() -> None:
+    """Round 8 LOW-1: the member must still be merged, with the very pending record."""
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    engine = _Engine()
+    engine.rowcount = 0  # the member was deleted, given back or merged again meanwhile
+
+    with pytest.raises(GraphMergeConflictError):
+        _backend(engine).associate_entities_recording(
+            "u1",
+            "k",
+            ["x"],
+            member_id="m",
+            merged_into="k",
+            replaces='{"state": "pending"}',
+            record=lambda added: ({"_k7_merge": str(added)}, "h"),
+            guard_personas=[_P],
+        )
+
+    (update_sql,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE")]
+    assert "graph_nodes.merged_into = :merged_into_1" in update_sql
+    assert "(graph_nodes.metadata ->> :metadata_1) = :param_1" in update_sql
+    assert len({txn for txn, _ in engine.log}) == 1, "one transaction: the insert rolls back"

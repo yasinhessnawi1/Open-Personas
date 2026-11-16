@@ -1146,3 +1146,60 @@ def test_a_reopened_fact_does_not_block_the_erasure(
             {"o": _OWNER},
         ).scalar_one()
     assert open_rows == 1
+
+
+def test_a_member_deleted_before_the_done_write_lands_no_link(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 8 LOW-1: the done write is a compare-and-set on the pending record."""
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _OTHER, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("c_k", _OTHER), vector)
+    backend.insert_node(_OWNER, _node("c_m", _OTHER), vector)
+    backend.insert_entity(
+        _OWNER,
+        CanonicalEntity(
+            id="c_ent", canonical_name="c_ent", provenance=_by(_OTHER), created_at=_NOW
+        ),
+        vector,
+    )
+    backend.associate_entities(_OWNER, "c_m", ["c_ent"])
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+    real_close = backend.close_edges_incident
+
+    def _close_then_forget_m(*args: Any, **kwargs: Any) -> list[str]:  # noqa: ANN401
+        closed = real_close(*args, **kwargs)
+        backend.delete_node(_OWNER, "c_m")  # the user forgets the member meanwhile
+        return closed
+
+    backend.close_edges_incident = _close_then_forget_m  # type: ignore[method-assign]
+    with pytest.raises(GraphMergeConflictError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, "c_k"),
+            [backend.get_node(_OWNER, "c_m")],
+            run_id="rc",
+            now=_NOW,
+            epoch=1,
+        )
+
+    assert backend.entities_for_node(_OWNER, "c_k") == [], "the links rolled back"
