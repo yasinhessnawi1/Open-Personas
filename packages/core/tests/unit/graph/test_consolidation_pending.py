@@ -42,11 +42,12 @@ def _node(node_id: str) -> ConceptNode:
 
 
 class _Backend:
-    def __init__(self, *, deadlocks: int) -> None:
+    def __init__(self, *, deadlocks: int, broken_reopens: int = 0) -> None:
         self.nodes = {"k": _node("k"), "m": _node("m")}
         self.merged: dict[str, str | None] = {"k": None, "m": None}
         self.events: list[str] = []
         self._deadlocks = deadlocks
+        self._broken_reopens = broken_reopens
 
     @contextmanager
     def maintenance_lock(self, _owner: str) -> Iterator[None]:
@@ -99,6 +100,9 @@ class _Backend:
         return []
 
     def reopen_edges_incident(self, _owner: str, node_id: str, **_k: Any) -> None:  # noqa: ANN401
+        if self._broken_reopens:
+            self._broken_reopens -= 1
+            raise _Deadlock("the connection went too")
         self.events.append(f"reopen {node_id}")
 
     def associate_entities(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
@@ -142,8 +146,20 @@ def _state(backend: _Backend) -> str | None:
     return None if raw is None else str(json.loads(raw)["state"])
 
 
-def test_a_deadlock_after_the_record_leaves_it_pending_and_the_next_run_gives_it_back() -> None:
+def test_a_failed_cluster_is_given_back_in_the_same_run() -> None:
+    """CI on a8ea528a: a failing cluster must leave its members unmerged (the K7 contract)."""
     backend = _Backend(deadlocks=1)
+
+    report = _pass(backend).run("u1")
+
+    assert report.clusters_formed == 0
+    assert backend.events == ["record m pending", "reopen m", "record m cleared"]
+    assert backend.merged["m"] is None
+
+
+def test_a_member_the_run_could_not_give_back_is_given_back_by_the_next_run() -> None:
+    """A crash, or a give back that failed too, leaves it pending for the next run."""
+    backend = _Backend(deadlocks=1, broken_reopens=1)
     consolidation = _pass(backend)
 
     first = consolidation.run("u1")

@@ -277,7 +277,10 @@ class ConsolidationPass:
                     owner_id, seed, members, run_id=run_id, now=started_at, epoch=new_epoch
                 )
             except Exception as exc:  # noqa: BLE001 — per-cluster isolation: one failure
-                # must not abort the run; record it honestly and carry on (K7-D-4.6).
+                # must not abort the run; record it honestly and carry on (K7-D-4.6). The
+                # cluster's members this run merged are given back, still under the lock, so
+                # a failed cluster leaves none of them merged (R9-284 round 5 MEDIUM-1).
+                self._give_back_cluster(owner_id, members, run_id=run_id)
                 skipped.append(
                     SkippedCandidate(
                         node_id=seed.id, reason=f"merge failed: {type(exc).__name__}: {exc}"
@@ -315,6 +318,28 @@ class ConsolidationPass:
             },
         )
         return report
+
+    def _give_back_cluster(
+        self, owner_id: str, members: Sequence[ConceptNode], *, run_id: str
+    ) -> None:
+        """Unmerge each member this run merged; one that fails is left for the next run.
+
+        A member left "pending" by a failure here (or by a crash, where this never ran) is what
+        the next run gives back first.
+        """
+        for member in members:
+            current = self._backend.get_node(owner_id, member.id)
+            raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+            try:
+                record = json.loads(raw) if raw is not None else None
+            except ValueError:
+                record = None
+            if not isinstance(record, dict) or record.get("run_id") != run_id:
+                continue
+            try:
+                self._unmerge(owner_id, member.id)
+            except Exception:  # noqa: BLE001, S112 - still pending: the next run gives it back
+                continue
 
     def _cluster_members(
         self, owner_id: str, seed: ConceptNode, *, floor: float, ceil: float, seen: set[str]
