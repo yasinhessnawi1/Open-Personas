@@ -23,6 +23,7 @@ Decisions in force:
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -72,8 +73,10 @@ __all__ = ["DELETE_LOCK_TIMEOUT", "NodeReleaser", "PostgresGraphBackend"]
 #: How long a node delete waits for a running consolidation's graph lock (R9-287).
 DELETE_LOCK_TIMEOUT = "15s"
 
-# Postgres' "lock not available": the lock timeout ran out.
-_LOCK_NOT_AVAILABLE = "55P03"
+# Postgres' "lock not available" (the lock timeout ran out) and "deadlock detected": the
+# delete met a consolidation and lost; trying again is the answer. Anything else is not.
+_BUSY_SQLSTATES = frozenset({"55P03", "40P01"})
+_LOCK_TIMEOUT_SHAPE = re.compile(r"[1-9][0-9]{0,5}(ms|s)")
 
 
 class NodeReleaser(Protocol):
@@ -199,8 +202,17 @@ class PostgresGraphBackend:
     """
 
     def __init__(
-        self, *, engine: Engine, persona_guard: bool, node_releaser: NodeReleaser | None
+        self,
+        *,
+        engine: Engine,
+        persona_guard: bool,
+        node_releaser: NodeReleaser | None,
+        delete_lock_timeout: str = DELETE_LOCK_TIMEOUT,
     ) -> None:
+        if _LOCK_TIMEOUT_SHAPE.fullmatch(delete_lock_timeout) is None:
+            msg = "delete_lock_timeout must look like '15s' or '200ms'"
+            raise ValueError(msg)
+        self._delete_lock_timeout = delete_lock_timeout
         self._engine = engine
         # R9-287: required like ``persona_guard``, so no construction can forget it. ``None``
         # only where nothing deletes a node through this backend (the graph's own tests).
@@ -469,14 +481,17 @@ class PostgresGraphBackend:
                 after: Callable[[], object] | None = None
                 if self._node_releaser is not None:
                     if conn.dialect.name == "postgresql":
-                        conn.execute(text(f"SET LOCAL lock_timeout = '{DELETE_LOCK_TIMEOUT}'"))
+                        # The shape is checked in __init__: digits and a unit, nothing else.
+                        conn.execute(
+                            text(f"SET LOCAL lock_timeout = '{self._delete_lock_timeout}'")
+                        )
                     take_graph_maintenance_lock(conn, owner_id)
                     after = self._node_releaser.release(conn, owner_id, node_id)
                 surrogate = conn.execute(stmt).scalar_one_or_none()
                 if after is not None:
                     after()
         except OperationalError as exc:
-            if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            if getattr(exc.orig, "sqlstate", None) not in _BUSY_SQLSTATES:
                 raise
             raise GraphNodeBusyError(
                 "the graph is being reorganised", context={"node_id": node_id}

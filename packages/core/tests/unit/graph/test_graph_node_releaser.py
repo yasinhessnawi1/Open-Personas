@@ -26,7 +26,7 @@ class _Result:
 
 
 class _Conn:
-    def __init__(self, log: list[str], *, busy: bool = False) -> None:
+    def __init__(self, log: list[str], *, busy: str | None = None) -> None:
         self.dialect = postgresql.dialect()
         self.log = log
         self.busy = busy
@@ -35,8 +35,8 @@ class _Conn:
         sql = " ".join(str(stmt).split())
         if "pg_advisory_xact_lock" in sql:
             self.log.append("graph lock")
-            if self.busy:
-                orig = type("Orig", (Exception,), {"sqlstate": "55P03"})()
+            if self.busy is not None:
+                orig = type("Orig", (Exception,), {"sqlstate": self.busy})()
                 raise OperationalError(sql, {}, orig)
         elif sql.startswith("SET LOCAL lock_timeout"):
             self.log.append(sql)
@@ -46,7 +46,7 @@ class _Conn:
 
 
 class _Engine:
-    def __init__(self, log: list[str], *, busy: bool = False) -> None:
+    def __init__(self, log: list[str], *, busy: str | None = None) -> None:
         self.log = log
         self.busy = busy
 
@@ -64,11 +64,15 @@ class _Releaser:
         return lambda: self.log.append("after")
 
 
-def _backend(log: list[str], *, releaser: bool, busy: bool = False) -> PostgresGraphBackend:
+def _backend(
+    log: list[str], *, releaser: bool, busy: str | None = None, timeout: str | None = None
+) -> PostgresGraphBackend:
+    extra = {} if timeout is None else {"delete_lock_timeout": timeout}
     return PostgresGraphBackend(
         engine=_Engine(log, busy=busy),  # type: ignore[arg-type]
         persona_guard=False,
         node_releaser=_Releaser(log) if releaser else None,
+        **extra,
     )
 
 
@@ -98,11 +102,34 @@ def test_without_a_releaser_it_is_the_plain_delete() -> None:
     assert log == ["delete"]
 
 
-def test_a_lock_timeout_is_a_busy_node_and_nothing_is_deleted() -> None:
+@pytest.mark.parametrize("sqlstate", ["55P03", "40P01"])
+def test_a_lock_timeout_or_deadlock_is_a_busy_node_and_nothing_is_deleted(sqlstate: str) -> None:
     log: list[str] = []
 
     with pytest.raises(GraphNodeBusyError):
-        _backend(log, releaser=True, busy=True).delete_node("u1", "n1")
+        _backend(log, releaser=True, busy=sqlstate).delete_node("u1", "n1")
 
     assert "delete" not in log
     assert "release n1" not in log
+
+
+@pytest.mark.parametrize("sqlstate", ["57014", "08006", "40001"])
+def test_any_other_operational_error_is_raised_as_it_is(sqlstate: str) -> None:
+    """Review MEDIUM-2: only a lock timeout or a deadlock is a 409; a cancel, a lost connection
+    or a serialization failure is not the graph being reorganised."""
+    with pytest.raises(OperationalError):
+        _backend([], releaser=True, busy=sqlstate).delete_node("u1", "n1")
+
+
+def test_the_lock_timeout_can_be_set_and_is_used() -> None:
+    log: list[str] = []
+
+    _backend(log, releaser=True, timeout="200ms").delete_node("u1", "n1")
+
+    assert log[0] == "SET LOCAL lock_timeout = '200ms'"
+
+
+@pytest.mark.parametrize("bad", ["15", "1s'; DROP TABLE x; --", "0s", "15 s", ""])
+def test_a_lock_timeout_of_any_other_shape_is_refused(bad: str) -> None:
+    with pytest.raises(ValueError, match="delete_lock_timeout"):
+        _backend([], releaser=True, timeout=bad)
