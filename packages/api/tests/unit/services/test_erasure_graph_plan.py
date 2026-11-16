@@ -19,6 +19,7 @@ from persona_api.services.erasure_graph import (
     source_keys,
     split_alias_list,
     unmerged,
+    unsourced_mirrors,
     without_alias_names,
     without_aliases,
     without_persona_aliases,
@@ -361,3 +362,14 @@ def test_old_single_key_sources_read_as_one_element_lists() -> None:
     assert source_keys(None) == []
     assert source_keys(True) == []
     assert source_keys(["7", 8]) == [8]
+
+
+def test_a_mirror_without_a_listed_source_falls_back_to_its_id() -> None:
+    """Round 5 LOW-1: per entry, not per record."""
+    newer = {"mirrored_edges": ["e1", "e2"], "mirror_sources": {"e1": [4]}}
+    older = {"mirrored_edges": ["e1", "e2"]}
+    whole = {"mirrored_edges": ["e1"], "mirror_sources": {"e1": [4]}}
+
+    assert unsourced_mirrors(newer) == {"e2"}
+    assert unsourced_mirrors(older) == {"e1", "e2"}
+    assert unsourced_mirrors(whole) == set()

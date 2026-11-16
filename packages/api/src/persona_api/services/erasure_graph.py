@@ -63,6 +63,7 @@ __all__ = [
     "mirror_id_for",
     "mirrors_to_remove",
     "source_keys",
+    "unsourced_mirrors",
     "split_alias_list",
     "plan_trails",
     "unmerged",
@@ -513,6 +514,16 @@ def mirror_id_for(
     return None if src == dst else make_edge_id(src, dst, LinkType(link_type))
 
 
+def unsourced_mirrors(record: Mapping[str, Any]) -> set[str]:
+    """A record's mirrors with no listed source: found by recomputing their id (round 5 LOW-1).
+
+    Every mirror of a record from before LOW-3, and any entry a newer record lists without a
+    source.
+    """
+    sourced = record.get("mirror_sources") or {}
+    return {str(m) for m in record.get("mirrored_edges", []) if str(m) not in sourced}
+
+
 def source_keys(raw: object) -> list[int]:
     """A record's sources for one mirror: a list since round 5 MEDIUM-2, one key before it."""
     if isinstance(raw, bool):
@@ -634,7 +645,7 @@ def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
     return _Mirrors(
         seeds={int(e.edge_key) for e in asserted},
         sources=sources,
-        legacy={i: r for i, r in records.items() if r is not None and "mirror_sources" not in r},
+        legacy={i: r for i, r in records.items() if r is not None and unsourced_mirrors(r)},
         asserted=list(asserted),
         existing=existing,
     )
@@ -687,7 +698,7 @@ def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
                 member_id=member_id,
                 canonical_id=canonical,
             )
-            if mirror is not None:
+            if mirror is not None and mirror in unsourced_mirrors(record):
                 deleted += conn.execute(
                     delete_mirrors(owner_id, [mirror], run_id=str(record.get("run_id")))
                 ).rowcount

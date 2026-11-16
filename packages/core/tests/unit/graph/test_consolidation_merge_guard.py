@@ -52,24 +52,18 @@ class _Backend:
         self.record: dict[str, Any] | None = None
         self.records: list[dict[str, Any]] = []
 
-    def open_assertion_edges(self, _owner: str, node_id: str) -> list[TypedLink]:
+    def open_assertion_edges_keyed(self, _owner: str, node_id: str) -> list[tuple[TypedLink, int]]:
         if node_id != "m":
             return []
-        return [
-            TypedLink(
-                id="m::causal::x",
-                src_node_id="m",
-                dst_node_id="x",
-                link_type=LinkType.CAUSAL,
-                provenance=NodeProvenance(
-                    source=WriteSource.SYSTEM, persona_id=_Q, written_at=_NOW
-                ),
-                created_at=_NOW,
-            )
-        ]
-
-    def open_assertion_edge_keys(self, _owner: str, node_id: str) -> dict[str, int]:
-        return {"m::causal::x": 7} if node_id == "m" else {}
+        edge = TypedLink(
+            id="m::causal::x",
+            src_node_id="m",
+            dst_node_id="x",
+            link_type=LinkType.CAUSAL,
+            provenance=NodeProvenance(source=WriteSource.SYSTEM, persona_id=_Q, written_at=_NOW),
+            created_at=_NOW,
+        )
+        return [(edge, 7)]
 
     def entities_for_node(self, _owner: str, node_id: str) -> list[str]:
         return ["ent_m"] if node_id == "m" else []

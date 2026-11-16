@@ -132,8 +132,9 @@ class _ConsolidationBackend(Protocol):
     ) -> list[ConceptNode]: ...
     def get_embeddings(self, owner_id: str, node_ids: Sequence[str]) -> dict[str, list[float]]: ...
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
-    def open_assertion_edges(self, owner_id: str, node_id: str) -> list[TypedLink]: ...
-    def open_assertion_edge_keys(self, owner_id: str, node_id: str) -> dict[str, int]: ...
+    def open_assertion_edges_keyed(
+        self, owner_id: str, node_id: str
+    ) -> list[tuple[TypedLink, int]]: ...
     def upsert_edge(
         self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
     ) -> None: ...
@@ -479,8 +480,7 @@ class ConsolidationPass:
         mirrors: list[TypedLink] = []
         sources: dict[str, list[int]] = {}
         asserters: dict[str, str] = {}
-        keys = self._backend.open_assertion_edge_keys(owner_id, member.id)
-        for edge in self._backend.open_assertion_edges(owner_id, member.id):
+        for edge, edge_key in self._backend.open_assertion_edges_keyed(owner_id, member.id):
             if edge.src_node_id == member.id:
                 src, dst = canonical.id, edge.dst_node_id
             else:
@@ -488,8 +488,7 @@ class ConsolidationPass:
             if src == dst:  # a self-loop after re-pointing onto the canonical — skip
                 continue
             mirror_id = make_edge_id(src, dst, edge.link_type)
-            if edge.id in keys:
-                sources[mirror_id] = [keys[edge.id]]
+            sources[mirror_id] = [edge_key]
             if edge.provenance is not None and edge.provenance.persona_id:
                 asserters[mirror_id] = edge.provenance.persona_id
             mirrors.append(

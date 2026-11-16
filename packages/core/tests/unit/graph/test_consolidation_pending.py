@@ -83,11 +83,8 @@ class _Backend:
     def get_node(self, _owner: str, node_id: str) -> ConceptNode | None:
         return self.nodes.get(node_id)
 
-    def open_assertion_edges(self, *_a: Any) -> list[Any]:  # noqa: ANN401
+    def open_assertion_edges_keyed(self, *_a: Any) -> list[Any]:  # noqa: ANN401
         return []
-
-    def open_assertion_edge_keys(self, *_a: Any) -> dict[str, int]:  # noqa: ANN401
-        return {}
 
     def entities_for_node(self, *_a: Any) -> list[str]:  # noqa: ANN401
         return []

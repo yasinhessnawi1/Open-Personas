@@ -1128,11 +1128,13 @@ class PostgresGraphBackend:
             rows = conn.execute(select(graph_edges).where(*conds)).mappings().all()
         return [self._row_to_link(dict(r)) for r in rows]
 
-    def open_assertion_edge_keys(self, owner_id: str, node_id: str) -> dict[str, int]:
-        """``{edge id: edge_key}`` for a node's open temporal/causal edges (R9-284 LOW-3).
+    def open_assertion_edges_keyed(
+        self, owner_id: str, node_id: str
+    ) -> list[tuple[TypedLink, int]]:
+        """A node's OPEN temporal/causal edges with each row's ``edge_key``, in one query.
 
-        The open id is unique (one open edge per fact), and ``edge_key`` names the exact row,
-        which a later re-assertion under the same id does not.
+        ``edge_key`` names the exact row a mirror copies (R9-284 LOW-3); read with the edge,
+        not by a second query that could see a different row (round 5 LOW-1).
         """
         conds = [
             graph_edges.c.owner_id == owner_id,
@@ -1141,8 +1143,8 @@ class PostgresGraphBackend:
             or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
         ]
         with self._engine.connect() as conn:
-            rows = conn.execute(select(graph_edges.c.id, graph_edges.c.edge_key).where(*conds))
-            return {str(r.id): int(r.edge_key) for r in rows}
+            rows = conn.execute(select(graph_edges).where(*conds)).mappings().all()
+        return [(self._row_to_link(dict(r)), int(r["edge_key"])) for r in rows]
 
     def close_edges_incident(
         self, owner_id: str, node_id: str, *, invalidated_by: str
