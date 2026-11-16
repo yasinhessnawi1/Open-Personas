@@ -419,3 +419,22 @@ def test_a_refused_done_write_leaves_no_entity_link_behind() -> None:
     consolidation._give_back_cluster("u1", [member], run_id="r1")  # noqa: SLF001
 
     assert backend.linked == set(), f"a copied link was left on the canonical: {backend.linked}"
+
+
+def test_a_listing_without_sources_still_counts_as_backing() -> None:
+    """Reviewer's C2: a record from before LOW-3 lists the mirror but no sources for it."""
+    backend = _UnmergeBackend("r1", alive=frozenset())
+    unsourced = json.loads(backend.records["n"])
+    unsourced["mirror_sources"] = {}
+    backend.records["n"] = json.dumps(unsourced)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
+
+    assert backend.deleted == [], "n's unsourced listing keeps the mirror"

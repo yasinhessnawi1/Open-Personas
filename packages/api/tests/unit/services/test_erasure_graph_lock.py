@@ -57,10 +57,28 @@ def test_the_graph_step_takes_the_owners_lock_before_any_row_lock() -> None:
     assert params == {"owner": "u1"}
 
 
+class _BusyResult:
+    """Answers every query the step makes: the lock is taken by someone else, rows are none."""
+
+    rowcount = 0
+
+    def scalar(self) -> bool:
+        return False
+
+    def all(self) -> list[object]:
+        return []
+
+    def scalars(self) -> list[object]:
+        return []
+
+    def first(self) -> None:
+        return None
+
+
 class _BusyConn(_Conn):
-    def execute(self, stmt: Any, params: Any = None) -> Any:  # noqa: ANN401
+    def execute(self, stmt: Any, params: Any = None) -> _BusyResult:  # noqa: ANN401
         self._log.append((str(stmt), params))
-        return type("R", (), {"scalar": lambda _self: False})()
+        return _BusyResult()
 
 
 class _BusyEngine(_Engine):

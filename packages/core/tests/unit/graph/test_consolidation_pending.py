@@ -236,7 +236,7 @@ def test_one_pending_member_that_cannot_be_given_back_does_not_stop_the_others()
     try:
         report = consolidation.run("u1")
     except RuntimeError as exc:
-        raise AssertionError(f"one failed give back stopped the run: {exc}") from exc
+        raise AssertionError(f"one failed give back stopped the run: {exc}") from None
 
     assert backend.events[:2] == ["reopen m", "record m cleared"], "m is given back anyway"
     assert report.clusters_formed == 0, "round 7 MEDIUM-1: no merge this run"

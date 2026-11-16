@@ -533,3 +533,16 @@ def test_a_large_key_set_is_one_array_parameter() -> None:
     compiled = statement.compile(dialect=postgresql.dialect())
     assert "= ANY (" in str(compiled)
     assert len(compiled.params) == 3, "owner, the key array and the tag"
+
+
+def test_the_prune_never_takes_another_runs_mirror_with_the_same_id() -> None:
+    """Reviewer's E3: run r1's m lost its source; run r2's m (same id) still has one."""
+    r1 = {"run_id": "r1", "mirrored_edges": ["m"], "mirror_sources": {"m": [1]}}
+    r2 = {"run_id": "r2", "mirrored_edges": ["m"], "mirror_sources": {"m": [2]}}
+    rows = {("m", "r1"): {9}, ("m", "r2"): {10}}
+
+    doomed, _ = orphaned_mirrors({"a": r1, "b": r2}, rows, existing={2, 9, 10})
+
+    assert doomed == [9]
+    (statement,) = mirror_row_deletes("u1", doomed, rows)
+    assert "consolidation:r1" in str(statement.compile().params)
