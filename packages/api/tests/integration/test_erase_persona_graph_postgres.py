@@ -101,7 +101,12 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
         )
     # The user then edits a node only the persona had written: it is the user's now, and its
     # earlier version (the persona's alone) is not.
-    backend.update_node(_OWNER, _node("edited", _PERSONA, None), vector)
+    backend.update_node(
+        _OWNER,
+        _node("edited", _PERSONA, None),
+        vector,
+        expected_content_hash=_node("edited", _PERSONA).content_hash,
+    )
     backend.upsert_edge(_OWNER, _edge("e_only", "only", "theirs", _OTHER))
     backend.upsert_edge(_OWNER, _edge("e_mine", "shared", "theirs", _PERSONA))
     backend.upsert_edge(_OWNER, _edge("e_theirs", "shared", "theirs", _OTHER))
@@ -818,6 +823,7 @@ def test_a_legacy_comma_reason_loses_only_the_doomed_name(
             merged_into="l_k",
             metadata=metadata,
             content_hash=_compute_node_hash(name, f"about {node_id}", metadata),
+            expected_content_hash=_node(node_id, persona).content_hash,  # as inserted
         )
     with migrated_engine.begin() as conn:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
@@ -885,6 +891,7 @@ def test_a_co_members_stale_listing_does_not_keep_a_mirror(
         merged_into="s_c",
         metadata=metadata,
         content_hash=_compute_node_hash(b.concept_name, b.content, metadata),
+        expected_content_hash=b.content_hash,
     )
     assert _open_edges(migrated_engine, "s_c") == {"s_c::causal::s_x"}
 
@@ -1363,23 +1370,35 @@ def _during_the_act(backend: PostgresGraphBackend, then: Any) -> None:  # noqa: 
     backend.close_edges_incident = _close_then  # type: ignore[method-assign]
 
 
-def test_a_stale_whole_metadata_write_keeps_the_merge_record(
+def test_a_stale_whole_metadata_write_is_refused_and_the_merge_completes(
     migrated_engine: Engine,
     embedder: Any,  # noqa: ANN401
 ) -> None:
-    """Round 9 MEDIUM-1 (b): an extend read M before the merge and writes it back after."""
+    """Round 9 MEDIUM-1, under the node CAS: an extend read M before the merge and writes it
+    back after. The write is refused (M changed since it read it), the record survives."""
     import json  # noqa: PLC0415
+
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
 
     backend, consolidation = _race_fixture(migrated_engine, embedder)
     stale = backend.get_node(_OWNER, "r_m")
     assert stale is not None
     vector = embedder.encode(["x"])[0]
-    _during_the_act(backend, lambda: backend.update_node(_OWNER, stale, vector))
+    refused: list[bool] = []
+
+    def _stale_extend() -> None:
+        try:
+            backend.update_node(_OWNER, stale, vector, expected_content_hash=stale.content_hash)
+        except GraphStaleWriteError:
+            refused.append(True)
+
+    _during_the_act(backend, _stale_extend)
 
     consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
         _OWNER, backend.get_node(_OWNER, "r_c"), [stale], run_id="rr", now=_NOW, epoch=1
     )
 
+    assert refused == [True], "the stale write was refused"
     member = backend.get_node(_OWNER, "r_m")
     assert member is not None
     assert json.loads(member.metadata["_k7_merge"])["state"] == "done", "the record survived"
@@ -1494,3 +1513,97 @@ def test_two_rows_of_a_fact_closed_under_one_tag_reopen_as_one(
             {"o": _OWNER},
         ).all()
     assert [is_open for _, is_open in rows] == [False, True], "only the newest reopened"
+
+
+def test_a_content_edit_between_the_merge_writes_is_kept_and_given_back(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 10 MEDIUM-1: a correction of M lands between the pending and done writes.
+
+    It read M fresh, so it wins; the done CAS then refuses, and the give back unmerges M with
+    the edit kept, M readable (its hash matches what it holds).
+    """
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+    vector = embedder.encode(["x"])[0]
+
+    def _correct_m() -> None:
+        fresh = backend.get_node(_OWNER, "r_m")
+        assert fresh is not None
+        edited = ConceptNode(
+            id=fresh.id,
+            node_kind=fresh.node_kind,
+            concept_name=fresh.concept_name,
+            content="the user's correction",
+            metadata=dict(fresh.metadata),
+            provenance=(*fresh.provenance, _by(None)),
+            created_at=fresh.created_at,
+        )
+        backend.update_node(_OWNER, edited, vector, expected_content_hash=fresh.content_hash)
+
+    _during_the_act(backend, _correct_m)
+    member = backend.get_node(_OWNER, "r_m")
+    assert member is not None
+    with pytest.raises(GraphMergeConflictError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER, backend.get_node(_OWNER, "r_c"), [member], run_id="re", now=_NOW, epoch=1
+        )
+    consolidation._give_back_cluster(_OWNER, [member], run_id="re")  # noqa: SLF001 - the run's
+
+    given_back = backend.get_node(_OWNER, "r_m")
+    assert given_back is not None, "readable: the hash matches the row"
+    assert given_back.content == "the user's correction", "the edit is kept"
+    with migrated_engine.connect() as conn:
+        merged_into = conn.execute(
+            text("SELECT merged_into FROM graph_nodes WHERE owner_id = :o AND id = 'r_m'"),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert merged_into is None
+    assert _open_edges(migrated_engine, "r_c") == set(), "no mirror is left open"
+
+
+def test_an_extend_planned_before_the_erasure_cannot_bring_names_back(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 10 MEDIUM-2: C absorbed P's member (C's alias list names it); an extend reads C,
+    P is erased (the name leaves C, the hash changes), then the extend writes: refused."""
+    import json  # noqa: PLC0415
+
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+    consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "r_c"),
+        [backend.get_node(_OWNER, "r_m")],
+        run_id="rn2",
+        now=_NOW,
+        epoch=1,
+    )
+    planned = backend.get_node(_OWNER, "r_c")
+    assert planned is not None
+    assert "r_m" in json.loads(planned.metadata["_k7_aliases"])
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    extended = ConceptNode(
+        id=planned.id,
+        node_kind=planned.node_kind,
+        concept_name=planned.concept_name,
+        content=planned.content + " and more",
+        metadata=dict(planned.metadata),
+        provenance=tuple(p for p in planned.provenance if p.persona_id != _PERSONA),
+        created_at=planned.created_at,
+    )
+    with pytest.raises(GraphStaleWriteError):
+        backend.update_node(
+            _OWNER, extended, embedder.encode(["x"])[0], expected_content_hash=planned.content_hash
+        )
+
+    after = backend.get_node(_OWNER, "r_c")
+    assert after is not None
+    assert "r_m" not in json.loads(after.metadata.get("_k7_aliases", "[]")), "no name of P"

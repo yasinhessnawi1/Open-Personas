@@ -362,3 +362,38 @@ def test_rebuild_index_resyncs_owner_vectors() -> None:
     _store(b, idx, _created_merge(), audit).rebuild_index("u1")
     assert sorted(idx.removed) == [11, 22]  # cleared first
     assert sorted(s for s, _ in idx.added) == [11, 22]  # re-added from Postgres
+
+
+def test_a_self_rename_that_lost_the_race_is_redone_on_a_fresh_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-R9-284-node-cas: the rename re-reads the SELF node and tries again."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    backend = _FakeBackend()
+    self_node = ConceptNode(
+        id="u1::self",
+        node_kind=NodeKind.SELF,
+        concept_name="Old",
+        content="Old",
+        provenance=(NodeProvenance(source=WriteSource.USER, written_at=NOW),),
+        created_at=NOW,
+    )
+    backend.nodes[self_node.id] = (1, self_node, _vec(0))
+    tries: list[str] = []
+
+    def _update(_owner: str, node: ConceptNode, _vector: object, **kw: str) -> int:
+        tries.append(kw["expected_content_hash"])
+        if len(tries) == 1:
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        backend.nodes[node.id] = (1, node, _vec(0))
+        return 1
+
+    backend.update_node = _update  # type: ignore[attr-defined]
+    store = _store(backend, _FakeIndex(), _created_merge(), MemoryAuditLogger())
+    monkeypatch.setattr(store, "_ensure_self_entity", lambda *_a, **_k: None)
+
+    renamed = store._rename_self_node("u1", self_node, "New")  # noqa: SLF001
+
+    assert renamed.concept_name == "New"
+    assert tries == [self_node.content_hash, self_node.content_hash], "read afresh, then written"

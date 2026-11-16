@@ -39,7 +39,12 @@ from persona.graph._schema import (
     graph_node_versions,
     graph_nodes,
 )
-from persona.graph.errors import GraphIndexError, GraphMergeConflictError, GraphPersonaGoneError
+from persona.graph.errors import (
+    GraphIndexError,
+    GraphMergeConflictError,
+    GraphPersonaGoneError,
+    GraphStaleWriteError,
+)
 from persona.graph.maintenance_lock import graph_maintenance_held
 from persona.graph.models import (
     CanonicalEntity,
@@ -66,6 +71,23 @@ _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
 # R9-284: a graph write holds the persona it names (see PostgresGraphBackend._hold_personas).
 _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
+
+
+def _refuse_if_stale(conn: Connection, owner_id: str, node_id: str, exists: bool | None) -> None:
+    """A CAS that wrote nothing: raise if the row is there (it changed), else it is absent."""
+    if exists is None:
+        exists = (
+            conn.execute(
+                select(graph_nodes.c.id).where(
+                    graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id
+                )
+            ).first()
+            is not None
+        )
+    if exists:
+        raise GraphStaleWriteError(
+            "the node changed since it was read", context={"node_id": node_id}
+        )
 
 
 def keep_merge_record(metadata: dict[str, str], current: object) -> dict[str, str]:
@@ -204,6 +226,7 @@ class PostgresGraphBackend:
         node: ConceptNode,
         embedding: Sequence[float],
         *,
+        expected_content_hash: str,
         embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
         guard_personas: Sequence[str] = (),
     ) -> int | None:
@@ -213,12 +236,16 @@ class PostgresGraphBackend:
         embedding, metadata, wellbeing tag, content_hash, and the provenance trail.
         Returns the ``surrogate`` (for index replace) or ``None`` if absent.
 
-        The merge record (``_k7_merge``) is lifecycle state, like ``merged_into``: it is kept
-        as the row has it, whatever the caller's copy of the metadata says (R9-284 round 9
-        MEDIUM-1). A caller that read the node before a merge wrote its record, and writes the
-        whole metadata back after, would otherwise drop it. The row is read ``FOR UPDATE`` in
-        this transaction, so a merge's record write waits, and the content hash is recomputed
-        over the metadata actually written.
+        A compare-and-set (D-R9-284-node-cas): the row must still have
+        ``expected_content_hash``, the hash the caller read, or :class:`GraphStaleWriteError`
+        is raised and nothing is written; the caller re-reads and retries.
+
+        The merge record (``_k7_merge``) is lifecycle state, like ``merged_into``: the row's
+        is written, whatever the caller's metadata says (round 9 MEDIUM-1). Under the CAS a
+        stale copy can no longer drop it, but a fresh read can still carry foreign metadata: a
+        version restore writes the snapshot's, which may hold an old record or none. So the
+        row's record is read (no lock: if the row changes before the write, the CAS refuses)
+        and kept, and the content hash is recomputed over the metadata actually written.
         """
         self._check_dim(embedding, node.id)
         with self._engine.begin() as conn:
@@ -226,9 +253,9 @@ class PostgresGraphBackend:
                 conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
             )
             current = conn.execute(
-                select(graph_nodes.c.metadata)
-                .where(graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id)
-                .with_for_update()
+                select(graph_nodes.c.metadata).where(
+                    graph_nodes.c.id == node.id, graph_nodes.c.owner_id == owner_id
+                )
             ).scalar_one_or_none()
             metadata = keep_merge_record(dict(node.metadata), current)
             content_hash = (
@@ -239,8 +266,10 @@ class PostgresGraphBackend:
             surrogate = conn.execute(
                 self._update_node_statement(
                     owner_id, node, embedding, embedding_model, metadata, content_hash
-                )
+                ).where(graph_nodes.c.content_hash == expected_content_hash)
             ).scalar_one_or_none()
+            if surrogate is None:
+                _refuse_if_stale(conn, owner_id, node.id, current is not None)
         return None if surrogate is None else int(surrogate)
 
     def _update_node_statement(
@@ -1075,7 +1104,7 @@ class PostgresGraphBackend:
         *,
         member_id: str,
         merged_into: str,
-        replaces: str,
+        expected_content_hash: str,
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]:
@@ -1086,9 +1115,10 @@ class PostgresGraphBackend:
         record lists exactly those. One transaction holding ``guard_personas``: if the guard
         refuses, or anything fails, neither the links nor the record land.
 
-        The record write is a compare-and-set (round 8 LOW-1): the member must still be merged
-        into ``merged_into`` with exactly the pending record ``replaces``. Otherwise
-        :class:`GraphMergeConflictError` is raised and the links roll back with it.
+        The record write is a compare-and-set (round 8 LOW-1, D-R9-284-node-cas): the member
+        must still be merged into ``merged_into`` and have ``expected_content_hash``, the hash
+        of its pending record. Otherwise :class:`GraphMergeConflictError` is raised and the
+        links roll back with it.
         """
         now = datetime.now(UTC)
         rows = [
@@ -1115,7 +1145,7 @@ class PostgresGraphBackend:
                     graph_nodes.c.id == member_id,
                     graph_nodes.c.owner_id == owner_id,
                     graph_nodes.c.merged_into == merged_into,
-                    graph_nodes.c.metadata["_k7_merge"].astext == replaces,
+                    graph_nodes.c.content_hash == expected_content_hash,
                 )
                 .values(
                     merged_into=merged_into,
@@ -1521,9 +1551,14 @@ class PostgresGraphBackend:
         merged_into: str | None,
         metadata: dict[str, str],
         content_hash: str,
+        expected_content_hash: str,
         guard_personas: Sequence[str] = (),
     ) -> None:
         """Set/clear ``merged_into`` + bookkeeping ``metadata``/``content_hash`` (K7-D-4.4).
+
+        A compare-and-set on ``expected_content_hash`` (D-R9-284-node-cas): a row that changed
+        since the caller read it raises :class:`GraphStaleWriteError`; a missing row is a
+        no-op.
 
         Targeted update — does NOT touch ``content``/``embedding`` (§0 byte-equality) or
         ``salience``/``last_evidence_epoch``. Advances ``updated_at`` so a re-scan sees
@@ -1531,7 +1566,11 @@ class PostgresGraphBackend:
         """
         stmt = (
             update(graph_nodes)
-            .where(graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id)
+            .where(
+                graph_nodes.c.id == node_id,
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.content_hash == expected_content_hash,
+            )
             .values(
                 merged_into=merged_into,
                 metadata=metadata,
@@ -1541,7 +1580,8 @@ class PostgresGraphBackend:
         )
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, guard_personas)
-            conn.execute(stmt)
+            if conn.execute(stmt).rowcount != 1:
+                _refuse_if_stale(conn, owner_id, node_id, None)
 
     def merged_members(self, owner_id: str, canonical_id: str) -> list[ConceptNode]:
         """The nodes consolidated into ``canonical_id`` (K5 inspection / unmerge scope)."""

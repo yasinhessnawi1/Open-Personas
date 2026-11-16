@@ -35,8 +35,10 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from persona.graph.errors import (
+    STALE_WRITE_ATTEMPTS,
     GraphNodeNotFoundError,
     GraphProtectedNodeError,
+    GraphStaleWriteError,
     NodeMergeError,
 )
 from persona.graph.models import (
@@ -102,7 +104,12 @@ class _MergeBackend(Protocol):
     def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None: ...
     def insert_node(self, owner_id: str, node: ConceptNode, embedding: Sequence[float]) -> int: ...
     def update_node(
-        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        expected_content_hash: str,
     ) -> int | None: ...
     def snapshot_node_version(
         self,
@@ -156,7 +163,7 @@ class MergeEngine:
 
         # Explicit update/contradiction → evolve a named node (D-K0-4).
         if candidate.update_intent in (UpdateIntent.UPDATE, UpdateIntent.CONTRADICT):
-            outcome = self._evolve(owner_id, candidate, vec)
+            outcome = self._evolve_retrying(owner_id, candidate, vec)
         else:
             # Extend-vs-create on the merge threshold (D-K0-1). The extend-target search
             # excludes the SELF anchor + merged nodes (K7-D-7): neither is ever a valid
@@ -175,6 +182,23 @@ class MergeEngine:
         self._close_named_links(owner_id, candidate)
         self._apply_salience(owner_id, outcome)
         return outcome
+
+    def _evolve_retrying(
+        self, owner_id: str, candidate: KnowledgeCandidate, vec: Sequence[float]
+    ) -> MergeOutcome:
+        """:meth:`_evolve`, read afresh and tried again when the target changed meanwhile.
+
+        D-R9-284-node-cas: the write is a compare-and-set on the hash read. A supersede
+        that lost it has already snapshotted the version it read; that row stays, a true
+        record of the content that was current then.
+        """
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                return self._evolve(owner_id, candidate, vec)
+            except GraphStaleWriteError:
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+        raise AssertionError  # pragma: no cover - the loop returns or raises
 
     def _apply_salience(self, owner_id: str, outcome: MergeOutcome) -> None:
         """Move the touched node's evidence-salience by the event's delta (K7-D-6).
@@ -224,6 +248,17 @@ class MergeEngine:
             GraphNodeNotFoundError: the node is not the owner's (no silent no-op /
                 create — the user is correcting *this* node, K5-D-7).
         """
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                self._correct_once(owner_id, node_id, new_content, interaction_id)
+                return
+            except GraphStaleWriteError:  # changed meanwhile: read afresh (node CAS)
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+
+    def _correct_once(
+        self, owner_id: str, node_id: str, new_content: str, interaction_id: str | None
+    ) -> None:
         target = self._backend.get_node(owner_id, node_id)
         if target is None:
             raise GraphNodeNotFoundError(
@@ -248,7 +283,9 @@ class MergeEngine:
             created_at=target.created_at,
         )
         new_vec = self._embedder.encode([new_content])[0]
-        self._backend.update_node(owner_id, node, new_vec)
+        self._backend.update_node(
+            owner_id, node, new_vec, expected_content_hash=target.content_hash
+        )
         # Half-edge fix (K5-D-7): clear EVERY incident semantic edge — inbound ones a
         # neighbour scored against the OLD embedding too, not just outgoing — then
         # re-form this node's outgoing links from the fresh embedding (re_eval=False,
@@ -289,6 +326,24 @@ class MergeEngine:
         candidate: KnowledgeCandidate,
         candidate_vec: Sequence[float],  # noqa: ARG002 — re-embedded from accumulated content
     ) -> MergeOutcome:
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                return self._extend_once(owner_id, target, candidate)
+            except GraphStaleWriteError:  # changed meanwhile: read afresh (node CAS)
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+                fresh = self._backend.get_node(owner_id, target.id)
+                if fresh is None or self._backend.is_merged(owner_id, target.id):
+                    raise NodeMergeError(
+                        "extend target merged or removed meanwhile",
+                        context={"target_node_id": target.id, "owner_id": owner_id},
+                    ) from None
+                target = fresh
+        raise AssertionError  # pragma: no cover - the loop returns or raises
+
+    def _extend_once(
+        self, owner_id: str, target: ConceptNode, candidate: KnowledgeCandidate
+    ) -> MergeOutcome:
         new_content = accumulate(target.content, candidate.content)
         if new_content == target.content:
             # Idempotent / no-new-knowledge: the content is already present (K2 crit 8).
@@ -302,7 +357,9 @@ class MergeEngine:
             )
         node = self._rebuilt(target, content=new_content, candidate=candidate)
         new_vec = self._embedder.encode([new_content])[0]
-        self._backend.update_node(owner_id, node, new_vec)
+        self._backend.update_node(
+            owner_id, node, new_vec, expected_content_hash=target.content_hash
+        )
         link_ids = self._form_semantic_links(owner_id, node, new_vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(
@@ -392,7 +449,7 @@ class MergeEngine:
         node = self._rebuilt(
             target, content=candidate.content, candidate=candidate, superseded=target.content
         )
-        self._backend.update_node(owner_id, node, vec)
+        self._backend.update_node(owner_id, node, vec, expected_content_hash=target.content_hash)
         link_ids = self._form_semantic_links(owner_id, node, vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(

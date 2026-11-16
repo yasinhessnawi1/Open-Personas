@@ -113,6 +113,20 @@ class GraphMergeConflictError(GraphError):
     """
 
 
+#: How many times a caller reads afresh and tries again after a stale node write (node CAS).
+STALE_WRITE_ATTEMPTS = 3
+
+
+class GraphStaleWriteError(GraphMergeConflictError):
+    """A node write found the row changed since the writer read it (R9-284, node CAS).
+
+    Every write that replaces a node's content, metadata or provenance trail names the
+    ``content_hash`` it read, and the row must still have it (D-R9-284-node-cas). Callers
+    re-read and retry; consolidation treats it as a merge conflict and gives the member back,
+    hence the parent class. ``context`` carries the node id.
+    """
+
+
 class GraphRebuildError(GraphError):
     """Raised when rebuilding the dense index from Postgres fails (criterion 9).
 

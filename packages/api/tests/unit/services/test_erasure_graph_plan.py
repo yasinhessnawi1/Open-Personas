@@ -271,7 +271,8 @@ def test_every_row_lock_the_graph_step_takes_is_taken_in_a_fixed_order() -> None
         if isinstance(node, ast.Attribute) and node.attr == "with_for_update":
             locked += 1
             chain = ast.unparse(node.value)
-            if ".order_by(" not in chain and "== canonical_id" not in chain:
+            single_row = "== canonical_id" in chain or "nodes_t.c.id == node.id" in chain
+            if ".order_by(" not in chain and not single_row:
                 unordered += 1
     assert locked >= 5
     assert unordered == 0

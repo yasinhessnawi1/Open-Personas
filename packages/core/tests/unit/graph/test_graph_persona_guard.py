@@ -80,8 +80,8 @@ class _Result:
     def scalar_one(self) -> int:
         return 1
 
-    def scalar_one_or_none(self) -> int:
-        return 1
+    def scalar_one_or_none(self) -> int | None:
+        return 1 if self.rowcount else None
 
     def scalars(self) -> list[str]:
         return ["x"]
@@ -177,7 +177,10 @@ _WRITES = {
         lambda b: b.insert_node_if_absent("u1", _node(_P), _VECTOR),
         "insert",
     ),
-    "update_node": (lambda b: b.update_node("u1", _node(None, _P), _VECTOR), "update"),
+    "update_node": (
+        lambda b: b.update_node("u1", _node(None, _P), _VECTOR, expected_content_hash="h"),
+        "update",
+    ),
     "upsert_edge": (lambda b: b.upsert_edge("u1", _edge(_P)), "insert"),
     "insert_entity": (
         lambda b: b.insert_entity(
@@ -213,7 +216,7 @@ _WRITES = {
             ["x"],
             member_id="m",
             merged_into="k",
-            replaces="the pending record",
+            expected_content_hash="the pending hash",
             record=lambda added: ({"_k7_merge": str(added)}, "h"),
             guard_personas=[_P],
         ),
@@ -225,7 +228,13 @@ _WRITES = {
     ),
     "set_merged_into": (
         lambda b: b.set_merged_into(
-            "u1", "m", merged_into="k", metadata={}, content_hash="h", guard_personas=[_P]
+            "u1",
+            "m",
+            merged_into="k",
+            metadata={},
+            content_hash="h",
+            expected_content_hash="h0",
+            guard_personas=[_P],
         ),
         "update",
     ),
@@ -250,7 +259,9 @@ def test_the_hold_and_the_write_share_one_transaction_holds_first(name: str) -> 
     "write",
     [
         lambda b: b.insert_node("u1", _node(_P), _VECTOR),
-        lambda b: b.update_node("u1", _node(None), _VECTOR, guard_personas=[_P]),
+        lambda b: b.update_node(
+            "u1", _node(None), _VECTOR, expected_content_hash="h", guard_personas=[_P]
+        ),
         lambda b: b.upsert_edge("u1", _edge(None), guard_personas=[_P]),
         lambda b: b.add_alias("u1", "x", EntityAlias(surface="my doctor", persona_id=_P)),
     ],
@@ -268,7 +279,7 @@ def test_a_write_naming_an_erased_persona_writes_nothing(write: Any) -> None:  #
 def test_every_persona_a_trail_names_is_held_once() -> None:
     engine = _Engine()
 
-    _backend(engine).update_node("u1", _node(_Q, _P, _Q, None), _VECTOR)
+    _backend(engine).update_node("u1", _node(_Q, _P, _Q, None), _VECTOR, expected_content_hash="h")
 
     assert engine.entries()[:2] == [f"hold {_P}", f"hold {_Q}"]
 
@@ -326,14 +337,14 @@ def test_the_done_write_is_a_compare_and_set_that_rolls_the_links_back() -> None
             ["x"],
             member_id="m",
             merged_into="k",
-            replaces='{"state": "pending"}',
+            expected_content_hash="the pending hash",
             record=lambda added: ({"_k7_merge": str(added)}, "h"),
             guard_personas=[_P],
         )
 
     (update_sql,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE")]
     assert "graph_nodes.merged_into = :merged_into_1" in update_sql
-    assert "(graph_nodes.metadata ->> :metadata_1) = :param_1" in update_sql
+    assert "graph_nodes.content_hash = :content_hash_1" in update_sql, "the node CAS"
     assert len({txn for txn, _ in engine.log}) == 1, "one transaction: the insert rolls back"
 
 
@@ -366,7 +377,7 @@ def _update_metadata(current: object, metadata: dict[str, str]) -> tuple[dict[st
         provenance=(_by(_P),),
         created_at=_NOW,
     )
-    _backend(_RowEngine()).update_node("u1", node, _VECTOR)
+    _backend(_RowEngine()).update_node("u1", node, _VECTOR, expected_content_hash="h")
     return captured["metadata"], captured["content_hash"]
 
 
@@ -383,3 +394,47 @@ def test_update_node_keeps_the_rows_merge_record() -> None:
     assert _update_metadata(row, {"_k7_merge": "forged"})[0] == {"_k7_merge": "the record"}
     assert _update_metadata({}, {"_k7_merge": "forged", "y": "1"})[0] == {"y": "1"}
     assert _update_metadata(None, {"_k7_aliases": "[]"})[0] == {"_k7_aliases": "[]"}
+
+
+_CAS_WRITES = {
+    "update_node": lambda b: b.update_node("u1", _node(_P), _VECTOR, expected_content_hash="read"),
+    "set_merged_into": lambda b: b.set_merged_into(
+        "u1", "n1", merged_into="k", metadata={}, content_hash="new", expected_content_hash="read"
+    ),
+    "associate_entities_recording": lambda b: b.associate_entities_recording(
+        "u1",
+        "k",
+        ["x"],
+        member_id="n1",
+        merged_into="k",
+        expected_content_hash="read",
+        record=lambda added: ({"_k7_merge": str(added)}, "new"),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(_CAS_WRITES))
+def test_every_node_write_is_a_compare_and_set_on_the_hash_read(name: str) -> None:
+    """D-R9-284-node-cas: the UPDATE carries the hash, and a changed row is refused."""
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    engine = _Engine()
+    engine.rowcount = 0  # the row's hash is no longer the one read
+
+    with pytest.raises(GraphMergeConflictError):  # GraphStaleWriteError is one
+        _CAS_WRITES[name](_backend(engine))
+
+    (update_sql,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE graph_nodes")]
+    assert "graph_nodes.content_hash = :content_hash_1" in update_sql
+
+
+def test_a_stale_write_on_an_existing_row_is_a_stale_write_error() -> None:
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    engine = _Engine()
+    engine.rowcount = 0
+
+    with pytest.raises(GraphStaleWriteError):
+        _CAS_WRITES["update_node"](_backend(engine))
+    with pytest.raises(GraphStaleWriteError):
+        _CAS_WRITES["set_merged_into"](_backend(engine))

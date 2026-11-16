@@ -197,3 +197,33 @@ def test_a_bounded_wait_sets_a_local_lock_timeout_before_the_lock() -> None:
     assert timeout_sql == "SELECT set_config('lock_timeout', :t, true)", "true: this txn only"
     assert timeout_params == {"t": "60000ms"}
     assert lock_sql.startswith("SELECT pg_advisory_xact_lock(")
+
+
+def test_the_erasure_hashes_the_rows_own_content_not_a_stale_copy() -> None:
+    """D-R9-284-node-cas: _set_metadata re-reads the name and content under a row lock."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+    from persona_api.services import erasure_graph  # noqa: PLC0415
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    log: list[str] = []
+    written: dict[str, Any] = {}
+
+    class _Own(_EmptyResult):
+        def first(self) -> object:
+            return SimpleNamespace(concept_name="k", content="the content now")
+
+    class _OwnConn(_Conn):
+        def execute(self, stmt: Any, _params: Any = None) -> _EmptyResult:  # noqa: ANN401
+            sql = str(stmt.compile(dialect=postgresql.dialect()))
+            log.append(sql)
+            if sql.startswith("UPDATE"):
+                written.update(stmt.compile(dialect=postgresql.dialect()).params)
+            return _Own()
+
+    stale = SimpleNamespace(id="k", concept_name="k", content="the content then")
+    erasure_graph._set_metadata(_OwnConn([]), "u1", stale, {"x": "1"})  # noqa: SLF001
+
+    assert "FOR NO KEY UPDATE" in log[0], "the row is locked while it is hashed"
+    assert written["content_hash"] == _compute_node_hash("k", "the content now", {"x": "1"})

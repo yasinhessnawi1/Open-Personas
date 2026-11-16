@@ -38,7 +38,11 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from persona.audit import AuditAction, AuditEvent
-from persona.graph.errors import GraphMergeConflictError
+from persona.graph.errors import (
+    STALE_WRITE_ATTEMPTS,
+    GraphMergeConflictError,
+    GraphStaleWriteError,
+)
 from persona.graph.models import (
     ConceptNode,
     NodeKind,
@@ -171,7 +175,7 @@ class _ConsolidationBackend(Protocol):
         *,
         member_id: str,
         merged_into: str,
-        replaces: str,
+        expected_content_hash: str,
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]: ...
@@ -187,6 +191,7 @@ class _ConsolidationBackend(Protocol):
         node: ConceptNode,
         embedding: Sequence[float],
         *,
+        expected_content_hash: str,
         guard_personas: Sequence[str] = (),
     ) -> int | None: ...
     def set_merged_into(
@@ -197,6 +202,7 @@ class _ConsolidationBackend(Protocol):
         merged_into: str | None,
         metadata: dict[str, str],
         content_hash: str,
+        expected_content_hash: str,
         guard_personas: Sequence[str] = (),
     ) -> None: ...
     def surrogate_for(self, owner_id: str, node_id: str) -> int | None: ...
@@ -410,6 +416,7 @@ class ConsolidationPass:
                 merged_into=str(record.get("canonical")),
                 metadata=metadata,
                 content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+                expected_content_hash=current.content_hash,
             )
         except Exception as exc:  # noqa: BLE001 - counted again by the next run
             _log.warning(
@@ -467,6 +474,7 @@ class ConsolidationPass:
             merged_into=canonical,
             metadata=metadata,
             content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+            expected_content_hash=current.content_hash,
         )
 
     def _cluster_members(
@@ -515,7 +523,7 @@ class ConsolidationPass:
             # a pending record lists none, so a give back removes none.
             # An erasure landing at any later point finds them through the record; one that has
             # already landed refuses this write, and nothing below happens.
-            pending = self._mark_merged(
+            pending, pending_hash = self._mark_merged(
                 owner_id,
                 member,
                 canonical,
@@ -550,7 +558,7 @@ class ConsolidationPass:
                     to_copy,
                     member_id=member.id,
                     merged_into=canonical.id,
-                    replaces=pending,
+                    expected_content_hash=pending_hash,
                     record=functools.partial(
                         self._done_metadata,
                         member,
@@ -670,8 +678,12 @@ class ConsolidationPass:
         personas: Sequence[str] = (),
         sources: dict[str, list[int]] | None = None,
         state: str = _DONE,
-    ) -> str:
-        """Write the member's merge record; return the record as written (for the CAS)."""
+    ) -> tuple[str, str]:
+        """Write the member's merge record; return it as written and the new content hash.
+
+        A compare-and-set on the member as read (D-R9-284-node-cas): a member that changed
+        since raises :class:`GraphStaleWriteError`, a merge conflict, and nothing is written.
+        """
         metadata, content_hash = self._merge_metadata(
             member,
             canonical,
@@ -687,9 +699,10 @@ class ConsolidationPass:
             merged_into=canonical.id,
             metadata=metadata,
             content_hash=content_hash,
+            expected_content_hash=member.content_hash,
             guard_personas=personas,
         )
-        return metadata[_MERGE_KEY]
+        return metadata[_MERGE_KEY], content_hash
 
     def _done_metadata(
         self,
@@ -751,6 +764,27 @@ class ConsolidationPass:
         now: datetime,
         personas: Sequence[str] = (),
     ) -> None:
+        """Accrete the members' names onto the canonical, retried on a fresh read (node CAS)."""
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                self._accrete_once(
+                    owner_id, canonical_id, names, run_id=run_id, now=now, personas=personas
+                )
+                return
+            except GraphStaleWriteError:
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+
+    def _accrete_once(
+        self,
+        owner_id: str,
+        canonical_id: str,
+        names: list[str],
+        *,
+        run_id: str,
+        now: datetime,
+        personas: Sequence[str],
+    ) -> None:
         current = self._backend.get_node(owner_id, canonical_id)
         if current is None:  # pragma: no cover - the canonical was just read
             return
@@ -785,7 +819,13 @@ class ConsolidationPass:
             created_at=current.created_at,
         )
         # R9-284: the aliases are the members' names; hold the personas that gave them.
-        self._backend.update_node(owner_id, rebuilt, emb, guard_personas=personas)
+        self._backend.update_node(
+            owner_id,
+            rebuilt,
+            emb,
+            expected_content_hash=current.content_hash,
+            guard_personas=personas,
+        )
 
     # ===== the inverse ====================================================
 
@@ -864,6 +904,7 @@ class ConsolidationPass:
             merged_into=None,
             metadata=orig_meta,
             content_hash=_compute_node_hash(member.concept_name, member.content, orig_meta),
+            expected_content_hash=member.content_hash,
         )
         surrogate = self._backend.surrogate_for(owner_id, node_id)
         emb = self._backend.get_embeddings(owner_id, [node_id]).get(node_id)
@@ -914,6 +955,7 @@ class ConsolidationPass:
             merged_into=str(record.get("canonical")),
             metadata=metadata,
             content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+            expected_content_hash=current.content_hash,
         )
 
     def _mirrors_shared_with(

@@ -313,13 +313,25 @@ def _naming(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressi
 
 
 def _set_metadata(conn: Connection, owner_id: str, node: Any, metadata: dict[str, Any]) -> None:  # noqa: ANN401 - a Row
-    """Write new bookkeeping metadata, with the content hash it changes (content untouched)."""
+    """Write new bookkeeping metadata, with the content hash it changes (content untouched).
+
+    The hash is recomputed from the row's own name and content, read here under a row lock,
+    never from the caller's copy (D-R9-284-node-cas): a writer may have changed the content
+    since that was read, and a hash over the old content would leave the node unreadable.
+    """
+    own = conn.execute(
+        select(nodes_t.c.concept_name, nodes_t.c.content)
+        .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == node.id)
+        .with_for_update(key_share=True)
+    ).first()
+    if own is None:
+        return
     conn.execute(
         update(nodes_t)
         .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == node.id)
         .values(
             metadata=metadata,
-            content_hash=_compute_node_hash(node.concept_name, node.content, metadata),
+            content_hash=_compute_node_hash(own.concept_name, own.content, metadata),
         )
     )
 

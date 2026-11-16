@@ -31,7 +31,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.audit import AuditAction, AuditEvent
 from persona.graph.entities import normalize_surface
-from persona.graph.errors import GraphProtectedNodeError, NodeMergeError
+from persona.graph.errors import (
+    STALE_WRITE_ATTEMPTS,
+    GraphProtectedNodeError,
+    GraphStaleWriteError,
+    NodeMergeError,
+)
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -84,7 +89,12 @@ class _StoreBackend(Protocol):
         self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
     ) -> int | None: ...
     def update_node(
-        self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: Sequence[float],
+        *,
+        expected_content_hash: str,
     ) -> int | None: ...
     def surrogates_for_owner(self, owner_id: str) -> list[int]: ...
     def surrogates_for_nodes(self, owner_id: str, node_ids: Sequence[str]) -> list[int]: ...
@@ -314,6 +324,22 @@ class PostgresGraphStore:
         return node
 
     def _rename_self_node(self, owner_id: str, existing: ConceptNode, new_name: str) -> ConceptNode:
+        """Rename the SELF node, read afresh and tried again if it changed meanwhile (node CAS)."""
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                return self._rename_self_node_once(owner_id, existing, new_name)
+            except GraphStaleWriteError:
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+                fresh = self._backend.get_node(owner_id, existing.id)
+                if fresh is None:  # pragma: no cover - SELF is never deleted
+                    raise
+                existing = fresh
+        raise AssertionError  # pragma: no cover - the loop returns or raises
+
+    def _rename_self_node_once(
+        self, owner_id: str, existing: ConceptNode, new_name: str
+    ) -> ConceptNode:
         now = datetime.now(UTC)
         provenance = (
             *existing.provenance,
@@ -335,7 +361,9 @@ class PostgresGraphStore:
             created_at=existing.created_at,
         )
         vector = self._embedder.encode([renamed.content])[0]
-        surrogate = self._backend.update_node(owner_id, renamed, vector)
+        surrogate = self._backend.update_node(
+            owner_id, renamed, vector, expected_content_hash=existing.content_hash
+        )
         if surrogate is None:  # pragma: no cover - existing was just read
             raise NodeMergeError("self node vanished before rename", context={"owner_id": owner_id})
         self._index.replace(surrogate=surrogate, vector=list(vector))
@@ -420,6 +448,16 @@ class PostgresGraphStore:
         return self._backend.get_node_versions(owner_id, node_id)
 
     def restore_node_version(self, owner_id: str, node_id: str, version_id: str) -> ConceptNode:
+        """:meth:`_restore_once`, read afresh and tried again if the node changed (node CAS)."""
+        for attempt in range(STALE_WRITE_ATTEMPTS):
+            try:
+                return self._restore_once(owner_id, node_id, version_id)
+            except GraphStaleWriteError:
+                if attempt == STALE_WRITE_ATTEMPTS - 1:
+                    raise
+        raise AssertionError  # pragma: no cover - the loop returns or raises
+
+    def _restore_once(self, owner_id: str, node_id: str, version_id: str) -> ConceptNode:
         """Re-apply a version's content + embedding as the current account (K7-D-1 restore).
 
         The reversibility primitive: reads the window-closed version row (byte-exact
@@ -459,7 +497,9 @@ class PostgresGraphStore:
             ),
             created_at=current.created_at,
         )
-        surrogate = self._backend.update_node(owner_id, restored, embedding)
+        surrogate = self._backend.update_node(
+            owner_id, restored, embedding, expected_content_hash=current.content_hash
+        )
         if surrogate is None:  # pragma: no cover - current was just read
             raise NodeMergeError(
                 "node vanished before restore", context={"node_id": node_id, "owner_id": owner_id}

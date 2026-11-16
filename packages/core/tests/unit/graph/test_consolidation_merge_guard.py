@@ -544,3 +544,31 @@ def test_a_lost_cas_with_no_record_on_the_row_gives_back_from_the_record_in_hand
         "reopen m consolidation:r1",
         "clear m",
     ]
+
+
+def test_the_alias_accretion_retries_on_a_fresh_read_after_a_stale_write() -> None:
+    """D-R9-284-node-cas: _accrete_aliases re-reads the canonical and tries again."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    class _Stale(_Backend):
+        def __init__(self, canonical: ConceptNode, member: ConceptNode) -> None:
+            super().__init__(canonical, member)
+            self.expected: list[str] = []
+
+        def update_node(self, _owner: str, node: ConceptNode, _emb: Any, **kw: Any) -> int:  # noqa: ANN401
+            self.expected.append(kw["expected_content_hash"])
+            if len(self.expected) == 1:
+                raise GraphStaleWriteError("changed", context={"node_id": node.id})
+            return 1
+
+    canonical = _node("k", _Q)
+    backend = _Stale(canonical, _node("m", _P))
+    ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )._accrete_aliases("u1", "k", ["m"], run_id="r1", now=_NOW)  # noqa: SLF001
+
+    assert backend.expected == [canonical.content_hash, canonical.content_hash]

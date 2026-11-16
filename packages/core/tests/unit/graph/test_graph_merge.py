@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import pytest
 from persona.graph import merge as merge_module
 from persona.graph.config import GraphSettings
-from persona.graph.errors import NodeMergeError
+from persona.graph.errors import GraphStaleWriteError, NodeMergeError
 from persona.graph.merge import MergeEngine, accumulate
 from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, UpdateIntent
@@ -128,9 +128,18 @@ class _FakeBackend:
         self._next_surrogate += 1
         return self._next_surrogate
 
-    def update_node(self, owner_id: str, node: ConceptNode, embedding: list[float]) -> int | None:
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+    ) -> int | None:
         if node.id not in self.nodes:
             return None
+        if self.nodes[node.id][0].content_hash != expected_content_hash:  # the node CAS
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
         self.nodes[node.id] = (node, list(embedding))
         return 1
 
@@ -466,3 +475,86 @@ def test_merge_engine_never_calls_resolve() -> None:
     src = inspect.getsource(merge_module)
     assert ".resolve(" not in src
     assert "EntityRegistry" not in src
+
+
+# ----- the node CAS: callers read afresh and try again (D-R9-284-node-cas) -----------------
+
+
+class _RacedBackend(_FakeBackend):
+    """Another writer changes the node just before each of the first ``races`` writes."""
+
+    def __init__(self, races: int) -> None:
+        super().__init__()
+        self.races = races
+        self.reads = 0
+        self.writes = 0
+
+    def get_node(self, owner_id: str, node_id: str) -> ConceptNode | None:
+        self.reads += 1
+        return super().get_node(owner_id, node_id)
+
+    def delete_links_incident(self, *_a: object) -> None:
+        return None
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        *,
+        expected_content_hash: str,
+    ) -> int | None:
+        self.writes += 1
+        if self.races:
+            self.races -= 1
+            current, vector = self.nodes[node.id]
+            raced = current.model_dump(exclude={"content_hash"})
+            raced["content"] = current.content + " (edited)"
+            self.nodes[node.id] = (ConceptNode.model_validate(raced), vector)
+        return super().update_node(
+            owner_id, node, embedding, expected_content_hash=expected_content_hash
+        )
+
+
+def _created(backend: _FakeBackend) -> str:
+    out = _engine(backend, {"likes coffee": vec(0)}).merge("u1", _cand("likes coffee"))
+    return out.node_id
+
+
+def test_a_correction_that_lost_the_race_is_redone_on_a_fresh_read() -> None:
+    b = _RacedBackend(races=1)
+    node_id = _created(b)
+    b.writes = 0
+
+    _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
+
+    node, _ = b.nodes[node_id]
+    assert b.writes == 2, "refused once, then written on a fresh read"
+    assert node.content == "likes tea"
+    assert node.provenance[-1].superseded_content == "likes coffee (edited)", "the fresh one"
+
+
+def test_an_extend_that_lost_the_race_is_redone_on_a_fresh_read() -> None:
+    b = _RacedBackend(races=1)
+    mapping = {"likes coffee": vec(0), "loves espresso": vec(0, 0.95, 1)}
+    eng = _engine(b, mapping)
+    node_id = eng.merge("u1", _cand("likes coffee")).node_id
+    b.writes = 0
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    node, _ = b.nodes[node_id]
+    assert out.action is MergeAction.EXTENDED
+    assert b.writes == 2
+    assert node.content == "likes coffee (edited)\nloves espresso", "the edit is kept"
+
+
+def test_a_write_that_keeps_losing_gives_up_after_three_tries() -> None:
+    b = _RacedBackend(races=100)
+    node_id = _created(b)
+    b.writes = 0
+
+    with pytest.raises(GraphStaleWriteError):
+        _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
+
+    assert b.writes == 3

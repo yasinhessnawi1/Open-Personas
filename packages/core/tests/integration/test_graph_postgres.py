@@ -136,14 +136,17 @@ def test_get_node_is_owner_scoped(backend: PostgresGraphBackend) -> None:
 
 
 def test_update_node_extends_content_and_trail(backend: PostgresGraphBackend) -> None:
-    backend.insert_node("u1", _node("u1::node::00000001", "job", "works at X"), _vec(0))
+    original = _node("u1::node::00000001", "job", "works at X")
+    backend.insert_node("u1", original, _vec(0))
     extended = _node(
         "u1::node::00000001",
         "job",
         "works at X; promoted to lead",
         provenance=(_prov(reason="created"), _prov(reason="extended")),
     )
-    surrogate = backend.update_node("u1", extended, _vec(1))
+    surrogate = backend.update_node(
+        "u1", extended, _vec(1), expected_content_hash=original.content_hash
+    )
     assert surrogate is not None
 
     got = backend.get_node("u1", "u1::node::00000001")
@@ -154,7 +157,29 @@ def test_update_node_extends_content_and_trail(backend: PostgresGraphBackend) ->
 
 
 def test_update_missing_node_returns_none(backend: PostgresGraphBackend) -> None:
-    assert backend.update_node("u1", _node("u1::node::00000099", "x", "y"), _vec(0)) is None
+    missing = _node("u1::node::00000099", "x", "y")
+    assert (
+        backend.update_node("u1", missing, _vec(0), expected_content_hash=missing.content_hash)
+        is None
+    )
+
+
+def test_update_node_refuses_a_stale_write(backend: PostgresGraphBackend) -> None:
+    """D-R9-284-node-cas on Postgres: the row changed since the writer read it."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    original = _node("u1::node::00000002", "job", "works at X")
+    backend.insert_node("u1", original, _vec(0))
+    first = _node("u1::node::00000002", "job", "works at Y")
+    backend.update_node("u1", first, _vec(0), expected_content_hash=original.content_hash)
+    stale = _node("u1::node::00000002", "job", "works at Z")
+
+    with pytest.raises(GraphStaleWriteError):
+        backend.update_node("u1", stale, _vec(0), expected_content_hash=original.content_hash)
+
+    got = backend.get_node("u1", "u1::node::00000002")
+    assert got is not None
+    assert got.content == "works at Y"
 
 
 def test_delete_node_returns_surrogate_and_removes(backend: PostgresGraphBackend) -> None:
