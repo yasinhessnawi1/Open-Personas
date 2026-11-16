@@ -700,3 +700,123 @@ def test_a_mirror_two_members_share_goes_with_the_last_of_its_sources(
             conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": persona})
         erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=persona)
         assert _open_edges(migrated_engine, "v_c") == left, persona
+
+
+def test_unmerge_leaves_a_foreign_edge_on_the_mirror_id(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Reviewer's C10: the pending record lists C->X, but C->X is the other persona's own edge.
+
+    The merge stopped after the record (before narrowing it), so giving the member back walks a
+    list naming an edge the merge never made; that edge stays, with its owner's provenance.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node in (_node("f_c", _OTHER), _node("f_m", _PERSONA), _node("f_x", _OTHER)):
+        backend.insert_node(_OWNER, node, vector)
+    backend.upsert_edge(_OWNER, _edge("f_c::causal::f_x", "f_c", "f_x", _OTHER))
+    backend.upsert_edge(_OWNER, _edge("f_m::causal::f_x", "f_m", "f_x", _PERSONA))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+
+    def _stop(*_a: Any, **_k: Any) -> list[str]:  # noqa: ANN401
+        raise RuntimeError("the merge stops after the record")
+
+    real_close = backend.close_edges_incident
+    backend.close_edges_incident = _stop  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, "f_c"),
+            [backend.get_node(_OWNER, "f_m")],
+            run_id="rf",
+            now=_NOW,
+            epoch=1,
+        )
+    backend.close_edges_incident = real_close  # type: ignore[method-assign]
+
+    assert consolidation.unmerge(_OWNER, "f_m") is True
+
+    with migrated_engine.connect() as conn:
+        owner = conn.execute(
+            text(
+                "SELECT provenance->>'persona_id' FROM graph_edges WHERE owner_id = :o "
+                "AND id = 'f_c::causal::f_x' AND invalid_at IS NULL"
+            ),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert owner == _OTHER
+
+
+def test_a_legacy_comma_reason_loses_only_the_doomed_name(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Reviewer's E9: through erase_persona_graph, with the canonical's names as the vocabulary.
+
+    The canonical's consolidation entry predates JSON reasons: "aliases:Bergen, Norway,Tromso".
+    Erasing the persona of the member "Bergen, Norway" leaves "Tromso" there, and in the list.
+    """
+    import json  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    vector = embedder.encode(["x"])[0]
+    legacy = NodeProvenance(
+        source=WriteSource.SYSTEM,
+        written_at=_NOW,
+        reason="consolidation:r1 aliases:Bergen, Norway,Tromso",
+    )
+    canonical = _node("l_k", _OTHER).model_copy(
+        update={
+            "provenance": (_by(_OTHER), legacy),
+            "metadata": {"_k7_aliases": json.dumps(["Bergen, Norway", "Tromso"])},
+        }
+    )
+    backend.insert_node(_OWNER, canonical, vector)
+    for node_id, name, persona in (("l_m", "Bergen, Norway", _PERSONA), ("l_t", "Tromso", _OTHER)):
+        backend.insert_node(
+            _OWNER, _node(node_id, persona).model_copy(update={"concept_name": name}), vector
+        )
+        record = {"run_id": "r1", "canonical": "l_k", "mirrored_edges": [], "added_entities": []}
+        backend.set_merged_into(
+            _OWNER,
+            node_id,
+            merged_into="l_k",
+            metadata={"_k7_merge": json.dumps(record)},
+            content_hash="h",
+        )
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    kept = backend.get_node(_OWNER, "l_k")
+    assert kept is not None
+    reasons = [p.reason for p in kept.provenance if p.reason]
+    assert reasons == ['consolidation:r1 aliases:["Tromso"]']
+    assert json.loads(kept.metadata["_k7_aliases"]) == ["Tromso"]

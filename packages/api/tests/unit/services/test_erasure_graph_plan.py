@@ -7,8 +7,10 @@ Postgres only and runs in CI (tests/integration/test_erase_persona_graph_postgre
 
 from __future__ import annotations
 
+import itertools
 import json
 
+import pytest
 from persona_api.services.erasure_graph import (
     delete_mirrors,
     merge_record,
@@ -403,3 +405,17 @@ def test_a_long_legacy_list_is_tokenised_fast() -> None:
 
     assert found == names
     assert elapsed < 1.0, f"took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(4))))
+def test_a_chain_is_resolved_whatever_order_the_records_come_in(order: tuple[int, ...]) -> None:
+    """Reviewer's E7: a single pass found a chain only when its records came in chain order."""
+    chain = [
+        ("k1::causal::x", "r1", 10),  # the persona's edge, row 10
+        ("k2::causal::x", "r2", 11),  # k1's mirror row
+        ("k3::causal::x", "r3", 12),  # k2's mirror row
+        ("k4::causal::x", "r4", 13),  # k3's mirror row
+    ]
+    rows = {(m, r): [key + 1] for m, r, key in chain}
+
+    assert mirrors_to_remove([10], [chain[i] for i in order], rows) == [11, 12, 13, 14]
