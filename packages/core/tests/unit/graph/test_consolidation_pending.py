@@ -61,11 +61,11 @@ class _Backend:
                 out.append(node.id)
         return out
 
-    def merge_records_into(self, _owner: str, canonical_id: str) -> dict[str, str]:
+    def merge_records_listing(self, _owner: str, **_kw: Any) -> dict[str, str]:  # noqa: ANN401
         return {
             i: n.metadata["_k7_merge"]
             for i, n in self.nodes.items()
-            if self.merged[i] == canonical_id and "_k7_merge" in n.metadata
+            if self.merged[i] and "_k7_merge" in n.metadata
         }
 
     def existing_edge_keys(self, _owner: str, keys: Any) -> set[int]:  # noqa: ANN401

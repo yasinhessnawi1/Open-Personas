@@ -121,7 +121,9 @@ class _ConsolidationBackend(Protocol):
 
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
     def pending_merges(self, owner_id: str) -> list[str]: ...
-    def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]: ...
+    def merge_records_listing(
+        self, owner_id: str, *, run_id: str, mirror_ids: Sequence[str]
+    ) -> dict[str, str]: ...
     def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
@@ -662,16 +664,23 @@ class ConsolidationPass:
     ) -> set[str]:
         """Mirrors another member of the same run, still merged, also backs.
 
+        Any member of the run, merged into any canonical (round 6 M-2): members of two
+        clusters can make the same mirror id, A1 into C1 and B2 into C2 both C2::t::C1.
+
         It backs one only while one of the sources it lists for it is still a row (round 6
         M-1): a stale listing, whose source an erasure or a forget removed, keeps nothing. A
         mirror it lists without sources (a record before LOW-3) is taken as backed.
         """
-        canonical = record.get("canonical")
-        if not isinstance(canonical, str):
+        listed = record.get("mirrored_edges")
+        mirror_ids = sorted({str(m) for m in listed}) if isinstance(listed, list) else []
+        if not mirror_ids:
             return set()
         claims: dict[str, set[int]] = {}
         unsourced: set[str] = set()
-        for other_id, raw in self._backend.merge_records_into(owner_id, canonical).items():
+        listing = self._backend.merge_records_listing(
+            owner_id, run_id=str(record.get("run_id")), mirror_ids=mirror_ids
+        )
+        for other_id, raw in listing.items():
             if other_id == node_id:
                 continue
             try:
@@ -682,6 +691,8 @@ class ConsolidationPass:
                 continue
             sources = other.get("mirror_sources") or {}
             for mirror in map(str, other.get("mirrored_edges", [])):
+                if mirror not in mirror_ids:
+                    continue
                 if mirror not in sources:
                     unsourced.add(mirror)  # no sources listed: taken as backed
                     continue

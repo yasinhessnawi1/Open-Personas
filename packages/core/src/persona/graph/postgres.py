@@ -1255,16 +1255,41 @@ class PostgresGraphBackend:
         with self._engine.connect() as conn:
             return {int(k) for k in conn.execute(stmt).scalars()}
 
-    def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]:
-        """``{member id: its raw merge record}`` for every member merged into ``canonical_id``."""
+    def merge_records_listing(
+        self, owner_id: str, *, run_id: str, mirror_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """``{member id: raw record}`` for each merged member of ``run_id`` listing a mirror id.
+
+        Across every canonical (round 6 M-2). Narrowed in SQL by the record's text, then
+        decided in Python on the parsed record, so a record that is not JSON is never cast.
+        """
+        if not mirror_ids:
+            return {}
         record = graph_nodes.c.metadata["_k7_merge"].astext
         stmt = (
             select(graph_nodes.c.id, record)
-            .where(graph_nodes.c.owner_id == owner_id, graph_nodes.c.merged_into == canonical_id)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into.is_not(None),
+                record.contains(run_id, autoescape=True),
+                or_(*(record.contains(m, autoescape=True) for m in mirror_ids)),
+            )
             .order_by(graph_nodes.c.id)
         )
         with self._engine.connect() as conn:
-            return {str(i): str(r) for i, r in conn.execute(stmt).all() if r is not None}
+            rows = conn.execute(stmt).all()
+        wanted = set(mirror_ids)
+        out: dict[str, str] = {}
+        for node_id, raw in rows:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(parsed, dict) or parsed.get("run_id") != run_id:
+                continue
+            if wanted & {str(m) for m in parsed.get("mirrored_edges", [])}:
+                out[str(node_id)] = str(raw)
+        return out
 
     def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None:
         """Remove the OPEN row for ``edge_id`` only while it is still the merge's mirror."""

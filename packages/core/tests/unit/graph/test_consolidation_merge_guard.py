@@ -186,30 +186,40 @@ def test_the_accreted_alias_names_are_recorded_as_json() -> None:
 class _UnmergeBackend:
     """Two members of run r1 merged into k; both list the mirror k::causal::x."""
 
-    def __init__(self, other_run: str, alive: frozenset[int] = frozenset({7})) -> None:
+    def __init__(
+        self, other_run: str, alive: frozenset[int] = frozenset({7}), other_canonical: str = "k"
+    ) -> None:
         self._alive = set(alive)
 
-        def record(run: str) -> str:
+        def record(run: str, canonical: str = "k") -> str:
             return json.dumps(
                 {
                     "state": "done",
                     "run_id": run,
-                    "canonical": "k",
+                    "canonical": canonical,
                     "mirrored_edges": ["k::causal::x"],
                     "added_entities": [],
                     "mirror_sources": {"k::causal::x": [7]},
                 }
             )
 
-        self.records = {"m": record("r1"), "n": record(other_run)}
+        self.records = {"m": record("r1"), "n": record(other_run, other_canonical)}
         self.deleted: list[str] = []
 
     def get_node(self, _owner: str, node_id: str) -> ConceptNode:
         node = _node(node_id, _P)
         return node.model_copy(update={"metadata": {"_k7_merge": self.records[node_id]}})
 
-    def merge_records_into(self, _owner: str, _canonical: str) -> dict[str, str]:
-        return dict(self.records)
+    def merge_records_listing(self, _owner: str, **kw: Any) -> dict[str, str]:  # noqa: ANN401
+        """Faithful to the SQL: every canonical, the run, and a listed mirror id."""
+        out = {}
+        for node_id, raw in self.records.items():
+            record = json.loads(raw)
+            if record["run_id"] == kw["run_id"] and set(kw["mirror_ids"]) & set(
+                record["mirrored_edges"]
+            ):
+                out[node_id] = raw
+        return out
 
     def existing_edge_keys(self, _owner: str, keys: Any) -> set[int]:  # noqa: ANN401
         return set(keys) & self._alive
@@ -261,3 +271,19 @@ def test_unmerge_keeps_a_mirror_another_member_of_the_run_shares(
     assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
 
     assert backend.deleted == deleted
+
+
+def test_a_member_of_another_cluster_in_the_run_shares_the_mirror_too() -> None:
+    """Round 6 M-2: A1 into C1 and B2 into C2 both made C2::t::C1; B2's cluster fails."""
+    backend = _UnmergeBackend("r1", other_canonical="c1")
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
+
+    assert backend.deleted == [], "A1's share keeps the mirror"

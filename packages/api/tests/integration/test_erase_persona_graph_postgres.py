@@ -897,3 +897,51 @@ def test_a_co_members_stale_listing_does_not_keep_a_mirror(
     assert consolidation.unmerge(_OWNER, "s_b") is True
 
     assert _open_edges(migrated_engine, "s_c") == set(), "nothing backs C->X any more"
+
+
+def test_a_mirror_two_clusters_made_survives_one_clusters_give_back(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 6 M-2: A1 (edge C2->A1) into C1 and B2 (edge B2->C1) into C2, one run.
+
+    Both make C2::causal::C1; giving B2 back (its cluster failed) leaves A1's mirror.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _OTHER, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("t_c1", "t_a1", "t_c2", "t_b2"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("t_c2::causal::t_a1", "t_c2", "t_a1", _OTHER))
+    backend.upsert_edge(_OWNER, _edge("t_b2::causal::t_c1", "t_b2", "t_c1", _OTHER))
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+    for canonical, member in (("t_c1", "t_a1"), ("t_c2", "t_b2")):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, member)],
+            run_id="rt",
+            now=_NOW,
+            epoch=1,
+        )
+    assert "t_c2::causal::t_c1" in _open_edges(migrated_engine, "t_c1")
+
+    assert consolidation.unmerge(_OWNER, "t_b2") is True
+
+    assert "t_c2::causal::t_c1" in _open_edges(migrated_engine, "t_c1"), "A1's mirror stays"
