@@ -39,6 +39,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from persona.graph.maintenance_lock import take_graph_maintenance_lock
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
 from sqlalchemy import cast, delete, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -732,6 +733,11 @@ def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> di
     if engine.dialect.name != "postgresql":
         return {}
     with engine.begin() as conn:
+        # First, before any row lock: a consolidation run of this owner finishes before this
+        # starts, and none starts until this commits (D-R9-284-graph-mutex; why no deadlock
+        # cycle passes through it: persona.graph.maintenance_lock). The persona row itself was
+        # deleted earlier, in its own transaction, without this lock.
+        take_graph_maintenance_lock(conn, owner_id)
         return {
             **_nodes(conn, owner_id, persona_id),
             **_versions(conn, owner_id, persona_id),

@@ -39,6 +39,7 @@ from persona.graph._schema import (
     graph_nodes,
 )
 from persona.graph.errors import GraphIndexError, GraphPersonaGoneError
+from persona.graph.maintenance_lock import graph_maintenance_held
 from persona.graph.models import (
     CanonicalEntity,
     ConceptNode,
@@ -53,6 +54,7 @@ from persona.graph.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from contextlib import AbstractContextManager
 
     from sqlalchemy import Connection, Engine
 
@@ -1173,6 +1175,10 @@ class PostgresGraphBackend:
         )
         with self._engine.begin() as conn:
             conn.execute(stmt)
+
+    def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]:
+        """The owner's graph maintenance lock, held on its own session (D-R9-284-graph-mutex)."""
+        return graph_maintenance_held(self._engine, owner_id)
 
     def insert_edge_if_absent(
         self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()

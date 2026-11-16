@@ -147,8 +147,9 @@ def test_every_write_the_merge_makes_holds_the_members_personas() -> None:
     backend = _merge()
 
     held = dict(backend.calls)
-    assert held["set_merged_into"] == (_P,)
-    assert held["mirror k::causal::x"] == (_P,)
+    # The record and the mirror also hold the source edge's asserter, _Q (round 5 H1).
+    assert held["set_merged_into"] == (_P, _Q)
+    assert held["mirror k::causal::x"] == (_P, _Q)
     assert held["associate_entities ['ent_m']"] == (_P,)
     assert held["update_node k"] == (_P,)
 

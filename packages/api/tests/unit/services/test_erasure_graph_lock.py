@@ -1,0 +1,57 @@
+"""The erasure's graph step takes the owner's graph maintenance lock first (D-R9-284-graph-mutex).
+
+The sweep's backstop calls the same function, so this covers both. On Postgres the step then
+waits for a running consolidation (packages/api test_graph_maintenance_lock_postgres.py).
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from persona.graph.maintenance_lock import GRAPH_MAINTENANCE_CLASS
+from persona_api.services.erasure_graph import erase_persona_graph
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+_DIALECT = type("D", (), {"name": "postgresql"})()
+
+
+class _StopError(Exception):
+    """Ends the step after its first statement: only the order is under test."""
+
+
+class _Conn:
+    dialect = _DIALECT
+
+    def __init__(self, log: list[tuple[str, Any]]) -> None:
+        self._log = log
+
+    def execute(self, stmt: Any, params: Any = None) -> None:  # noqa: ANN401
+        self._log.append((str(stmt), params))
+        raise _StopError
+
+
+class _Engine:
+    dialect = _DIALECT
+
+    def __init__(self) -> None:
+        self.log: list[tuple[str, Any]] = []
+
+    @contextmanager
+    def begin(self) -> Iterator[_Conn]:
+        yield _Conn(self.log)
+
+
+def test_the_graph_step_takes_the_owners_lock_before_any_row_lock() -> None:
+    engine = _Engine()
+
+    with pytest.raises(_StopError):
+        erase_persona_graph(engine, owner_id="u1", persona_id="persona_" + "a" * 32)  # type: ignore[arg-type]
+
+    ((first, params),) = engine.log
+    assert first.startswith("SELECT pg_advisory_xact_lock(")
+    assert f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)" in first
+    assert params == {"owner": "u1"}

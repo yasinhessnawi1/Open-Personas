@@ -50,6 +50,7 @@ from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
 
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
@@ -67,6 +68,11 @@ _ALIAS_KEY = "_k7_aliases"
 def _personas_of(node: ConceptNode) -> list[str]:
     """The personas a node's trail names, for the R9-284 write guard."""
     return sorted({p.persona_id for p in node.provenance if p.persona_id})
+
+
+def _held(asserters: dict[str, str], mirror_id: str) -> list[str]:
+    """The source's asserting persona for one mirror, if it has one."""
+    return [asserters[mirror_id]] if mirror_id in asserters else []
 
 
 class MergeGroup(BaseModel):
@@ -109,6 +115,7 @@ class ConsolidationReport(BaseModel):
 class _ConsolidationBackend(Protocol):
     """The transport surface the pass composes (PostgresGraphBackend satisfies it)."""
 
+    def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
         self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
@@ -214,7 +221,16 @@ class ConsolidationPass:
     # ===== the pass =======================================================
 
     def run(self, owner_id: str) -> ConsolidationReport:
-        """Consolidate the owner's dirty near-dup neighbourhoods → a report (K7-D-4)."""
+        """Consolidate the owner's dirty near-dup neighbourhoods → a report (K7-D-4).
+
+        The whole run holds the owner's graph maintenance lock (R9-284,
+        D-R9-284-graph-mutex), so an erasure's graph step never lands between two of its
+        transactions; every read, the marker and the candidates first, happens under it.
+        """
+        with self._backend.maintenance_lock(owner_id):
+            return self._run_locked(owner_id)
+
+    def _run_locked(self, owner_id: str) -> ConsolidationReport:
         epoch, watermark = self._backend.get_marker(owner_id)
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
@@ -327,7 +343,9 @@ class ConsolidationPass:
         tag = f"consolidation:{run_id}"
         for member in members:
             personas = _personas_of(member)
-            mirrors, sources = self._plan_mirrors(owner_id, member, canonical, tag=tag, now=now)
+            mirrors, sources, asserters = self._plan_mirrors(
+                owner_id, member, canonical, tag=tag, now=now
+            )
             added = self._entities_to_copy(owner_id, member, canonical)
             # R9-284 (D-R9-284-write-guard): the merge record first, in a transaction that holds
             # the member's personas, listing the mirrors and entity links this merge will make.
@@ -340,7 +358,8 @@ class ConsolidationPass:
                 run_id=run_id,
                 mirrored=[m.id for m in mirrors],
                 added=added,
-                personas=personas,
+                # The record lists knowledge of the sources' asserters too (review round 5 H1).
+                personas=sorted({*personas, *asserters.values()}),
                 sources=sources,
             )
             # A mirror never overwrites an edge the canonical already has open (review
@@ -348,7 +367,9 @@ class ConsolidationPass:
             made = [
                 m.id
                 for m in mirrors
-                if self._backend.insert_edge_if_absent(owner_id, m, guard_personas=personas)
+                if self._backend.insert_edge_if_absent(
+                    owner_id, m, guard_personas=sorted({*personas, *_held(asserters, m.id)})
+                )
             ]
             self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
             self._backend.associate_entities(owner_id, canonical.id, added, guard_personas=personas)
@@ -409,14 +430,16 @@ class ConsolidationPass:
 
     def _plan_mirrors(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode, *, tag: str, now: datetime
-    ) -> tuple[list[TypedLink], dict[str, int]]:
+    ) -> tuple[list[TypedLink], dict[str, int], dict[str, str]]:
         """The mirrors of the member's open assertion edges onto the canonical, not yet written.
 
         Also ``{mirror id: the source edge's edge_key}``, so an erasure of the persona that
-        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3).
+        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3),
+        and ``{mirror id: the source's asserting persona}``, held when the mirror is written.
         """
         mirrors: list[TypedLink] = []
         sources: dict[str, int] = {}
+        asserters: dict[str, str] = {}
         keys = self._backend.open_assertion_edge_keys(owner_id, member.id)
         for edge in self._backend.open_assertion_edges(owner_id, member.id):
             if edge.src_node_id == member.id:
@@ -428,6 +451,8 @@ class ConsolidationPass:
             mirror_id = make_edge_id(src, dst, edge.link_type)
             if edge.id in keys:
                 sources[mirror_id] = keys[edge.id]
+            if edge.provenance is not None and edge.provenance.persona_id:
+                asserters[mirror_id] = edge.provenance.persona_id
             mirrors.append(
                 TypedLink(
                     id=mirror_id,
@@ -442,7 +467,7 @@ class ConsolidationPass:
                     valid_at=now,
                 )
             )
-        return mirrors, sources
+        return mirrors, sources, asserters
 
     def _entities_to_copy(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode
@@ -531,6 +556,11 @@ class ConsolidationPass:
     # ===== the inverse ====================================================
 
     def unmerge(self, owner_id: str, node_id: str) -> bool:
+        """Reverse a consolidated member, holding the owner's graph maintenance lock (R9-284)."""
+        with self._backend.maintenance_lock(owner_id):
+            return self._unmerge(owner_id, node_id)
+
+    def _unmerge(self, owner_id: str, node_id: str) -> bool:
         """Reverse a consolidated member back to its pre-merge state (K7-D-4.5).
 
         The precise inverse: drop the mirrored edges from the canonical, remove the
