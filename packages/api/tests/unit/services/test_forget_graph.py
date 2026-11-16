@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from persona.graph.postgres import NodeRelease
-from persona_api.services.forget_graph import ForgetReleaser, shared_legacy_mirrors
+from persona_api.services.forget_graph import (
+    ForgetReleaser,
+    merged_below,
+    shared_legacy_mirrors,
+)
 
 
 def test_a_source_less_mirror_another_record_lists_is_kept() -> None:
@@ -128,3 +132,27 @@ def test_a_plain_node_whose_edge_a_record_names_still_scans_after_the_delete() -
     release.after()
 
     assert len(conn.statements) > before, "the mirror and orphan scans run"
+
+
+class _CycleConn:
+    """n1 > n2 > n3 > n2 and n2 > n1: cycles consolidation never writes, below and back."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def execute(self, stmt: Any, params: Any = None) -> _Rows:  # noqa: ANN401, ARG002
+        self.reads += 1
+        if self.reads > 10:
+            msg = "the walk did not stop"
+            raise AssertionError(msg)
+        frontier = next(v for v in stmt.compile().params.values() if isinstance(v, list))
+        below = {"n1": ["n2"], "n2": ["n1", "n3"], "n3": ["n2"]}
+        return _Rows([m for node in frontier for m in below[node]])
+
+
+def test_a_cycle_below_the_node_is_walked_once() -> None:
+    """Round 2 LOW-6: each node is followed once, so a cycle ends the walk."""
+    conn = _CycleConn()
+
+    assert merged_below(conn, "u1", "n1") == ["n2", "n3"]  # type: ignore[arg-type]
+    assert conn.reads == 3
