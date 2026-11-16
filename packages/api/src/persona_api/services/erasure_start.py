@@ -44,6 +44,7 @@ from persona_api.services.erasure_service import (
     erase_persona,
     fence_persona,
 )
+from persona_api.services.legacy_audit_sweep import run_legacy_sweep_logged
 from persona_api.workspace_paths import is_persona_id
 
 if TYPE_CHECKING:
@@ -175,6 +176,9 @@ def resume_persona_erasures_on_startup(
     (legacy SQLite, a worker-less boot) it repeats every ``interval_seconds`` until the task
     is cancelled at shutdown. A failed sweep is logged and never stops the process.
 
+    Before the first sweep it runs the legacy audit sweep once (R9-290), so a persona deleted
+    before the ledger existed is claimed and erased by that first sweep.
+
     Returns the background task (held by the caller) or ``None`` when there is nothing to run
     on.
     """
@@ -204,6 +208,9 @@ def resume_persona_erasures_on_startup(
         )
 
     async def _loop() -> None:
+        # R9-290: personas deleted before the ledger left audit files; claim their erasures
+        # (or clean the files in place) once, before the first resume picks them up.
+        await asyncio.to_thread(run_legacy_sweep_logged, deps.engine, deps.audit_root)
         while True:
             await asyncio.to_thread(_once)
             if _worker_sweeps():
