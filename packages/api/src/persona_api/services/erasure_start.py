@@ -207,16 +207,28 @@ def resume_persona_erasures_on_startup(
             in_process_worker=getattr(state, "in_process_worker", None),
         )
 
+    def _writable() -> bool | None:
+        writable: bool | None = getattr(state, "erasure_ledger_writable", None)
+        return writable
+
     async def _loop() -> None:
         # R9-290: personas deleted before the ledger left audit files; claim their erasures
-        # (or clean the files in place) once, before the first resume picks them up. Only
-        # where the ledger is known writable (review H1 a): a boot that fell back to a
-        # row-level-security engine would see no persona and mistake every one for a leftover.
-        if getattr(state, "erasure_ledger_writable", None) is True:
-            await asyncio.to_thread(run_legacy_sweep_logged, deps.engine, deps.audit_root)
+        # (or clean the files in place) once, before the resume picks them up. Only where the
+        # ledger is known writable (review H1 a): a boot that fell back to a row-level-security
+        # engine would see no persona and mistake every one for a leftover. A probe that had
+        # no answer at boot (None) is asked again on every pass until the sweep has run once
+        # (round 2 LOW-6): /healthz re-probes and sets it.
+        swept = False
+        first = True
         while True:
-            await asyncio.to_thread(_once)
-            if _worker_sweeps():
+            if not swept and _writable() is True:
+                await asyncio.to_thread(run_legacy_sweep_logged, deps.engine, deps.audit_root)
+                swept = True
+            worker = _worker_sweeps()
+            if first or not worker:  # a worker here resumes on its own cadence after the first
+                await asyncio.to_thread(_once)
+            first = False
+            if worker and (swept or _writable() is False):
                 return
             await asyncio.sleep(interval_seconds)
 

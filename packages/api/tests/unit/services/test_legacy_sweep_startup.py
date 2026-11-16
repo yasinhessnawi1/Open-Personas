@@ -65,15 +65,47 @@ def test_the_sweep_runs_where_the_ledger_is_known_writable(ran: list[str]) -> No
     assert "legacy sweep" in ran
 
 
-@pytest.mark.parametrize("writable", [False, None])
-def test_the_sweep_does_not_run_where_the_ledger_is_not_known_writable(
-    ran: list[str],
-    writable: bool | None,  # noqa: FBT001
-) -> None:
+def test_the_sweep_does_not_run_where_the_ledger_cannot_be_written(ran: list[str]) -> None:
     """Review H1 a: a boot on a row-level-security engine would mistake live personas."""
-    _one_pass(_state(erasure_ledger_writable=writable))
+    _one_pass(_state(erasure_ledger_writable=False))
 
     assert ran == ["resume"]
+
+
+def _passes(state: SimpleNamespace, *, then: Any = None) -> bool:  # noqa: ANN401
+    """Run the startup task for a few passes, calling ``then`` midway; whether it ended."""
+
+    async def _run() -> bool:
+        task = erasure_start.resume_persona_erasures_on_startup(state, interval_seconds=0.01)
+        assert task is not None
+        await asyncio.sleep(0.1)
+        if then is not None:
+            then()
+        try:
+            await asyncio.wait_for(task, timeout=1)
+        except TimeoutError:
+            return False
+        return True
+
+    return asyncio.run(_run())
+
+
+def test_an_unknown_probe_runs_no_sweep_and_keeps_asking(ran: list[str]) -> None:
+    """Round 2 LOW-6: no answer at boot (None) is not a yes; the task waits for one."""
+    ended = _passes(_state(erasure_ledger_writable=None))
+
+    assert not ended, "it keeps asking"
+    assert ran == ["resume"], "one resume, no sweep"
+
+
+def test_the_sweep_runs_once_the_probe_turns_writable(ran: list[str]) -> None:
+    """Round 2 LOW-6: /healthz re-probes; once the ledger is writable the sweep runs, once."""
+    state = _state(erasure_ledger_writable=None)
+
+    ended = _passes(state, then=lambda: setattr(state, "erasure_ledger_writable", True))
+
+    assert ended
+    assert ran == ["resume", "legacy sweep"], "the worker resumes on its own after the first"
 
 
 def test_the_sweep_runs_before_the_first_resume(ran: list[str]) -> None:
