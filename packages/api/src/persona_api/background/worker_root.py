@@ -1831,6 +1831,15 @@ def start_in_process_worker(
             leader=SchedulerLeader(dispatch_engine, lock_key=TITLE_BACKFILL_LOCK_KEY),
         )
 
+    erase_sweep = (
+        build_persona_erase_sweep(platform_engine) if platform_engine is not None else None
+    )
+
+    def _on_drain() -> None:
+        leg_drain.request_drain()
+        if erase_sweep is not None:
+            erase_sweep.close()  # its waiting thread (R9-284 round 8 LOW-3)
+
     worker = build_worker(
         config,
         registry,
@@ -1843,13 +1852,11 @@ def start_in_process_worker(
         dead_leg_sweep_builder=_dead_leg_sweep_builder,
         revival_sweep_builder=_revival_sweep_builder,
         title_backfill_builder=_title_backfill_builder,
-        on_drain=leg_drain.request_drain,
+        on_drain=_on_drain,
         # R9-284 (review M2): erasures whose job died, or whose request failed between the
         # row delete and the enqueue, are resumed on the maintenance cadence; the erasure
         # lock makes a resume beside a live run a no-op.
-        maintenance_hooks=(
-            (build_persona_erase_sweep(platform_engine),) if platform_engine is not None else ()
-        ),
+        maintenance_hooks=(erase_sweep,) if erase_sweep is not None else (),
     )
     handle = InProcessWorker(worker, job_types=frozenset(registry.types()))
     handle.start()

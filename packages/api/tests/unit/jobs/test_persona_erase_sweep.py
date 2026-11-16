@@ -426,10 +426,12 @@ def test_on_the_event_loop_the_bounded_wait_runs_in_a_thread(
 
     calls, erase = _always_busy_then(None)
     threads: list[int] = []
+    names: list[str] = []
 
     def _erase(*args: object, **kwargs: object) -> object:
         if kwargs.get("wait") is True:
             threads.append(threading.get_ident())
+            names.append(threading.current_thread().name)
         return erase(*args, **kwargs)  # type: ignore[operator]
 
     monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
@@ -451,6 +453,7 @@ def test_on_the_event_loop_the_bounded_wait_runs_in_a_thread(
 
     assert len(threads) == 1
     assert threads[0] != loop_thread, "the wait ran in a worker thread"
+    assert names == ["graph-backstop-wait_0"], "the sweep's own thread (round 8 LOW-3)"
     assert sweep._deferrals == {}  # noqa: SLF001
 
 
@@ -478,3 +481,92 @@ def test_after_a_timed_out_wait_a_later_sweep_waits_again(
     sweep()
 
     assert len([c for c in calls if c["wait"] is True]) == 2, "it waits again"
+
+
+def test_one_wait_per_owner_covers_every_persona_of_that_owner(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 8 LOW-3: two personas of one owner deferred ten times make one wait, for both."""
+    calls, erase = _always_busy_then(None)
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", erase)
+    keys = [(_OWNER, _persona("a")), (_OWNER, _persona("b"))]
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: list(keys),
+    )
+    spawned: list[object] = []
+    real_spawn = sweep._spawn  # noqa: SLF001
+
+    def _count(work: object) -> None:
+        spawned.append(work)
+        real_spawn(work)  # type: ignore[arg-type]
+
+    sweep._spawn = _count  # type: ignore[method-assign]  # noqa: SLF001
+
+    for _ in range(persona_erase.DEFERRALS_BEFORE_WAIT):
+        sweep()
+
+    assert len(spawned) == 1, "one wait for the owner"
+    waited = sorted(str(c["persona"]) for c in calls if c["wait"] is True)
+    assert waited == sorted(k[1] for k in keys)
+    assert sweep._retry == set()  # noqa: SLF001
+
+
+def test_a_blocked_owner_alerts_once_then_at_most_hourly(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    failure = OperationalError("SELECT pg_advisory_xact_lock", {}, Exception("lock timeout"))
+    _calls, erase = _always_busy_then(failure)
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", erase)
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        persona_erase._log,  # noqa: SLF001
+        "error",
+        lambda msg, **_k: alerts.append(msg) if msg.startswith("OPERATOR ALERT") else None,
+    )
+    clock = _Clock()
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: [(_OWNER, _persona("a")), (_OWNER, _persona("b"))],
+        clock=clock,
+    )
+
+    for minute in range(persona_erase.DEFERRALS_BEFORE_WAIT + 5):
+        clock.now = _NOW + timedelta(minutes=minute)
+        sweep()
+    assert len(alerts) == 1, "once per owner, not per persona or per wait"
+
+    clock.now = _NOW + timedelta(hours=2)
+    sweep()
+    assert len(alerts) == 2, "again after an hour"
+
+
+def test_close_stops_the_waiting_thread(engine: Engine) -> None:
+    import asyncio  # noqa: PLC0415
+
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda *_a, **_k: [],
+    )
+
+    async def _spawn_once() -> None:
+        sweep._spawn(lambda: None)  # noqa: SLF001
+        await asyncio.gather(*sweep._tasks)  # noqa: SLF001
+
+    asyncio.run(_spawn_once())
+    executor = sweep._executor  # noqa: SLF001
+    assert executor is not None
+
+    sweep.close()
+
+    assert sweep._executor is None  # noqa: SLF001
+    with pytest.raises(RuntimeError):
+        executor.submit(lambda: None)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -298,6 +299,8 @@ STALL_AFTER = timedelta(minutes=15)
 #: it, in a thread, for at most WAIT_LOCK_TIMEOUT_MS (round 7 LOW-4).
 DEFERRALS_BEFORE_WAIT = 10
 WAIT_LOCK_TIMEOUT_MS = 60_000
+#: A blocked owner's operator alert repeats at most this often (round 8 LOW-3).
+BACKSTOP_ALERT_EVERY = timedelta(hours=1)
 
 #: The graph backstop's every-sweep look covers erasures completed this recently ...
 BACKSTOP_RECENT = timedelta(hours=24)
@@ -356,9 +359,11 @@ class PersonaEraseSweep:
         # Consecutive busy-lock deferrals per (owner, persona), and the waits in flight. A wait
         # runs in a worker thread, so these are shared with it under a lock (round 7 LOW-4).
         self._deferrals: dict[tuple[str, str], int] = {}
-        self._waiting: set[tuple[str, str]] = set()
+        self._waiting: set[str] = set()  # owners with a wait in flight
+        self._alerted: dict[str, datetime] = {}  # owner: when it was last alerted
         self._state = threading.Lock()
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: set[asyncio.Future[None]] = set()
+        self._executor: ThreadPoolExecutor | None = None
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
@@ -399,9 +404,12 @@ class PersonaEraseSweep:
             if full:
                 self._last_full_pass = now
         with self._state:
-            todo = sorted({*found, *self._retry} - self._waiting)
+            todo = sorted(k for k in {*found, *self._retry} if k[0] not in self._waiting)
+        waited_for: set[str] = set()  # owners a wait covered during this sweep
         for key in todo:
             owner_id, persona_id = key
+            if owner_id in waited_for:
+                continue  # that owner's wait has every one of its personas
             try:
                 # Never wait here: the sweep runs on the worker's event loop, and a
                 # consolidation run of this owner may hold the graph lock (round 6 M-3).
@@ -409,7 +417,8 @@ class PersonaEraseSweep:
                     self._engine, owner_id=owner_id, persona_id=persona_id, wait=False
                 )
             except GraphMaintenanceBusyError:
-                self._deferred(key)
+                if self._deferred(key):
+                    waited_for.add(owner_id)
                 continue
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
                 with self._state:
@@ -432,56 +441,100 @@ class PersonaEraseSweep:
             counts=counts,
         )
 
-    def _deferred(self, key: tuple[str, str]) -> None:
-        """A busy lock: try again next sweep; after too many in a row, wait for it (LOW-4)."""
+    def _deferred(self, key: tuple[str, str]) -> bool:
+        """A busy lock: try again next sweep; after too many in a row, wait for it (LOW-4).
+
+        One wait per owner at a time, covering every persona of that owner left to do
+        (round 8 LOW-3).
+        """
+        owner_id = key[0]
         with self._state:
             self._retry.add(key)
             count = self._deferrals.get(key, 0) + 1
             self._deferrals[key] = count
-            escalate = count >= DEFERRALS_BEFORE_WAIT and key not in self._waiting
+            escalate = count >= DEFERRALS_BEFORE_WAIT and owner_id not in self._waiting
             if escalate:
-                self._waiting.add(key)
+                self._waiting.add(owner_id)
         _log.info(
             "graph backstop deferred, consolidation running persona={pid} deferrals={n}",
             pid=key[1],
             n=count,
         )
         if escalate:
-            self._spawn(lambda: self._wait_for_lock(key, count))
+            self._spawn(lambda: self._wait_for_owner(owner_id, count))
+        return escalate
 
     def _spawn(self, work: Callable[[], None]) -> None:
-        """Run ``work`` off the event loop when there is one; inline where there is none."""
+        """Run ``work`` on the sweep's own thread when on an event loop; inline otherwise.
+
+        One dedicated thread (round 8 LOW-3), so a wait of up to a minute never takes a
+        thread the loop's other ``to_thread`` work needs; it is shut down by :meth:`close`.
+        """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:  # the inline resume loop: already in a worker thread
             work()
             return
-        task = loop.create_task(asyncio.to_thread(work))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    def _wait_for_lock(self, key: tuple[str, str], deferrals: int) -> None:
-        owner_id, persona_id = key
-        try:
-            counts = erase_persona_graph(
-                self._engine,
-                owner_id=owner_id,
-                persona_id=persona_id,
-                wait=True,
-                lock_timeout_ms=WAIT_LOCK_TIMEOUT_MS,
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="graph-backstop-wait"
             )
-        except Exception as exc:  # noqa: BLE001 - the operator is told; the sweep tries again
+        future = loop.run_in_executor(self._executor, work)
+        self._tasks.add(future)
+        future.add_done_callback(self._tasks.discard)
+
+    def close(self) -> None:
+        """Stop the waiting thread: no new waits run; one in flight ends at its lock timeout."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
+    def _wait_for_owner(self, owner_id: str, deferrals: int) -> None:
+        try:
+            with self._state:
+                todo = sorted(k for k in self._retry if k[0] == owner_id)
+            for key in todo:
+                try:
+                    counts = erase_persona_graph(
+                        self._engine,
+                        owner_id=owner_id,
+                        persona_id=key[1],
+                        wait=True,
+                        lock_timeout_ms=WAIT_LOCK_TIMEOUT_MS,
+                    )
+                except Exception as exc:  # noqa: BLE001 - the operator is told; tried again later
+                    self._blocked(owner_id, key[1], deferrals, exc)
+                    return  # the lock is still held: the rest would wait as long
+                with self._state:
+                    self._alerted.pop(owner_id, None)
+                self._done(key, counts)
+        finally:
+            with self._state:
+                self._waiting.discard(owner_id)
+
+    def _blocked(self, owner_id: str, persona_id: str, deferrals: int, exc: Exception) -> None:
+        """Alert once per owner, then at most hourly while it persists (round 8 LOW-3)."""
+        now = self._clock()
+        with self._state:
+            last = self._alerted.get(owner_id)
+            due = last is None or now - last >= BACKSTOP_ALERT_EVERY
+            if due:
+                self._alerted[owner_id] = now
+        if due:
             _log.error(
-                "OPERATOR ALERT: graph backstop blocked persona={pid} deferrals={n} error={err}",
+                "OPERATOR ALERT: graph backstop blocked owner={owner} persona={pid} "
+                "deferrals={n} error={err}",
+                owner=owner_id,
                 pid=persona_id,
                 n=deferrals,
                 err=type(exc).__name__,
             )
-            return
-        finally:
-            with self._state:
-                self._waiting.discard(key)
-        self._done(key, counts)
+        else:
+            _log.warning(
+                "graph backstop still blocked owner={owner} persona={pid}",
+                owner=owner_id,
+                pid=persona_id,
+            )
 
 
 def build_persona_erase_sweep(platform_engine: Engine) -> PersonaEraseSweep:
