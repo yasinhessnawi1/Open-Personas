@@ -104,6 +104,8 @@ def test_a_crashed_create_leaves_a_hidden_row(
 def test_the_sweep_erases_it_after_the_grace_and_not_before(
     seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    complete = {p for p, done in _rows(seeded).items() if done}
+    assert complete, "the seed has complete personas, created long before the grace"
     pid = _crashed_create(seeded, embedder, monkeypatch)
     now = datetime.now(UTC)
     ledger = ErasureLedger(seeded.engine)
@@ -119,6 +121,10 @@ def test_the_sweep_erases_it_after_the_grace_and_not_before(
     erasure = ledger.get(SubjectKind.PERSONA, pid)
     assert erasure is not None
     assert erasure.owner_id == OWNER
+    # Review MEDIUM-1: the sweep runs on the bypass-RLS engine, across every account; only a
+    # create that never finished is its business.
+    assert complete <= set(_rows(seeded)), "every complete persona is still there"
+    assert all(ledger.get(SubjectKind.PERSONA, p) is None for p in complete)
 
 
 def test_a_create_that_finished_is_complete_and_listed(seeded: Seeded, embedder: object) -> None:
