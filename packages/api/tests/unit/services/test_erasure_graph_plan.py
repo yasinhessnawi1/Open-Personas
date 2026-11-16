@@ -489,3 +489,17 @@ def test_a_json_list_with_a_non_string_entry_is_not_taken_as_json() -> None:
     """Reviewer's E11: read as a legacy comma list instead, never trusted as names."""
     assert split_alias_list('["a", 1]', []) == ['["a"', " 1]"]
     assert split_alias_list('["a", null]', ["a"]) == ['["a"', " null]"]
+
+
+def test_an_orphan_chain_is_pruned_to_its_end() -> None:
+    """Round 7 LOW-1, the reviewer's chain: M1 (run r1) from a dead key 100 is the only source
+    of M2 (run r2), whose source is M1's row 11. One pass found M1 only."""
+    x = {"run_id": "r1", "mirrored_edges": ["m1"], "mirror_sources": {"m1": [100]}}
+    c1 = {"run_id": "r2", "mirrored_edges": ["m2"], "mirror_sources": {"m2": [11]}}
+    rows = {("m1", "r1"): {11}, ("m2", "r2"): {12}}
+
+    doomed, rewrites = orphaned_mirrors({"x": x, "c1": c1}, rows, existing={11, 12})
+
+    assert doomed == [11, 12]
+    assert rewrites["c1"]["mirrored_edges"] == [], "M2 lost its source, M1's row"
+    assert rewrites["x"]["mirrored_edges"] == []

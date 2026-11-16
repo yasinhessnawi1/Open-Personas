@@ -617,14 +617,20 @@ def orphaned_mirrors(
         run_id = str(record.get("run_id"))
         for mirror, raw in (record.get("mirror_sources") or {}).items():
             listed.setdefault((str(mirror), run_id), set()).update(source_keys(raw))
-    doomed = sorted(
-        {
+    # To a fixpoint (round 7 LOW-1): a mirror row that goes can be another mirror's only
+    # source, down a chain, so its key leaves ``alive`` and the test runs again.
+    doomed: set[int] = set()
+    while True:
+        more = {
             key
             for mirror, sources in listed.items()
             if sources and not sources & alive
             for key in mirror_rows.get(mirror, ())
-        }
-    )
+        } - doomed
+        if not more:
+            break
+        doomed |= more
+        alive -= more
     rewrites: dict[str, dict[str, Any]] = {}
     for member_id, record in records.items():
         sources = record.get("mirror_sources") or {}
@@ -639,7 +645,7 @@ def orphaned_mirrors(
                 e for e in record.get("mirrored_edges", []) if str(e) not in emptied
             ],
         }
-    return doomed, rewrites
+    return sorted(doomed), rewrites
 
 
 def _prune_orphans(conn: Connection, owner_id: str) -> dict[str, int]:
