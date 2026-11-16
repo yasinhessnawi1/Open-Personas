@@ -515,6 +515,45 @@ def _drop_alias_names_from_trails(
                     .where(table.c.owner_id == owner_id, key == row_key)
                     .values(provenance=rewritten)
                 )
+    _drop_alias_names_from_versions(conn, owner_id, canonical_id, names)
+
+
+def _drop_alias_names_from_versions(
+    conn: Connection, owner_id: str, canonical_id: str, names: list[str]
+) -> int:
+    """The names leave the alias list of each of the canonical's snapshots (round 10 MEDIUM-3).
+
+    A version row keeps the metadata the node had when it was superseded, alias list included,
+    and its content hash, recomputed here from the row's own name and content.
+    """
+    rewritten = 0
+    for version in conn.execute(
+        select(
+            versions_t.c.version_key,
+            versions_t.c.concept_name,
+            versions_t.c.content,
+            versions_t.c.metadata,
+        )
+        .where(versions_t.c.owner_id == owner_id, versions_t.c.node_id == canonical_id)
+        .order_by(versions_t.c.version_key)
+        .with_for_update(key_share=True)
+    ).all():
+        metadata = without_aliases(version.metadata or {}, names)
+        if metadata is None:
+            continue
+        conn.execute(
+            update(versions_t)
+            .where(
+                versions_t.c.owner_id == owner_id,
+                versions_t.c.version_key == version.version_key,
+            )
+            .values(
+                metadata=metadata,
+                content_hash=_compute_node_hash(version.concept_name, version.content, metadata),
+            )
+        )
+        rewritten += 1
+    return rewritten
 
 
 def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) -> dict[str, int]:

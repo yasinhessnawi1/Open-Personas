@@ -1607,3 +1607,38 @@ def test_an_extend_planned_before_the_erasure_cannot_bring_names_back(
     after = backend.get_node(_OWNER, "r_c")
     assert after is not None
     assert "r_m" not in json.loads(after.metadata.get("_k7_aliases", "[]")), "no name of P"
+
+
+def test_a_superseded_canonicals_versions_lose_the_erased_personas_names(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 10 MEDIUM-3: C absorbs P's member, C is superseded, P is erased."""
+    backend, consolidation = _race_fixture(migrated_engine, embedder)
+    consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "r_c"),
+        [backend.get_node(_OWNER, "r_m")],
+        run_id="rv3",
+        now=_NOW,
+        epoch=1,
+    )
+    backend.snapshot_node_version(
+        _OWNER, "r_c", valid_at=_NOW, invalid_at=_NOW, invalidated_by="superseded"
+    )
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    with migrated_engine.connect() as conn:
+        holding = conn.execute(
+            text(
+                "SELECT count(*) FROM graph_node_versions WHERE owner_id = :o "
+                "AND (metadata::text LIKE '%r_m%' OR provenance::text LIKE '%r_m%')"
+            ),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert holding == 0, "no version holds P's member's name"
+    for version in backend.get_node_versions(_OWNER, "r_c"):
+        assert version.content_hash, "each version is still readable"

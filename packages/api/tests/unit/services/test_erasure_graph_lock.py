@@ -227,3 +227,42 @@ def test_the_erasure_hashes_the_rows_own_content_not_a_stale_copy() -> None:
 
     assert "FOR NO KEY UPDATE" in log[0], "the row is locked while it is hashed"
     assert written["content_hash"] == _compute_node_hash("k", "the content now", {"x": "1"})
+
+
+def test_the_names_leave_each_snapshots_alias_list_and_its_hash_follows() -> None:
+    """Round 10 MEDIUM-3: a superseded canonical's version rows keep its alias list."""
+    import json  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+    from persona_api.services import erasure_graph  # noqa: PLC0415
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    version = SimpleNamespace(
+        version_key=7,
+        concept_name="k",
+        content="about k",
+        metadata={"_k7_aliases": json.dumps(["Bergen", "Tromso"])},
+    )
+    written: list[dict[str, Any]] = []
+
+    class _Versions(_EmptyResult):
+        def all(self) -> list[object]:
+            return [version]
+
+    class _VersionConn(_Conn):
+        def execute(self, stmt: Any, _params: Any = None) -> _EmptyResult:  # noqa: ANN401
+            sql = str(stmt.compile(dialect=postgresql.dialect()))
+            if sql.startswith("UPDATE graph_node_versions"):
+                written.append(stmt.compile(dialect=postgresql.dialect()).params)
+            return _Versions()
+
+    count = erasure_graph._drop_alias_names_from_versions(  # noqa: SLF001
+        _VersionConn([]), "u1", "k", ["Bergen"]
+    )
+
+    assert count == 1
+    (params,) = written
+    kept = {"_k7_aliases": json.dumps(["Tromso"], sort_keys=True)}
+    assert params["metadata"] == kept
+    assert params["content_hash"] == _compute_node_hash("k", "about k", kept)
