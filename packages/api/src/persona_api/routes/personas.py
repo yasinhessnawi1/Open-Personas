@@ -534,6 +534,14 @@ async def create_persona(
         # R5-D-2: the app-selected store-mutation audit backend (Postgres when
         # multi-worker). None (test overrides) ⇒ the JSONL default.
         audit_logger=getattr(request.app.state, "audit_logger", None),
+        # R9-293: a create that fails after its row committed is erased through the
+        # persona erasure before the request answers 500, so no half-made persona stays.
+        compensate=lambda persona_id: erasure_start.erase_persona_now(
+            request.app.state,
+            rls_engine=request.app.state.rls_engine,
+            owner_id=user.id,
+            persona_id=persona_id,
+        ),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,

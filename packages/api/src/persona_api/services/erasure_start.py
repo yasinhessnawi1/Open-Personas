@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 __all__ = [
     "begin_persona_erasure",
     "dispatch_persona_erasure",
+    "erase_persona_now",
     "erase_deps_from_state",
     "resume_persona_erasures_on_startup",
     "run_persona_erasure_inline",
@@ -146,6 +147,30 @@ def run_persona_erasure_inline(deps: PersonaEraseDeps, erasure: Erasure) -> None
             eid=erasure.id,
             err=type(exc).__name__,
         )
+
+
+def erase_persona_now(
+    state: Any,  # noqa: ANN401 - app.state
+    *,
+    rls_engine: Engine,
+    owner_id: str,
+    persona_id: str,
+) -> None:
+    """Erase a persona here and now, through the persona erasure, before returning (R9-293).
+
+    For a create that failed after its row committed: the half-made persona is claimed,
+    fenced, deleted and erased in full (memory, graph, files, rows) before the request answers.
+    A step that fails raises; the ledger keeps the erasure, and the startup resume finishes it.
+    """
+    deps = erase_deps_from_state(state)
+    platform = getattr(state, "platform_engine", None)
+    if deps is None or platform is None:
+        msg = "no platform engine to erase the persona on"
+        raise RuntimeError(msg)
+    erasure = begin_persona_erasure(
+        rls_engine=rls_engine, platform_engine=platform, owner_id=owner_id, persona_id=persona_id
+    )
+    erase_persona(deps, erasure)
 
 
 def dispatch_persona_erasure(state: Any, erasure: Erasure, *, token: str = "") -> bool:  # noqa: ANN401
