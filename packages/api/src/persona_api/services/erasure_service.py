@@ -355,8 +355,11 @@ def _step_files(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
         "objects": objects,
         "folder": int(folder),
         "tool_log": _remove_tool_log(deps.audit_root, pid),
+        # R9-291 and review L2: the kept logs are ids and labels (ruling 5); the persona's
+        # events lose their content keys (what a person asked, the names of their files) as
+        # well as their reason, in its own log and in its owner's.
         "store_audit_lines_scrubbed": scrub_store_audit_files(
-            deps.audit_root, owner_id=owner, persona_id=pid
+            deps.audit_root, owner_id=owner, persona_id=pid, content_keys=AUDIT_CONTENT_KEYS
         ),
     }
 
@@ -424,7 +427,9 @@ def _step_rows(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
                 delete(tool_audit_events_t).where(tool_audit_events_t.c.persona_id == pid)
             ).rowcount,
             "audit_log_scrubbed": _scrub_audit_log(conn, erasure),
-            "store_audit_scrubbed": scrub_store_audit_rows(conn, owner_id=owner, persona_id=pid),
+            "store_audit_scrubbed": scrub_store_audit_rows(
+                conn, owner_id=owner, persona_id=pid, content_keys=AUDIT_CONTENT_KEYS
+            ),
         }
         for name, table in (
             ("initiative_declines", initiative_declines_t),

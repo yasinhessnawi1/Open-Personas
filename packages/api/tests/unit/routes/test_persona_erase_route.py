@@ -336,3 +336,63 @@ def test_a_row_delete_that_keeps_racing_is_accepted_and_left_to_the_job(
     assert resp.status_code == 202, resp.text
     assert _state(seeded) is ErasureState.COMPLETE, "the erasure's own row step finished it"
     assert ids_naming(seeded.engine, "personas", PERSONA) == []
+
+
+def test_a_persona_deleted_before_the_ledger_is_erased_at_the_next_start(seeded: Seeded) -> None:
+    """R9-290: its audit files outlived it with no row anywhere; the boot claims and erases it."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    legacy = "persona_dddddddddddddddddddddddddddddddd"
+    store = seeded.audit_root / f"{legacy}.jsonl"
+    event = {
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "persona_id": legacy,
+        "action": "write",
+        "store": "self_facts",
+        "source": "user",
+        "written_by": OWNER,
+        "reason": "initial persona load",
+        "chunk_ids": ["c1"],
+        "logical_ids": [],
+        "metadata": {},
+    }
+    store.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    tools = seeded.audit_root / f"{legacy}.tools.jsonl"
+    tools.write_text("{}\n", encoding="utf-8")
+    for path in (store, tools):
+        then = time.time() - 7200
+        os.utime(path, (then, then))
+    state = SimpleNamespace(
+        platform_engine=seeded.engine,
+        memory_backend=seeded.memory,
+        audit_logger=seeded.audit,
+        file_storage=seeded.storage,
+        workspace_root=seeded.workspace_root,
+        audit_root=seeded.audit_root,
+        job_queue=None,
+        in_process_worker=None,
+        erasure_ledger_writable=True,  # the boot's probe passed (review H1 a)
+    )
+    ledger = ErasureLedger(seeded.engine)
+
+    def _done() -> bool:
+        erasure = ledger.get(SubjectKind.PERSONA, legacy)
+        return erasure is not None and erasure.state is ErasureState.COMPLETE
+
+    async def _boot() -> None:
+        task = erasure_start.resume_persona_erasures_on_startup(
+            state, interval_seconds=0.05, grace=timedelta(0)
+        )
+        assert task is not None
+        for _ in range(600):
+            if _done():
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(_boot())
+
+    assert _done()
+    assert not tools.exists()

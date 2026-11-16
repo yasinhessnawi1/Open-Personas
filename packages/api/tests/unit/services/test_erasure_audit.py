@@ -107,3 +107,101 @@ def test_the_logger_appends_under_the_same_lock(tmp_path: Path) -> None:
         assert not appended.wait(timeout=0.5), "the logger appended past the lock"
     writer.join(timeout=30)
     assert appended.is_set()
+
+
+def test_an_event_without_metadata_is_cleaned_and_stays_a_valid_event(tmp_path: Path) -> None:
+    """Review L3: the in-place clean never adds ``"metadata": null`` (AuditEvent wants a dict)."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from persona.audit import AuditEvent  # noqa: PLC0415
+    from persona_api.services.erasure_audit import scrub_persona_log_in_place  # noqa: PLC0415
+
+    event = {
+        "timestamp": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+        "persona_id": _PERSONA,
+        "action": "write",
+        "store": "self_facts",
+        "source": "user",
+        "reason": "said it",
+    }
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    scrub_persona_log_in_place(tmp_path, persona_id=_PERSONA, content_keys=frozenset({"x"}))
+
+    cleaned = json.loads(log.read_text(encoding="utf-8"))
+    assert "metadata" not in cleaned
+    assert cleaned["reason"] is None
+    AuditEvent.model_validate(cleaned)
+
+
+def test_each_rewrite_has_its_own_temporary_and_syncs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review L7: a unique temporary per rewrite, on disk before it replaces the log."""
+    import os  # noqa: PLC0415
+
+    from persona_api.services import erasure_audit  # noqa: PLC0415
+
+    synced: list[int] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(erasure_audit.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    # The directory sync is its own (round 2 LOW-3) and calls os.fsync on Linux only, so it is
+    # counted apart: os.fsync here is the temporary file's alone, on every platform.
+    directories: list[Path] = []
+    monkeypatch.setattr(erasure_audit, "_fsync_dir", directories.append)
+    names: list[str] = []
+    real_replace = Path.replace
+
+    def _replace(self: Path, target: Path) -> Path:
+        names.append(self.name)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _replace)
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    for said in ("first", "second"):
+        log.write_text(json.dumps({"persona_id": _PERSONA, "reason": said}) + "\n", "utf-8")
+        scrub_store_audit_files(tmp_path, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert len(synced) == 2, "each temporary is synced once"
+    assert directories == [tmp_path, tmp_path], "and the directory after each rename"
+    assert len(set(names)) == 2, "never the same temporary twice"
+    assert all(n.startswith(f"{_PERSONA}.jsonl.{os.getpid()}.") for n in names)
+    assert not list(tmp_path.glob("*.erasing"))
+
+
+def test_the_rename_is_made_durable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 2 LOW-3: the directory is synced after the temporary replaces the log."""
+    from persona_api.services import erasure_audit  # noqa: PLC0415
+
+    synced: list[Path] = []
+    monkeypatch.setattr(erasure_audit, "_fsync_dir", synced.append)
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    log.write_text(json.dumps({"persona_id": _PERSONA, "reason": "said it"}) + "\n", "utf-8")
+
+    scrub_store_audit_files(tmp_path, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert synced == [tmp_path]
+
+
+def test_a_stale_temporary_is_removed_and_a_fresh_one_kept(tmp_path: Path) -> None:
+    """Round 2 LOW-3: a rewrite that died left its temporary; the next pass clears it."""
+    import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    log.write_text(json.dumps({"persona_id": _PERSONA, "reason": None}) + "\n", "utf-8")
+    stale = tmp_path / f"{_PERSONA}.jsonl.123.abcd.erasing"
+    fresh = tmp_path / f"{_PERSONA}.jsonl.456.ef01.erasing"
+    other = tmp_path / f"{_OWNER}.jsonl.789.2345.erasing"
+    for temporary in (stale, fresh, other):
+        temporary.write_text("half written", "utf-8")
+    then = time.time() - 7200
+    os.utime(stale, (then, then))
+    os.utime(other, (then, then))
+
+    scrub_store_audit_files(tmp_path, owner_id="user_none", persona_id=_PERSONA)
+
+    assert not stale.exists()
+    assert fresh.exists(), "a live rewrite's temporary is left alone"
+    assert other.exists(), "another log's temporaries are its own pass's business"

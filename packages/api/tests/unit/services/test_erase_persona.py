@@ -440,13 +440,22 @@ def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -
     assert rows["graphaudit_aaaaaa"] == (None, ["node"], {"action": "created"})
     assert rows["store_bbbbbb"][0] == SECRET, "the sibling's audit is untouched"
     assert rows["graphaudit_bbbbbb"][0] == SECRET
+    # Round 2 MEDIUM-1: the content-key scrub of the rows is the persona's alone.
+    assert rows["store_bbbbbb"][2] == {"to_version": "2", "verbatim_ask": SECRET}
+    assert rows["graphaudit_bbbbbb"][2] == {"action": "created", "workspace_path": SECRET}
 
     own = (seeded.audit_root / f"{PERSONA}.jsonl").read_text(encoding="utf-8")
     graph = (seeded.audit_root / f"{OWNER}.jsonl").read_text(encoding="utf-8")
     assert SECRET not in own
     assert json.loads(own)["chunk_ids"] == ["c"]
+    assert json.loads(own)["metadata"] == {"to_version": "2"}, "R9-291: content keys go"
     lines = [json.loads(line) for line in graph.splitlines()]
     assert {e["written_by"]: e["reason"] for e in lines} == {PERSONA: None, SIBLING: SECRET}
+    # Review L2: the persona's events in the owner's log lose their content keys too; the
+    # sibling's keep theirs.
+    meta = {e["written_by"]: e["metadata"] for e in lines}
+    assert meta[PERSONA] == {"action": "created"}
+    assert meta[SIBLING] == {"action": "created", "workspace_path": SECRET}
 
 
 def test_another_owners_audit_rows_are_never_scrubbed(seeded: Seeded) -> None:
