@@ -54,13 +54,18 @@ _MERGE_KEY = "_k7_merge"
 
 
 def shared_legacy_mirrors(record: dict[str, Any], others: list[dict[str, Any]]) -> set[str]:
-    """The record's source-less mirrors another live record lists too: those are kept.
+    """The record's source-less mirrors another live record of the same run lists: kept.
 
-    A mirror listed without a source is removed by id; one another record still lists (as a
-    source-less mirror or with sources) is that record's too, and stays.
+    A mirror listed without a source is removed by id, as its run's row (``delete_mirrors``
+    matches the run's tag). One another record of the same run still lists (as a source-less
+    mirror or with sources) is that record's too, and stays. A record of another run that lists
+    the same id names a different run's row (review LOW-3), so it keeps nothing here.
     """
+    run_id = str(record.get("run_id"))
     listed: set[str] = set()
     for other in others:
+        if str(other.get("run_id")) != run_id:
+            continue
         listed |= {str(m) for m in other.get("mirrored_edges", [])}
         listed |= {str(m) for m in (other.get("mirror_sources") or {})}
     return unsourced_mirrors(record) & listed

@@ -443,3 +443,62 @@ def test_forgetting_the_bottom_of_a_chain_takes_its_entity_up_the_chain(
     b = backend.get_node(_OWNER, "up_b")
     assert b is not None
     assert "up_e" not in json.loads(b.metadata["_k7_merge"]).get("added_entities", [])
+
+
+def _as_legacy(backend: PostgresGraphBackend, node_id: str) -> None:
+    """Rewrite the member's record as one written before LOW-3: mirrors listed, no sources."""
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+
+    node = backend.get_node(_OWNER, node_id)
+    assert node is not None
+    record = json.loads(node.metadata["_k7_merge"])
+    record.pop("mirror_sources", None)
+    metadata = {**node.metadata, "_k7_merge": json.dumps(record, sort_keys=True)}
+    backend.set_merged_into(
+        _OWNER,
+        node_id,
+        merged_into=str(record["canonical"]),
+        metadata=metadata,
+        content_hash=_compute_node_hash(node.concept_name, node.content, metadata),
+        expected_content_hash=node.content_hash,
+        expected_provenance=node.provenance,
+    )
+
+
+def test_a_legacy_mirror_two_members_share_goes_with_the_last_of_them(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review MEDIUM-2: M1 and M2 both point at X, so one run mirrors one C->X for both, and
+    their records (written before LOW-3) list it without a source. Forgetting M1 keeps it (M2
+    still lists it); forgetting M2 then removes it."""
+    backend = _merged(migrated_engine, embedder)
+    backend.upsert_edge(_OWNER, _edge("f_m2", "f_x"))
+    # Re-merge is not needed: mirror M2's new edge the way the run would have, by listing it.
+    shared = _mirror_id(migrated_engine, "f_x")
+    m2 = backend.get_node(_OWNER, "f_m2")
+    assert m2 is not None
+    record = json.loads(m2.metadata["_k7_merge"])
+    record["mirrored_edges"] = sorted({*record.get("mirrored_edges", []), shared})
+    m2_meta = {**m2.metadata, "_k7_merge": json.dumps(record, sort_keys=True)}
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+
+    backend.set_merged_into(
+        _OWNER,
+        "f_m2",
+        merged_into="f_c",
+        metadata=m2_meta,
+        content_hash=_compute_node_hash(m2.concept_name, m2.content, m2_meta),
+        expected_content_hash=m2.content_hash,
+        expected_provenance=m2.provenance,
+    )
+    for member in ("f_m1", "f_m2"):
+        _as_legacy(backend, member)
+
+    backend.delete_node(_OWNER, "f_m1")
+
+    assert _open(migrated_engine, "f_c", "f_x"), "M2 still lists the shared mirror"
+
+    backend.delete_node(_OWNER, "f_m2")
+
+    assert not _open(migrated_engine, "f_c", "f_x"), "the last lister took it"
