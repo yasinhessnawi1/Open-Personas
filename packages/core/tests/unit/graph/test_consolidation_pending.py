@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from persona.audit import MemoryAuditLogger
 from persona.graph.config import GraphSettings
 from persona.graph.consolidation import ConsolidationPass
@@ -21,8 +22,6 @@ from persona.schema.chunks import WriteSource
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    import pytest
 
 _NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 _P = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -55,6 +54,7 @@ class _Backend:
         self._broken_accretions = broken_accretions
         self.marker: tuple[int, datetime | None] = (0, None)
         self.disuse: list[int] = []
+        self.broken_decays = 0
 
     @contextmanager
     def maintenance_lock(self, _owner: str) -> Iterator[None]:
@@ -156,6 +156,9 @@ class _Backend:
         return 1
 
     def apply_disuse_decay(self, *_a: Any, **kw: Any) -> None:  # noqa: ANN401
+        if self.broken_decays:
+            self.broken_decays -= 1
+            raise _Deadlock("the process died mid-run")
         self.disuse.append(kw["current_epoch"])
 
     def advance_marker(self, _owner: str, **kw: Any) -> None:  # noqa: ANN401
@@ -327,3 +330,24 @@ def test_a_give_back_stuck_five_times_alerts_once_then_daily(
     _Clock.now_at = _NOW + timedelta(hours=25)
     consolidation.run("u1")
     assert len(alerts) == 2, "again after a day"
+
+
+def test_each_epoch_decays_once_through_a_crash_and_two_skipped_runs() -> None:
+    """Round 9 LOW-1: a skipped run with no watermark yet still records its epoch."""
+    from collections import Counter  # noqa: PLC0415
+
+    backend = _Backend(deadlocks=1, broken_reopens=3)
+    backend.broken_decays = 1
+    consolidation = _pass(backend)
+
+    with pytest.raises(_Deadlock):
+        consolidation.run("u1")  # m left pending; the run dies before its marker
+    assert backend.marker == (0, None)
+    consolidation.run("u1")  # skipped: the give back fails
+    consolidation.run("u1")  # skipped again
+    healthy = consolidation.run("u1")  # given back, merges
+
+    assert healthy.clusters_formed == 1
+    per_epoch = Counter(backend.disuse)
+    assert sorted(per_epoch) == [1, 2, 3], "one decay pass per epoch"
+    assert len(set(per_epoch.values())) == 1, "never twice at one epoch"

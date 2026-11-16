@@ -1194,9 +1194,13 @@ class PostgresGraphBackend:
         return int(row[0]), (None if row[1] is None else _as_utc(row[1]))
 
     def advance_marker(
-        self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
+        self, owner_id: str, *, epoch: int, watermark: datetime | None, last_run_at: datetime
     ) -> None:
-        """Advance the marker after a pass (ordinal epoch + dirty watermark + run time)."""
+        """Advance the marker after a pass (ordinal epoch + dirty watermark + run time).
+
+        ``watermark`` may be ``None``: a run that skipped its merges before any run set one
+        still records its epoch (R9-284 round 9 LOW-1).
+        """
         stmt = (
             update(graph_consolidation_markers)
             .where(graph_consolidation_markers.c.owner_id == owner_id)

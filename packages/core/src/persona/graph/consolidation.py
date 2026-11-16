@@ -137,7 +137,7 @@ class _ConsolidationBackend(Protocol):
     def existing_edge_keys(self, owner_id: str, edge_keys: Sequence[int]) -> set[int]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
-        self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
+        self, owner_id: str, *, epoch: int, watermark: datetime | None, last_run_at: datetime
     ) -> None: ...
     def dirty_candidates(self, owner_id: str, watermark: datetime | None) -> list[ConceptNode]: ...
     def band_semantic_neighbors(
@@ -285,10 +285,11 @@ class ConsolidationPass:
                 n=len(stuck),
             )
             self._apply_disuse(owner_id, epoch + 1)
-            if watermark is not None:
-                self._backend.advance_marker(
-                    owner_id, epoch=epoch + 1, watermark=watermark, last_run_at=now
-                )
+            # The epoch is recorded even with no watermark yet, so the decay is never applied
+            # twice at one epoch (round 9 LOW-1).
+            self._backend.advance_marker(
+                owner_id, epoch=epoch + 1, watermark=watermark, last_run_at=now
+            )
             return ConsolidationReport(
                 run_id=f"{owner_id}:{epoch + 1}",
                 owner_id=owner_id,
