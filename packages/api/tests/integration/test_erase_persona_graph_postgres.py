@@ -1203,3 +1203,56 @@ def test_a_member_deleted_before_the_done_write_lands_no_link(
         )
 
     assert backend.entities_for_node(_OWNER, "c_k") == [], "the links rolled back"
+
+
+def test_an_entity_two_members_carry_stays_until_the_last_goes(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 8 LOW-4: A (P's) and B (Q's) both carry E, both merged into C.
+
+    Erasing P keeps E on C (B still carries it, and B's record takes the link over);
+    erasing Q as well removes it.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("n_a", _PERSONA), vector)
+    backend.insert_node(_OWNER, _node("n_b", _OTHER), vector)
+    backend.insert_node(_OWNER, _node("n_c", None), vector)
+    backend.insert_entity(
+        _OWNER, CanonicalEntity(id="n_e", canonical_name="n_e", created_at=_NOW), vector
+    )
+    for member in ("n_a", "n_b"):
+        backend.associate_entities(_OWNER, member, ["n_e"])
+    ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "n_c"),
+        [backend.get_node(_OWNER, "n_a"), backend.get_node(_OWNER, "n_b")],
+        run_id="rn",
+        now=_NOW,
+        epoch=1,
+    )
+    assert backend.entities_for_node(_OWNER, "n_c") == ["n_e"]
+
+    for persona, left in ((_PERSONA, ["n_e"]), (_OTHER, [])):
+        with migrated_engine.begin() as conn:
+            conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": persona})
+        erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=persona)
+        assert backend.entities_for_node(_OWNER, "n_c") == left, persona

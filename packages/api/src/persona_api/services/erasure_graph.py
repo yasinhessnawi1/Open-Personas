@@ -79,6 +79,7 @@ __all__ = [
     "merge_record",
     "names_only_the_doomed_gave",
     "mirror_id_for",
+    "entity_link_plan",
     "mirror_row_deletes",
     "mirrors_to_remove",
     "orphaned_mirrors",
@@ -368,6 +369,68 @@ def delete_mirrors(owner_id: str, edge_ids: list[str], *, run_id: str) -> Any:  
     )
 
 
+def entity_link_plan(
+    added: Iterable[str], carriers: Mapping[str, str]
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Which of a doomed member's entity links leave the canonical (round 8 LOW-4).
+
+    ``carriers`` is ``{entity: a live member of the canonical that links it too}``. A link a
+    live member still carries stays, and passes to that member's record, so whichever of
+    them goes last takes it with it. Returns the links to remove and ``{member: [entities]}``
+    to add to those records.
+    """
+    remove: list[str] = []
+    transfers: dict[str, list[str]] = {}
+    for entity in dict.fromkeys(added):
+        carrier = carriers.get(entity)
+        if carrier is None:
+            remove.append(entity)
+        else:
+            transfers.setdefault(carrier, []).append(entity)
+    return remove, transfers
+
+
+def _give_back_entity_links(
+    conn: Connection, owner_id: str, canonical: str, added: list[str], doomed: set[str]
+) -> None:
+    carriers: dict[str, str] = {}
+    for entity_id, member_id in conn.execute(
+        select(graph_node_entities.c.entity_id, nodes_t.c.id)
+        .join(nodes_t, nodes_t.c.id == graph_node_entities.c.node_id)
+        .where(
+            graph_node_entities.c.owner_id == owner_id,
+            nodes_t.c.owner_id == owner_id,
+            nodes_t.c.merged_into == canonical,
+            ~_any_of(nodes_t.c.id, sorted(doomed), Text),
+            _any_of(graph_node_entities.c.entity_id, added, Text),
+        )
+        .order_by(nodes_t.c.id)
+    ).all():
+        carriers.setdefault(str(entity_id), str(member_id))
+    remove, transfers = entity_link_plan(added, carriers)
+    if remove:
+        conn.execute(
+            delete(graph_node_entities).where(
+                graph_node_entities.c.owner_id == owner_id,
+                graph_node_entities.c.node_id == canonical,
+                _any_of(graph_node_entities.c.entity_id, remove, Text),
+            )
+        )
+    for member in conn.execute(
+        select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
+        .where(nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, sorted(transfers), Text))
+        .order_by(nodes_t.c.id)
+        .with_for_update()
+    ).all():
+        record = merge_record(member.metadata)
+        if record is None:
+            continue
+        listed = [str(e) for e in record.get("added_entities", [])]
+        record = {**record, "added_entities": list(dict.fromkeys([*listed, *transfers[member.id]]))}
+        metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        _set_metadata(conn, owner_id, member, metadata)
+
+
 def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: set[str]) -> int:
     """A doomed member's contributions to a canonical that stays: edges, entities, its name."""
     names_by_canonical: dict[str, list[str]] = {}
@@ -384,13 +447,7 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
             conn.execute(delete_mirrors(owner_id, mirrored, run_id=str(record.get("run_id"))))
         added = [str(e) for e in record.get("added_entities", [])]
         if added:
-            conn.execute(
-                delete(graph_node_entities).where(
-                    graph_node_entities.c.owner_id == owner_id,
-                    graph_node_entities.c.node_id == canonical,
-                    graph_node_entities.c.entity_id.in_(added),
-                )
-            )
+            _give_back_entity_links(conn, owner_id, canonical, added, doomed)
         names_by_canonical.setdefault(canonical, []).append(row.concept_name)
     cleaned = 0
     for canonical_id, given in names_by_canonical.items():
@@ -663,8 +720,10 @@ def orphaned_mirrors(
 def _prune_orphans(conn: Connection, owner_id: str, mirrors: _Mirrors) -> dict[str, int]:
     """Apply :func:`orphaned_mirrors` to the owner's graph, after the rest of the step.
 
-    The mirror rows are the ones ``_remove_mirrors`` read, less those it deleted (nothing in
-    between deletes a mirror row), and only the records it rewrites are locked (round 7 LOW-3).
+    The mirror rows are the ones ``_remove_mirrors`` read, less those it deleted by key. A
+    row its legacy path deleted by id may still be listed here; deleting it again is a no-op,
+    and it never counts as a live source, since ``existing`` is read afresh. Only the records
+    it rewrites are locked (round 7 LOW-3, round 8 LOW-4).
     """
     members = conn.execute(
         select(nodes_t.c.id, nodes_t.c.metadata).where(

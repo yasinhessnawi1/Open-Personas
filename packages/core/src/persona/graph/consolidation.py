@@ -174,6 +174,9 @@ class _ConsolidationBackend(Protocol):
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]: ...
+    def entity_carriers(
+        self, owner_id: str, canonical_id: str, entity_ids: Sequence[str], *, excluding: str
+    ) -> dict[str, str]: ...
     def remove_entity_associations(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
@@ -810,9 +813,7 @@ class ConsolidationPass:
             # another member of the same run still shares stays (round 5 MEDIUM-2).
             if mirror_id not in shared:
                 self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
-        self._backend.remove_entity_associations(
-            owner_id, record["canonical"], record.get("added_entities", [])
-        )
+        self._give_back_entity_links(owner_id, node_id, record)
         self._backend.reopen_edges_incident(owner_id, node_id, invalidated_by=tag)
 
         orig_meta = {k: v for k, v in member.metadata.items() if k != _MERGE_KEY}
@@ -833,6 +834,47 @@ class ConsolidationPass:
             metadata={"action": "consolidation_unmerge", "canonical": record["canonical"]},
         )
         return True
+
+    def _give_back_entity_links(
+        self, owner_id: str, node_id: str, record: dict[str, object]
+    ) -> None:
+        """Remove the links this merge added, except those another member still carries.
+
+        The entity version of the shared mirror (round 8 LOW-4): if another member merged into
+        the canonical links the entity too, the canonical keeps the link, and that member's
+        record takes it over, so whichever goes last removes it.
+        """
+        canonical = record.get("canonical")
+        listed = record.get("added_entities")
+        if not isinstance(canonical, str) or not isinstance(listed, list) or not listed:
+            return
+        added = [str(e) for e in listed]
+        carriers = self._backend.entity_carriers(owner_id, canonical, added, excluding=node_id)
+        transfers: dict[str, list[str]] = {}
+        for entity, carrier in carriers.items():
+            transfers.setdefault(carrier, []).append(entity)
+        for carrier, entities in sorted(transfers.items()):
+            self._take_over_links(owner_id, carrier, entities)
+        self._backend.remove_entity_associations(
+            owner_id, canonical, [e for e in added if e not in carriers]
+        )
+
+    def _take_over_links(self, owner_id: str, member_id: str, entities: list[str]) -> None:
+        current = self._backend.get_node(owner_id, member_id)
+        raw = current.metadata.get(_MERGE_KEY) if current is not None else None
+        record = json.loads(raw) if raw is not None else None
+        if current is None or not isinstance(record, dict):
+            return
+        listed = [str(e) for e in record.get("added_entities", [])]
+        record = {**record, "added_entities": list(dict.fromkeys([*listed, *entities]))}
+        metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        self._backend.set_merged_into(
+            owner_id,
+            member_id,
+            merged_into=str(record.get("canonical")),
+            metadata=metadata,
+            content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+        )
 
     def _mirrors_shared_with(
         self, owner_id: str, node_id: str, record: dict[str, object]

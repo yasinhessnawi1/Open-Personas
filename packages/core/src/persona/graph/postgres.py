@@ -1412,6 +1412,34 @@ class PostgresGraphBackend:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
+    def entity_carriers(
+        self, owner_id: str, canonical_id: str, entity_ids: Sequence[str], *, excluding: str
+    ) -> dict[str, str]:
+        """``{entity: a member merged into the canonical that links it}``, but ``excluding``.
+
+        The first such member by id. For a give back that must keep a link another member
+        still carries (R9-284 round 8 LOW-4).
+        """
+        if not entity_ids:
+            return {}
+        stmt = (
+            select(graph_node_entities.c.entity_id, graph_nodes.c.id)
+            .join(graph_nodes, graph_nodes.c.id == graph_node_entities.c.node_id)
+            .where(
+                graph_node_entities.c.owner_id == owner_id,
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into == canonical_id,
+                graph_nodes.c.id != excluding,
+                graph_node_entities.c.entity_id.in_(list(entity_ids)),
+            )
+            .order_by(graph_nodes.c.id)
+        )
+        out: dict[str, str] = {}
+        with self._engine.connect() as conn:
+            for entity_id, member_id in conn.execute(stmt).all():
+                out.setdefault(str(entity_id), str(member_id))
+        return out
+
     def remove_entity_associations(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None:

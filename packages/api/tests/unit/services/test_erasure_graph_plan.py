@@ -13,6 +13,7 @@ import json
 import pytest
 from persona_api.services.erasure_graph import (
     delete_mirrors,
+    entity_link_plan,
     merge_record,
     mirror_id_for,
     mirror_row_deletes,
@@ -546,3 +547,12 @@ def test_the_prune_never_takes_another_runs_mirror_with_the_same_id() -> None:
     assert doomed == [9]
     (statement,) = mirror_row_deletes("u1", doomed, rows)
     assert "consolidation:r1" in str(statement.compile().params)
+
+
+def test_a_link_another_live_member_carries_stays_and_passes_to_it() -> None:
+    """Round 8 LOW-4: the entity version of the shared mirror."""
+    remove, transfers = entity_link_plan(["e1", "e2", "e1"], {"e2": "b"})
+
+    assert remove == ["e1"]
+    assert transfers == {"b": ["e2"]}
+    assert entity_link_plan([], {"e": "b"}) == ([], {})

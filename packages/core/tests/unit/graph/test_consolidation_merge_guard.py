@@ -438,3 +438,48 @@ def test_a_listing_without_sources_still_counts_as_backing() -> None:
     assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
 
     assert backend.deleted == [], "n's unsourced listing keeps the mirror"
+
+
+class _SharedEntityBackend(_UnmergeBackend):
+    """m added E to k; n, merged into k too, carries E itself."""
+
+    def __init__(self, carried: bool) -> None:
+        super().__init__("r0")
+        record = json.loads(self.records["m"])
+        self.records["m"] = json.dumps({**record, "added_entities": ["E"]})
+        self._carried = carried
+        self.removed: list[list[str]] = []
+        self.rewritten: dict[str, dict[str, Any]] = {}
+
+    def entity_carriers(self, _owner: str, _canonical: str, ids: Any, **kw: Any) -> dict[str, str]:  # noqa: ANN401
+        assert kw["excluding"] == "m"
+        return {"E": "n"} if self._carried and "E" in ids else {}
+
+    def remove_entity_associations(self, _owner: str, _node: str, ids: Any) -> None:  # noqa: ANN401
+        self.removed.append(list(ids))
+
+    def set_merged_into(self, _owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        if kw.get("merged_into"):
+            self.rewritten[node_id] = json.loads(kw["metadata"]["_k7_merge"])
+
+
+@pytest.mark.parametrize("carried", [True, False])
+def test_giving_a_member_back_keeps_an_entity_link_another_member_carries(carried: bool) -> None:
+    """Round 8 LOW-4: the link stays on k, and n's record takes it over."""
+    backend = _SharedEntityBackend(carried)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
+
+    if carried:
+        assert backend.removed == [[]], "E stays on k"
+        assert backend.rewritten["n"]["added_entities"] == ["E"], "n's record takes it over"
+    else:
+        assert backend.removed == [["E"]]
+        assert "n" not in backend.rewritten
