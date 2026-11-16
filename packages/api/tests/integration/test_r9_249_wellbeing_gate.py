@@ -218,7 +218,7 @@ def _seed_conversations(conn: Any) -> None:  # noqa: ANN401
 
 
 def _seed_graph(super_engine: Engine) -> None:
-    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=super_engine, persona_guard=False, node_releaser=None)
     vec = [1.0] + [0.0] * (_DIM - 1)
     nodes = [
         _node(
@@ -301,7 +301,11 @@ def _seed(super_engine: Engine, app_engine: Engine | None = None) -> None:
 
 def _store(app_engine: Engine) -> Any:  # noqa: ANN401
     return build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
 
 
@@ -519,7 +523,9 @@ def test_a_conversation_disclosed_after_the_hold_never_flushes(
     notices = _as_owner(lambda: ledger.held_for_owner(_OWNER))
     assert [n.candidate.anchor.ref for n in notices] == [_PLAIN]
 
-    PostgresGraphBackend(engine=migrated_engine, persona_guard=False).insert_node_if_absent(
+    PostgresGraphBackend(
+        engine=migrated_engine, persona_guard=False, node_releaser=None
+    ).insert_node_if_absent(
         _OWNER,
         _node(
             f"{_OWNER}::node::00000009",

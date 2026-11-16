@@ -177,7 +177,7 @@ def _edge(by: str | None) -> TypedLink:
 
 
 def _backend(engine: _Engine, *, guard: bool = True) -> PostgresGraphBackend:
-    return PostgresGraphBackend(engine=engine, persona_guard=guard)  # type: ignore[arg-type]
+    return PostgresGraphBackend(engine=engine, persona_guard=guard, node_releaser=None)  # type: ignore[arg-type]
 
 
 _WRITES = {

@@ -134,7 +134,9 @@ def _seed(migrated_engine: Engine) -> None:
             ),
             {"p": _PERSONA, "u": _OWNER},
         )
-    PostgresGraphBackend(engine=migrated_engine, persona_guard=False).insert_node_if_absent(
+    PostgresGraphBackend(
+        engine=migrated_engine, persona_guard=False, node_releaser=None
+    ).insert_node_if_absent(
         _OWNER,
         ConceptNode(
             id=_NODE,
@@ -175,7 +177,11 @@ def _pipeline(
     app_engine: Engine, executor: InitiativeDeliveryExecutor | None
 ) -> InitiativePipeline:
     graph_store = build_graph_store(
-        engine=app_engine, embedder=_Emb(), audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     return InitiativePipeline(
         grounding=GroundingChecker(

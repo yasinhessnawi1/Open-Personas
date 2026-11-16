@@ -75,6 +75,7 @@ from persona_api.editions import MeteredCreditsPolicy
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
+from persona_api.services.forget_graph import ForgetReleaser
 from persona_api.services.model_tiers import ownerless_background_backend, select_plan_tier_registry
 from persona_api.services.skill_consent_service import PostgresSkillConsentStore
 from persona_api.services.workspace_persister import WorkspaceDirPersister
@@ -388,6 +389,9 @@ class RuntimeFactory:
             audit_logger=self._audit_logger or JSONLAuditLogger(audit_root),
             # R9-284: a write naming an erased persona is refused in its own transaction.
             persona_guard=True,
+            # R9-287: the request path's deletes (forget, delete) release what
+            # consolidation copied from the node, under the graph lock.
+            node_releaser=ForgetReleaser(),
         )
         _logger.info("graph writes enabled (record_user_fact composed into toolboxes)")
 

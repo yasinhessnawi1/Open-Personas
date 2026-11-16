@@ -3644,7 +3644,7 @@
       "post": {
         "tags": ["memory"],
         "summary": "Forget Node",
-        "description": "Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence\n(cascading its covering gists, K8-D-14) AND the concept node, one operation \u2014 the\nresurrection guard, since a sleep-time consolidation pass can only re-distill from\nevidence that still exists. 404 when the node is not the caller's.",
+        "description": "Commit a cross-layer forget (Spec K11, D-K11-2): the concept node and every node merged\ninto it, then the confirmed episodic evidence (cascading its covering gists, K8-D-14). That\nis the resurrection guard, since a sleep-time consolidation pass can only re-distill from\nevidence that still exists.\n\n204 also when the node is already gone or is not the caller's (R9-287): the forget is\nidempotent, so its retry after a failed evidence delete still removes the confirmed\nevidence, and the two cases read alike, so nothing is disclosed. 409 while a consolidation\nholds the owner's graph. 404 only when the memory composition is not wired.",
         "operationId": "forget_node_v1_memory_nodes__node_id__forget_post",
         "parameters": [
           {

@@ -180,6 +180,7 @@ def test_full_stack_latency_recall_and_no_drop_at_scale(graph_engine: Engine, ba
             audit_logger=MemoryAuditLogger(),
             settings=settings,
             persona_guard=False,
+            node_releaser=None,
         )
         store.rebuild_index("u1")
         store.rebuild_index("u2")

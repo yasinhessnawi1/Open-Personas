@@ -56,7 +56,11 @@ def env(pg_engine: Engine, embedder: HashEmbedder384) -> dict[str, object]:
         )
     backend = PostgresBackend(engine=pg_engine, embedder=embedder)
     graph = build_graph_store(
-        engine=pg_engine, embedder=embedder, audit_logger=MemoryAuditLogger(), persona_guard=False
+        engine=pg_engine,
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
     )
     engine = EpisodicConsolidationEngine(
         backend=backend,

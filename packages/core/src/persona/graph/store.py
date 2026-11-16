@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from persona.audit import AuditLogger
     from persona.graph.config import GraphSettings
     from persona.graph.models import NodeVersion
+    from persona.graph.postgres import NodeReleaser
     from persona.graph.protocol import GraphIndex, KnowledgeCandidate, MergeOutcome
     from persona.stores.embedder import Embedder
 
@@ -84,7 +85,7 @@ class _StoreBackend(Protocol):
     def read_version_for_restore(
         self, owner_id: str, version_id: str
     ) -> tuple[NodeVersion, list[float]] | None: ...
-    def delete_node(self, owner_id: str, node_id: str) -> int | None: ...
+    def delete_node_and_members(self, owner_id: str, node_id: str) -> dict[str, int]: ...
     def insert_node_if_absent(
         self, owner_id: str, node: ConceptNode, embedding: Sequence[float]
     ) -> int | None: ...
@@ -239,11 +240,18 @@ class PostgresGraphStore:
                 "the SELF node is not deletable",
                 context={"node_id": node_id, "op": "delete"},
             )
-        surrogate = self._backend.delete_node(owner_id, node_id)  # Postgres (authoritative)
-        if surrogate is None:
+        # Postgres (authoritative): the node and every node merged into it (R9-287).
+        gone = self._backend.delete_node_and_members(owner_id, node_id)
+        if node_id not in gone:
             return False
-        self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=node_id)
-        self._index.remove(surrogate)  # same path; raises on failure (stale entry benign)
+        # One DELETE event per node that went, the forgotten one first (round 2 LOW-2).
+        order = [node_id, *sorted(set(gone) - {node_id})]
+        for deleted in order:
+            self._emit_audit(owner_id, AuditAction.DELETE, source=WriteSource.USER, node_id=deleted)
+        # Every entry that went (round 3 nit): a member usually left the index when it was
+        # merged, and removing an absent surrogate is a no-op.
+        for deleted in order:
+            self._index.remove(gone[deleted])  # same path; raises on failure
         return True
 
     # ===== the user's self node (Spec K6) =================================
@@ -745,6 +753,7 @@ def build_graph_store(
     audit_logger: AuditLogger,
     settings: GraphSettings | None = None,
     persona_guard: bool,
+    node_releaser: NodeReleaser | None,
 ) -> PostgresGraphStore:
     """Composition root: wire the transport, index, merge engine, and store.
 
@@ -758,7 +767,9 @@ def build_graph_store(
     from persona.graph.postgres import PostgresGraphBackend
 
     resolved = settings or _Settings()
-    backend = PostgresGraphBackend(engine=engine, persona_guard=persona_guard)
+    backend = PostgresGraphBackend(
+        engine=engine, persona_guard=persona_guard, node_releaser=node_releaser
+    )
     index = make_graph_index(
         settings=resolved, engine=engine, float32_fetch=backend.embeddings_by_surrogate
     )

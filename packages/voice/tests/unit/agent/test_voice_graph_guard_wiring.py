@@ -28,3 +28,21 @@ def test_the_voice_runner_builds_its_graph_store_guarded() -> None:
             guards.append(value.value if isinstance(value, ast.Constant) else value)
 
     assert guards == [True], "one graph store, guarded"
+
+
+def test_the_voice_runner_refuses_node_deletes() -> None:
+    """R9-287 review MEDIUM-1: fail closed, never ``None`` (a delete with nothing released)."""
+    spec = importlib.util.find_spec("persona_voice.agent.runner")
+    assert spec is not None
+    assert spec.origin is not None
+    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    releasers: list[object] = []
+    for node in ast.walk(tree):
+        func = getattr(node, "func", None)
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if isinstance(node, ast.Call) and name in _CONSTRUCTORS:
+            value = next((k.value for k in node.keywords if k.arg == "node_releaser"), None)
+            built = getattr(value, "func", None)
+            releasers.append(getattr(built, "id", None) if isinstance(value, ast.Call) else value)
+
+    assert releasers == ["RefuseNodeDeletes"]

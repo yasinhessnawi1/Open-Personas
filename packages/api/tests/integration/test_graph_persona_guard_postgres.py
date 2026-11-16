@@ -84,7 +84,7 @@ def test_a_write_after_the_erasure_deleted_the_row_is_refused(
 ) -> None:
     with migrated_engine.begin() as conn:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
-    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True, node_releaser=None)
 
     with pytest.raises(GraphPersonaGoneError):
         backend.insert_node(_OWNER, _node("late"), embedder.encode(["late"])[0])
@@ -120,7 +120,7 @@ def test_the_row_stays_held_until_the_write_commits(
     transaction, can make the delete wait here; a hold committed before the write (its own
     transaction) would already be gone, and the delete would go through.
     """
-    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     if table == "graph_edges":
         for node_id in ("a", "b"):
@@ -175,7 +175,7 @@ def test_a_record_that_fails_after_the_insert_lands_no_link(app_engine: Engine) 
     """Reviewer's M22: the links and the record are one transaction on Postgres too."""
     from persona.graph.models import CanonicalEntity  # noqa: PLC0415
 
-    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True)
+    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True, node_releaser=None)
     backend.insert_node(_OWNER, _node("r_k"), [0.0] * 384)
     backend.insert_entity(
         _OWNER, CanonicalEntity(id="r_ent", canonical_name="r_ent", created_at=_NOW), [0.0] * 384

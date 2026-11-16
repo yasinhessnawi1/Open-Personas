@@ -75,7 +75,7 @@ def backend(migrated_engine: Engine) -> PostgresGraphBackend:
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    return PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    return PostgresGraphBackend(engine=migrated_engine, persona_guard=True, node_releaser=None)
 
 
 def _pass(engine: Engine, backend: PostgresGraphBackend, embedder: Any) -> ConsolidationPass:  # noqa: ANN401

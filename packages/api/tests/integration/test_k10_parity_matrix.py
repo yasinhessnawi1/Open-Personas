@@ -295,7 +295,7 @@ def test_managed_k7_consolidation_runs_and_merges(
             created_at=t0,
         )
 
-    backend = PostgresGraphBackend(engine=seed_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=seed_engine, persona_guard=False, node_releaser=None)
     canonical, member = f"{owner}::node::00000000", f"{owner}::node::00000001"
     backend.insert_node(owner, _node(canonical, "Canonical", 2), _vec(0))  # type: ignore[arg-type]
     backend.insert_node(owner, _node(member, "Member", 1), _vec(0, 0.85))  # type: ignore[arg-type,call-arg]

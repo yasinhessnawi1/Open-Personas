@@ -12,10 +12,11 @@ distilled from — a plain ``DELETE`` alone is resurrection-prone (D-K11-4).
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from persona.graph.errors import GraphNodeNotFoundError, GraphStaleWriteError
+from persona.graph.errors import GraphNodeBusyError, GraphNodeNotFoundError, GraphStaleWriteError
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import MemoryNodeChangedError, MemoryNodeNotFoundError
@@ -175,25 +176,44 @@ async def delete_node(
     caller's (existence-disclosure-safe — never reveals another tenant's node exists).
     """
     store = _graph_store(request)
-    deleted = store is not None and memory_service.delete(store, user.id, node_id)
+    try:
+        # R9-287 review HIGH-1: the delete may wait on the graph lock; never on the event loop.
+        deleted = store is not None and await asyncio.to_thread(
+            memory_service.delete, store, user.id, node_id
+        )
+    except GraphNodeBusyError as exc:
+        raise _reorganising(node_id) from exc
     if not deleted:
         raise MemoryNodeNotFoundError("memory not found", context={"node_id": node_id})
 
 
+def _reorganising(node_id: str) -> MemoryNodeChangedError:
+    """A consolidation run holds the owner's graph past the delete's lock timeout (R9-287)."""
+    return MemoryNodeChangedError(
+        "this memory is being reorganised, try again", context={"node_id": node_id}
+    )
+
+
 def _forget_composition(
-    request: Request, user: AuthenticatedUser, node_id: str
+    request: Request, user: AuthenticatedUser, node_id: str, *, require_node: bool = True
 ) -> tuple[GraphStore, Backend, AuditLogger, Engine]:
     """The four pieces a forget needs, or a 404 (node absent/not-owned, or composition
     incomplete — no graph, no episodic backend, or no RLS engine wired, e.g. the
     community/no-DB edition). Existence-disclosure-safe: both reasons read identically
-    to the caller (mirrors the K5 ``delete_node`` pattern)."""
+    to the caller (mirrors the K5 ``delete_node`` pattern).
+
+    ``require_node=False`` is the forget's (R9-287 round 2 MEDIUM-1): a forget whose node
+    went but whose evidence delete failed is retried with the same body, and the retry still
+    removes the confirmed evidence. Only an incomplete composition 404s then."""
     store = _graph_store(request)
-    detail = None if store is None else memory_service.node_detail(store, user.id, node_id)
+    missing_node = require_node and (
+        store is None or memory_service.node_detail(store, user.id, node_id) is None
+    )
     backend = _memory_backend(request)
     audit_logger = _audit_logger(request)
     rls_engine: Engine | None = getattr(request.app.state, "rls_engine", None)
     if (
-        detail is None
+        missing_node
         or store is None
         or backend is None
         or audit_logger is None
@@ -233,21 +253,32 @@ async def forget_node(
     body: ForgetRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> None:
-    """Commit a cross-layer forget (Spec K11, D-K11-2): confirmed episodic evidence
-    (cascading its covering gists, K8-D-14) AND the concept node, one operation — the
-    resurrection guard, since a sleep-time consolidation pass can only re-distill from
-    evidence that still exists. 404 when the node is not the caller's.
+    """Commit a cross-layer forget (Spec K11, D-K11-2): the concept node and every node merged
+    into it, then the confirmed episodic evidence (cascading its covering gists, K8-D-14). That
+    is the resurrection guard, since a sleep-time consolidation pass can only re-distill from
+    evidence that still exists.
+
+    204 also when the node is already gone or is not the caller's (R9-287): the forget is
+    idempotent, so its retry after a failed evidence delete still removes the confirmed
+    evidence, and the two cases read alike, so nothing is disclosed. 409 while a consolidation
+    holds the owner's graph. 404 only when the memory composition is not wired.
     """
-    store, backend, audit_logger, rls_engine = _forget_composition(request, user, node_id)
-    memory_service.forget(
-        graph_store=store,
-        memory_backend=backend,
-        audit_logger=audit_logger,
-        rls_engine=rls_engine,
-        owner_id=user.id,
-        node_id=node_id,
-        episodic=[(e.persona_id, e.chunk_id) for e in body.episodic],
+    store, backend, audit_logger, rls_engine = _forget_composition(
+        request, user, node_id, require_node=False
     )
+    try:
+        await asyncio.to_thread(
+            memory_service.forget,
+            graph_store=store,
+            memory_backend=backend,
+            audit_logger=audit_logger,
+            rls_engine=rls_engine,
+            owner_id=user.id,
+            node_id=node_id,
+            episodic=[(e.persona_id, e.chunk_id) for e in body.episodic],
+        )
+    except GraphNodeBusyError as exc:
+        raise _reorganising(node_id) from exc
 
 
 @router.get("/search", response_model=MemorySearchResponse)

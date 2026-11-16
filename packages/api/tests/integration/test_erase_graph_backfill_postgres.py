@@ -77,7 +77,7 @@ def test_a_persona_deleted_before_r9_284_is_backfilled_and_swept(
                 text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
                 {"p": pid, "o": _OWNER},
             )
-    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
     vector = embedder.encode(["x"])[0]
     backend.insert_node(_OWNER, _node("bf_shared", _GONE, _KEPT), vector)
     backend.insert_node(_OWNER, _node("bf_only", _GONE), vector)
@@ -88,6 +88,7 @@ def test_a_persona_deleted_before_r9_284_is_backfilled_and_swept(
         embedder=embedder,
         audit_logger=MemoryAuditLogger(),
         persona_guard=True,
+        node_releaser=None,
     )
     with pytest.raises(GraphPersonaGoneError):
         store.correct_node(_OWNER, "bf_shared", "the user's own correction")

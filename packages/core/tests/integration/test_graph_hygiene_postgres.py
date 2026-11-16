@@ -164,6 +164,7 @@ def test_common_path_owner_scoped_no_in_list(clean: Engine) -> None:
         embedder=_QueryEmbedder(),
         audit_logger=MemoryAuditLogger(),
         persona_guard=False,
+        node_releaser=None,
     )
     # common path (allowlist=None) → only u1's nodes, and it used search_owner.
     hits = store.search_dense("u1", "u1:0", top_k=50)
@@ -183,6 +184,7 @@ def test_common_path_excludes_merged(clean: Engine) -> None:
         embedder=_QueryEmbedder(),
         audit_logger=MemoryAuditLogger(),
         persona_guard=False,
+        node_releaser=None,
     )
     ids = {n.id for n in store.search_dense("u1", "u1:1", top_k=50)}
     assert "u1::node::00000001" not in ids  # the merged node is invisible
@@ -195,6 +197,7 @@ def test_k4_gated_allowlist_path_still_scopes(clean: Engine) -> None:
         embedder=_QueryEmbedder(),
         audit_logger=MemoryAuditLogger(),
         persona_guard=False,
+        node_releaser=None,
     )
     # a K4-style positive allowlist (a subset) → only those nodes come back.
     allow = {"u1::node::00000002", "u1::node::00000003"}

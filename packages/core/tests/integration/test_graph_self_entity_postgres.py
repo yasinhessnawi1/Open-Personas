@@ -90,8 +90,9 @@ def env(
         audit_logger=MemoryAuditLogger(),
         settings=GraphSettings(),
         persona_guard=False,
+        node_releaser=None,
     )
-    backend = PostgresGraphBackend(engine=_engine, persona_guard=False)
+    backend = PostgresGraphBackend(engine=_engine, persona_guard=False, node_releaser=None)
     yield cast("GraphStore", store), backend
     with _engine.begin() as conn:
         graph_metadata.drop_all(conn)

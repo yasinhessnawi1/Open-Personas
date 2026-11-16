@@ -716,6 +716,7 @@ async def build_agent_session(
     unified_recall: Callable[[str], UnifiedProjection] | None = None
     if config.graph_memory_enabled:
         from persona.graph import build_graph_store
+        from persona.graph.postgres import RefuseNodeDeletes
         from persona.recall.config import RecallSettings
 
         graph_store = build_graph_store(
@@ -724,6 +725,9 @@ async def build_agent_session(
             audit_logger=audit.audit_logger,
             # R9-284: a write naming an erased persona is refused in its own transaction.
             persona_guard=True,
+            # R9-287: the voice agent never deletes a node (deletes go through the api's memory
+            # routes, which release what consolidation copied); one here would be refused.
+            node_releaser=RefuseNodeDeletes(),
         )
         if RecallSettings().unified_enabled:
             # K9 (T9): the unified recall REPLACES the separate graph shell (fuse-don't-route,

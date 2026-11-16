@@ -46,6 +46,7 @@ from persona.graph.maintenance_lock import (
 )
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
 from persona.graph.postgres import reopen_statement
+from persona.logging import get_logger
 from sqlalchemy import (
     BigInteger,
     Text,
@@ -70,11 +71,14 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Connection, Engine
 
+_log = get_logger("api.erasure")
+
 __all__ = [
     "GraphMaintenanceBusyError",
     "GraphPlan",
     "erase_persona_graph",
     "delete_mirrors",
+    "entity_links_passed_up",
     "erased_personas_in_graph",
     "merge_record",
     "names_only_the_doomed_gave",
@@ -402,8 +406,36 @@ def entity_link_plan(
     return remove, transfers
 
 
+def entity_links_passed_up(
+    record: Mapping[str, Any] | None, given_up: Iterable[str], doomed: set[str]
+) -> tuple[str, list[str], dict[str, Any]] | None:
+    """What a canonical that lost entity links passes up its own chain (review MEDIUM-3).
+
+    A canonical that was itself merged gave its links to the canonical above it, and its record
+    lists the ones its merge added. Those it has now given up leave that record and are given
+    back above, by the same carrier rule. Returns ``(canonical above, links, rewritten record)``
+    or ``None`` when nothing passes up (not merged, merged into a doomed node, or its merge
+    added none of them).
+    """
+    above = record.get("canonical") if record else None
+    if record is None or not isinstance(above, str) or above in doomed:
+        return None
+    listed = [str(e) for e in record.get("added_entities", [])]
+    gone = set(given_up)
+    passed = [e for e in listed if e in gone]
+    if not passed:
+        return None
+    return above, passed, {**record, "added_entities": [e for e in listed if e not in gone]}
+
+
 def _give_back_entity_links(
-    conn: Connection, owner_id: str, canonical: str, added: list[str], doomed: set[str]
+    conn: Connection,
+    owner_id: str,
+    canonical: str,
+    added: list[str],
+    doomed: set[str],
+    *,
+    depth: int = 0,
 ) -> None:
     carriers: dict[str, str] = {}
     for entity_id, member_id in conn.execute(
@@ -441,6 +473,51 @@ def _give_back_entity_links(
         record = {**record, "added_entities": list(dict.fromkeys([*listed, *transfers[member.id]]))}
         metadata = {**(member.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
         _set_metadata(conn, owner_id, member, metadata)
+    if remove and depth < _CHAIN_LIMIT:
+        _pass_entity_links_up(conn, owner_id, canonical, remove, doomed, depth=depth)
+    elif remove:
+        # Round 2 LOW-3: a chain this long is not one consolidation writes; say so, ids only.
+        _log.warning(
+            "entity links not followed past the chain bound canonical={canonical} limit={limit}",
+            canonical=canonical,
+            limit=_CHAIN_LIMIT,
+        )
+
+
+#: A merge chain longer than this is not followed further (a cycle cannot be one; a guard).
+_CHAIN_LIMIT = 64
+
+
+def _pass_entity_links_up(
+    conn: Connection,
+    owner_id: str,
+    canonical: str,
+    given_up: list[str],
+    doomed: set[str],
+    *,
+    depth: int,
+) -> None:
+    """The canonical gave links up; if its own merge copied them higher, they go there too.
+
+    Review MEDIUM-3: A merged into B, B into C. B's merge copied A's entity E to C, and B's
+    record lists it. Once B gives E up (A forgotten or erased, no other member of B carrying
+    it), C gives it up as well unless another of C's live members carries it.
+    """
+    row = conn.execute(
+        select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
+        .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical)
+        .order_by(nodes_t.c.id)  # one row; ordered like every lock here (fixed lock order)
+        .with_for_update(key_share=True)
+    ).first()
+    passed = entity_links_passed_up(
+        merge_record(row.metadata) if row is not None else None, given_up, doomed
+    )
+    if row is None or passed is None:
+        return
+    above, links, record = passed
+    metadata = {**(row.metadata or {}), _MERGE_KEY: json.dumps(record, sort_keys=True)}
+    _set_metadata(conn, owner_id, row, metadata)
+    _give_back_entity_links(conn, owner_id, above, links, doomed, depth=depth + 1)
 
 
 def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: set[str]) -> int:
@@ -473,6 +550,9 @@ def _give_back(conn: Connection, owner_id: str, doomed_rows: list[Any], doomed: 
         names = names_only_the_doomed_gave(given, survivors)
         if not names:
             continue
+        # FOR NO KEY UPDATE (SQLAlchemy's key_share without read): the lock the metadata write
+        # below takes anyway, held from the read so nothing changes the row in between, while
+        # a writer's FOR KEY SHARE on it (an edge insert) still goes ahead (review LOW-2).
         canonical = conn.execute(
             select(nodes_t.c.id, nodes_t.c.concept_name, nodes_t.c.content, nodes_t.c.metadata)
             .where(nodes_t.c.owner_id == owner_id, nodes_t.c.id == canonical_id)

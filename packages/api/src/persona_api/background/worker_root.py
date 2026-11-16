@@ -138,6 +138,7 @@ from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
 from persona_api.services import persona_service
+from persona_api.services.forget_graph import ForgetReleaser
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
 from persona_api.tasks.continuation import TaskContinuation
@@ -280,7 +281,10 @@ def build_worker_registry(
         metered=True,
     )
     # R9-284: every graph write that names a persona holds that persona's row.
-    graph_backend = PostgresGraphBackend(engine=rls_engine, persona_guard=True)
+    # R9-287: a node delete here releases what consolidation copied from it.
+    graph_backend = PostgresGraphBackend(
+        engine=rls_engine, persona_guard=True, node_releaser=ForgetReleaser()
+    )
     graph_store = build_graph_store(
         engine=rls_engine,
         embedder=embedder,
@@ -288,6 +292,7 @@ def build_worker_registry(
         # JSONL default (config.audit_root) — the same selection the API makes.
         audit_logger=build_audit_logger(config, rls_engine),
         persona_guard=True,
+        node_releaser=ForgetReleaser(),
     )
     entity_registry = PostgresEntityRegistry(backend=graph_backend, embedder=embedder)
     synthesizer = build_synthesizer(
