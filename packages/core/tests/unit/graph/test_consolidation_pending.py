@@ -233,10 +233,33 @@ def test_one_pending_member_that_cannot_be_given_back_does_not_stop_the_others()
     backend.get_node = _get  # type: ignore[method-assign]
     backend.events.clear()
 
-    report = consolidation.run("u1")
+    try:
+        report = consolidation.run("u1")
+    except RuntimeError as exc:
+        raise AssertionError(f"one failed give back stopped the run: {exc}") from exc
 
     assert backend.events[:2] == ["reopen m", "record m cleared"], "m is given back anyway"
-    assert report.clusters_formed == 1
+    assert report.clusters_formed == 0, "round 7 MEDIUM-1: no merge this run"
+
+
+def test_a_failed_give_back_means_no_merge_that_run() -> None:
+    """Round 7 MEDIUM-1: the next run, with nothing stuck, merges again."""
+    backend = _Backend(deadlocks=1, broken_reopens=2)
+    consolidation = _pass(backend)
+    consolidation.run("u1")  # merge fails, its give back fails: m pending
+    backend.events.clear()
+
+    stuck = consolidation.run("u1")  # the pending give back fails again
+
+    assert stuck.clusters_formed == 0
+    assert [c.node_id for c in stuck.skipped] == ["m"]
+    assert backend.events == [], "nothing merged, nothing given back"
+
+    backend.events.clear()
+    healthy = consolidation.run("u1")
+
+    assert backend.events[:2] == ["reopen m", "record m cleared"]
+    assert healthy.clusters_formed == 1
 
 
 def test_a_done_member_is_marked_pending_before_its_give_back() -> None:

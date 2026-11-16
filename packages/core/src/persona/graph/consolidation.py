@@ -250,17 +250,41 @@ class ConsolidationPass:
     def _run_locked(self, owner_id: str) -> ConsolidationReport:
         # A member whose merge act stopped part way (its record still "pending") is given
         # back first, so this run starts from whole merges only (D-R9-284-graph-mutex).
+        stuck: list[str] = []
         for node_id in self._backend.pending_merges(owner_id):
             try:
                 self._unmerge(owner_id, node_id)
             except Exception as exc:  # noqa: BLE001 - still pending: the next run tries again
-                # One member's failure must not stop the others or the run (round 6 L-1).
+                # One member's failure must not stop the others (round 6 L-1).
+                stuck.append(node_id)
                 _log.warning(
                     "pending merge not given back node={node} error={err}",
                     node=node_id,
                     err=type(exc).__name__,
                 )
         epoch, watermark = self._backend.get_marker(owner_id)
+        if stuck:
+            # A member still pending could be clustered again, or its canonical could, from a
+            # half-made state: this run merges nothing, and does not advance the marker, so the
+            # next run gives it back and considers the same candidates (round 7 MEDIUM-1).
+            _log.warning(
+                "consolidation merge phase skipped: pending merges not given back count={n}",
+                n=len(stuck),
+            )
+            return ConsolidationReport(
+                run_id=f"{owner_id}:{epoch}",
+                owner_id=owner_id,
+                epoch=epoch,
+                candidates_considered=0,
+                clusters_formed=0,
+                nodes_merged=0,
+                skipped=tuple(
+                    SkippedCandidate(
+                        node_id=node_id, reason="pending merge not given back: merge phase skipped"
+                    )
+                    for node_id in stuck
+                ),
+            )
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
         started_at = datetime.now(UTC)  # a SYSTEM timestamp (watermark axis) — never salience
