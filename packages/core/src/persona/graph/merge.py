@@ -380,13 +380,19 @@ class MergeEngine:
             )
         node = self._rebuilt(target, content=new_content, candidate=candidate)
         new_vec = self._embedder.encode([new_content])[0]
-        self._backend.update_node(
+        written = self._backend.update_node(
             owner_id,
             node,
             new_vec,
             expected_content_hash=target.content_hash,
             expected_provenance=target.provenance,
         )
+        if written is None:
+            # The target was deleted outright meanwhile (round 12 LOW-3): treat it as gone,
+            # so the caller's re-read finds nothing and runs the once-only re-search.
+            raise GraphStaleWriteError(
+                "extend target removed meanwhile", context={"node_id": node.id}
+            )
         link_ids = self._form_semantic_links(owner_id, node, new_vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(
@@ -481,6 +487,14 @@ class MergeEngine:
             invalid_at=invalid_at,
             invalidated_by=invalidated_by,
         )
+        if version_key is None:
+            # The named target was deleted outright meanwhile (round 12 LOW-3). The candidate
+            # names this node, so there is nothing to re-decide against: refuse before any
+            # link is formed for a node that no longer exists.
+            raise NodeMergeError(
+                "update/contradict target removed meanwhile",
+                context={"target_node_id": node.id, "owner_id": owner_id},
+            )
         link_ids = self._form_semantic_links(owner_id, node, vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(
@@ -488,7 +502,7 @@ class MergeEngine:
             node_id=node.id,
             created_link_ids=tuple(link_ids),
             entity_ids=candidate.entity_ids,
-            superseded_version_id=None if version_key is None else str(version_key),
+            superseded_version_id=str(version_key),
         )
 
     # -- helpers ------------------------------------------------------------

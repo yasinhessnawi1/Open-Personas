@@ -719,3 +719,80 @@ def _node_for(node_id: str) -> ConceptNode:
         provenance=(NodeProvenance(source=WriteSource.PERSONA_SELF, written_at=NOW),),
         created_at=NOW,
     )
+
+
+class _DeletedAway(_FakeBackend):
+    """Round 12 LOW-3 (the reviewer's probe): the user forgets the target just before the
+    first write, so the write finds no row at all."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raced = False
+
+    def _forget(self, node_id: str) -> None:
+        if not self.raced:
+            self.raced = True
+            del self.nodes[node_id]
+
+    def update_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._forget(node.id)
+        return super().update_node(owner_id, node, embedding, **kw)
+
+    def supersede_node(
+        self,
+        owner_id: str,
+        node: ConceptNode,
+        embedding: list[float],
+        **kw: Any,  # noqa: ANN401
+    ) -> int | None:
+        self._forget(node.id)
+        return super().supersede_node(owner_id, node, embedding, **kw)
+
+
+def test_an_extend_whose_target_was_deleted_searches_again_and_creates() -> None:
+    """The reviewer's probe: the extend used to report EXTENDED onto a node that was gone."""
+    b = _DeletedAway()
+    eng = _engine(b, {"likes coffee": vec(0), "loves espresso": vec(0, 0.99, 1)})
+    first = eng.merge("u1", _cand("likes coffee")).node_id
+
+    out = eng.merge("u1", _cand("loves espresso"))
+
+    assert out.action is MergeAction.CREATED
+    assert out.node_id in b.nodes, "the outcome names a node that exists"
+    created, _ = b.nodes[out.node_id]
+    assert created.content == "loves espresso", "a new node, not the forgotten one extended"
+    assert all("likes coffee" not in n.content for n, _ in b.nodes.values()), "first is gone"
+    assert first == out.node_id  # this fake reuses the freed index; Postgres would not
+
+
+def test_a_supersede_whose_target_was_deleted_is_refused_before_any_link() -> None:
+    from datetime import timedelta  # noqa: PLC0415
+
+    b = _DeletedAway()
+    eng = _engine(b, {"works at Acme": vec(0), "left Acme": vec(1)})
+    node_id = eng.merge("u1", _cand("works at Acme")).node_id
+    edges_before = dict(b.edges)
+    later = NodeProvenance(
+        source=WriteSource.PERSONA_SELF, written_at=NOW + timedelta(days=1), interaction_id="i2"
+    )
+
+    with pytest.raises(NodeMergeError, match="removed meanwhile"):
+        eng.merge(
+            "u1",
+            _cand(
+                "left Acme",
+                update_intent=UpdateIntent.CONTRADICT,
+                target_node_id=node_id,
+                provenance=later,
+            ),
+        )
+
+    assert node_id not in b.nodes
+    assert b.edges == edges_before, "no link formed for the deleted node"
+    assert b.versions == []
