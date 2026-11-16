@@ -381,3 +381,52 @@ def test_a_claim_that_fails_partway_touches_no_file(
         sweep_legacy_audit_files(engine, root)
 
     assert {p.name: p.read_bytes() for p in root.iterdir()} == before, "no file was touched"
+
+
+def test_an_erased_accounts_events_name_its_erasure_after_the_clean(
+    engine: Engine, root: Path
+) -> None:
+    """Review M1: the owner's account was erased (no users row); its log names the erasure."""
+    erased = "user_erased"
+    account = ErasureLedger(engine).claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    store, tools = _logs(root, _GONE, erased)
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(scrubbed_unknown_owner=1)
+    assert not tools.exists()
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    authors = {e["written_by"] for e in events if e["source"] == "user"}
+    assert authors == {account.id}
+    assert erased not in store.read_text(encoding="utf-8")
+
+
+def test_a_dry_run_counts_an_events_rekey_as_a_change(engine: Engine, root: Path) -> None:
+    erased = "user_erased"
+    ErasureLedger(engine).claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    store = root / f"{_GONE}.jsonl"
+    event = json.loads(_event(_GONE, source="user", written_by=erased))
+    store.write_text(json.dumps({**event, "reason": None, "metadata": {}}) + "\n", "utf-8")
+    _old(store)
+
+    counts = sweep_legacy_audit_files(engine, root, dry_run=True)
+
+    assert counts == LegacySweepCounts(scrubbed_unknown_owner=1)
+
+
+def test_only_an_account_erasure_rekeys_an_author(engine: Engine, root: Path) -> None:
+    """A persona erasure that happens to share the author's id is not the author's account."""
+    author = "persona_ffffffffffffffffffffffffffffffff"
+    ErasureLedger(engine).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=author, captured={}
+    )
+    store, _ = _logs(root, _GONE, author)
+
+    sweep_legacy_audit_files(engine, root)
+
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert {e["written_by"] for e in events if e["source"] == "user"} == {author}

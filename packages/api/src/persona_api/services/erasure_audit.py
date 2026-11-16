@@ -169,8 +169,18 @@ def scrub_store_audit_files(
     )
 
 
-def _contentless_line(line: str, *, persona_id: str, content_keys: frozenset[str]) -> str:
-    """The persona's event without free text or content keys; any other line unchanged."""
+def _contentless_line(
+    line: str,
+    *,
+    persona_id: str,
+    content_keys: frozenset[str],
+    rekey: Mapping[str, str] | None = None,
+) -> str:
+    """The persona's event without free text or content keys; any other line unchanged.
+
+    ``rekey`` maps an erased account's id to its erasure id: an event that account wrote names
+    the erasure instead (review M1), as the account erasure's own re-key does.
+    """
     try:
         event = json.loads(line)
     except ValueError:
@@ -183,13 +193,20 @@ def _contentless_line(line: str, *, persona_id: str, content_keys: frozenset[str
         # Only a dict is rewritten (review L3): a missing or odd metadata stays as it was, so
         # the line still reads back as the event it was.
         clean["metadata"] = {k: v for k, v in meta.items() if k not in content_keys}
+    author = event.get("written_by")
+    if rekey and isinstance(author, str) and author in rekey:
+        clean["written_by"] = rekey[author]
     if clean == event:
         return line
     return json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
 
 
 def scrub_persona_log_in_place(
-    audit_root: Path, *, persona_id: str, content_keys: frozenset[str]
+    audit_root: Path,
+    *,
+    persona_id: str,
+    content_keys: frozenset[str],
+    rekey: Mapping[str, str] | None = None,
 ) -> int:
     """Clear the persona's ``{persona}.jsonl`` of free text and content keys; lines changed.
 
@@ -201,5 +218,7 @@ def scrub_persona_log_in_place(
     with jsonl_file_lock(path):
         return _scrub_held_file(
             path,
-            lambda line: _contentless_line(line, persona_id=persona_id, content_keys=content_keys),
+            lambda line: _contentless_line(
+                line, persona_id=persona_id, content_keys=content_keys, rekey=rekey
+            ),
         )

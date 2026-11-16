@@ -175,6 +175,26 @@ def sees_every_row(engine: Engine) -> bool:
         return bool(conn.execute(_SEES_EVERY_ROW).scalar())
 
 
+def _account_erasures(engine: Engine, candidates: set[str]) -> dict[str, str]:
+    """``{account id: its erasure id}`` for candidates whose account was erased (review M1).
+
+    The account's own logs name its erasure id instead of it; a legacy persona's log is made
+    to match. The latest erasure of an account wins.
+    """
+    if not candidates:
+        return {}
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(erasures_t.c.subject_id, erasures_t.c.id)
+            .where(
+                erasures_t.c.subject_kind == SubjectKind.ACCOUNT.value,
+                erasures_t.c.subject_id.in_(sorted(candidates)),
+            )
+            .order_by(erasures_t.c.requested_at, erasures_t.c.id)
+        ).all()
+    return {str(subject): str(erasure) for subject, erasure in rows}
+
+
 def _quiet(audit_root: Path, persona_id: str, now: float) -> bool:
     for name in (f"{persona_id}{_STORE}", f"{persona_id}{_TOOLS}"):
         path = audit_root / name
@@ -183,7 +203,7 @@ def _quiet(audit_root: Path, persona_id: str, now: float) -> bool:
     return True
 
 
-def _has_content(audit_root: Path, persona_id: str) -> bool:
+def _has_content(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bool:
     """Whether an in-place clean would change anything (the dry run's question)."""
     if (audit_root / f"{persona_id}{_TOOLS}").is_file():
         return True
@@ -198,17 +218,19 @@ def _has_content(audit_root: Path, persona_id: str) -> bool:
         if not isinstance(event, dict) or event.get("persona_id") != persona_id:
             continue
         meta = event.get("metadata")
-        if event.get("reason") is not None or (
-            isinstance(meta, dict) and AUDIT_CONTENT_KEYS & meta.keys()
+        if (
+            event.get("reason") is not None
+            or (isinstance(meta, dict) and AUDIT_CONTENT_KEYS & meta.keys())
+            or event.get("written_by") in rekey
         ):
             return True
     return False
 
 
-def _clean_in_place(audit_root: Path, persona_id: str) -> bool:
+def _clean_in_place(audit_root: Path, persona_id: str, rekey: dict[str, str]) -> bool:
     removed = _remove_tool_log(audit_root, persona_id)
     lines = scrub_persona_log_in_place(
-        audit_root, persona_id=persona_id, content_keys=AUDIT_CONTENT_KEYS
+        audit_root, persona_id=persona_id, content_keys=AUDIT_CONTENT_KEYS, rekey=rekey
     )
     return bool(removed or lines)
 
@@ -241,16 +263,18 @@ def sweep_legacy_audit_files(
     counts = {f.name: 0 for f in fields(LegacySweepCounts)}
     counts["kept_known"] = len(ids) - len(leftovers)
     claims: list[tuple[str, str]] = []
-    cleans: list[tuple[str, bool]] = []
+    cleans: list[tuple[str, bool, dict[str, str]]] = []
     for pid in leftovers:  # decide: reads only
         if not _quiet(audit_root, pid, now):
             counts["kept_recent"] += 1
             continue
-        owners = _users(engine, owner_candidates(audit_root / f"{pid}{_STORE}", pid))
+        candidates = owner_candidates(audit_root / f"{pid}{_STORE}", pid)
+        owners = _users(engine, candidates)
         if len(owners) == 1:
             claims.append((pid, next(iter(owners))))
         else:
-            cleans.append((pid, bool(owners)))
+            rekey = {} if owners else _account_erasures(engine, candidates)
+            cleans.append((pid, bool(owners), rekey))
     if not dry_run:  # the database first: a claim that fails stops the sweep here
         ledger = ErasureLedger(engine)
         for pid, owner in claims:
@@ -261,8 +285,12 @@ def sweep_legacy_audit_files(
                 captured=_CAPTURED,
             )
     counts["claimed"] = len(claims)
-    for pid, ambiguous in cleans:  # then the files
-        changed = _has_content(audit_root, pid) if dry_run else _clean_in_place(audit_root, pid)
+    for pid, ambiguous, rekey in cleans:  # then the files
+        changed = (
+            _has_content(audit_root, pid, rekey)
+            if dry_run
+            else _clean_in_place(audit_root, pid, rekey)
+        )
         if not changed:
             counts["already_clean"] += 1
         elif ambiguous:
