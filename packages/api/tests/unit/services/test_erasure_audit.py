@@ -107,3 +107,29 @@ def test_the_logger_appends_under_the_same_lock(tmp_path: Path) -> None:
         assert not appended.wait(timeout=0.5), "the logger appended past the lock"
     writer.join(timeout=30)
     assert appended.is_set()
+
+
+def test_an_event_without_metadata_is_cleaned_and_stays_a_valid_event(tmp_path: Path) -> None:
+    """Review L3: the in-place clean never adds ``"metadata": null`` (AuditEvent wants a dict)."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from persona.audit import AuditEvent  # noqa: PLC0415
+    from persona_api.services.erasure_audit import scrub_persona_log_in_place  # noqa: PLC0415
+
+    event = {
+        "timestamp": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+        "persona_id": _PERSONA,
+        "action": "write",
+        "store": "self_facts",
+        "source": "user",
+        "reason": "said it",
+    }
+    log = tmp_path / f"{_PERSONA}.jsonl"
+    log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    scrub_persona_log_in_place(tmp_path, persona_id=_PERSONA, content_keys=frozenset({"x"}))
+
+    cleaned = json.loads(log.read_text(encoding="utf-8"))
+    assert "metadata" not in cleaned
+    assert cleaned["reason"] is None
+    AuditEvent.model_validate(cleaned)

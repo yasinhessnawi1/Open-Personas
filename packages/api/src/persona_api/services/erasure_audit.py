@@ -130,16 +130,14 @@ def _contentless_line(line: str, *, persona_id: str, content_keys: frozenset[str
     if not isinstance(event, dict) or event.get("persona_id") != persona_id:
         return line
     meta = event.get("metadata")
-    kept = (
-        {k: v for k, v in meta.items() if k not in content_keys} if isinstance(meta, dict) else meta
-    )
-    if kept == meta and all(event.get(f) is None for f in FREE_TEXT_FIELDS):
+    clean = {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}
+    if isinstance(meta, dict):
+        # Only a dict is rewritten (review L3): a missing or odd metadata stays as it was, so
+        # the line still reads back as the event it was.
+        clean["metadata"] = {k: v for k, v in meta.items() if k not in content_keys}
+    if clean == event:
         return line
-    return json.dumps(
-        {**event, **dict.fromkeys(FREE_TEXT_FIELDS), "metadata": kept},
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    return json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
 
 
 def scrub_persona_log_in_place(
