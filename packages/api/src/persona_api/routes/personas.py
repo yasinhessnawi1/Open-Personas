@@ -520,7 +520,10 @@ async def create_persona(
     user-supplied ``avatar_url`` always wins (criterion 6) and short-circuits the
     background avatar hook. Everything stays fail-soft (D-29-X-fail-soft).
     """
-    persona_id = persona_service.create_persona(
+    # R9-293 review HIGH-1: in a thread, never on the event loop. The create embeds the
+    # identity synchronously, and its undo (the persona erasure) may wait on the graph lock.
+    persona_id = await asyncio.to_thread(
+        persona_service.create_persona,
         rls_engine=request.app.state.rls_engine,
         embedder=request.app.state.embedder,
         audit_root=request.app.state.audit_root,
