@@ -276,6 +276,7 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
         admin_engine=request.app.state.admin_engine,
         credits_policy=request.app.state.credits_policy,
         config=request.app.state.config,
+        stripe_client=gateway.client,
     )
     try:
         verify_and_dispatch(

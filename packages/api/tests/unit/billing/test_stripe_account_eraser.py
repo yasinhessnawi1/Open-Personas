@@ -37,13 +37,18 @@ class _Fake:
         *,
         subscriptions: list[tuple[str, str]] = (),  # type: ignore[assignment]
         methods: list[str] = (),  # type: ignore[assignment]
+        sessions: list[str] = (),  # type: ignore[assignment]
         fail: dict[str, Exception] | None = None,
     ) -> None:
         self.writes: list[tuple[str, str, Any, Any]] = []
         self._subs = [SimpleNamespace(id=i, status=s) for i, s in subscriptions]
         self._methods = [SimpleNamespace(id=m) for m in methods]
+        self._sessions = [SimpleNamespace(id=c) for c in sessions]
         self._fail = fail or {}
         self.subscriptions = SimpleNamespace(list=self._list_subs, cancel=self._cancel)
+        self.checkout = SimpleNamespace(
+            sessions=SimpleNamespace(list=self._list_sessions, expire=self._expire)
+        )
         self.customers = SimpleNamespace(
             payment_methods=SimpleNamespace(list=self._list_methods), update=self._update
         )
@@ -52,6 +57,15 @@ class _Fake:
     def _maybe_fail(self, name: str) -> None:
         if name in self._fail:
             raise self._fail[name]
+
+    def _list_sessions(self, *, params: Any) -> _Listed:  # noqa: ANN401
+        self._maybe_fail("list_sessions")
+        assert params["status"] == "open", "only an open Checkout can still become a sale"
+        return _Listed(self._sessions)
+
+    def _expire(self, session_id: str, *, options: Any) -> None:  # noqa: ANN401
+        self._maybe_fail("expire")
+        self.writes.append(("expire", session_id, None, options))
 
     def _list_subs(self, *, params: Any) -> _Listed:  # noqa: ANN401
         self._maybe_fail("list_subs")
@@ -76,16 +90,18 @@ class _Fake:
 
 
 def test_it_cancels_detaches_and_relabels_under_keys_from_the_erasure() -> None:
-    fake = _Fake(subscriptions=[("sub_1", "active")], methods=["pm_1", "pm_2"])
+    fake = _Fake(subscriptions=[("sub_1", "active")], methods=["pm_1", "pm_2"], sessions=["cs_1"])
 
     counts = StripeAccountEraser(fake).erase_customer("cus_1", erasure_id=_ERASURE)
 
     assert counts == {
+        "checkout_sessions_expired": 1,
         "subscriptions_cancelled": 1,
         "payment_methods_detached": 2,
         "customers_relabelled": 1,
     }
     assert fake.writes == [
+        ("expire", "cs_1", None, {"idempotency_key": f"erase:{_ERASURE}:expire:cs_1"}),
         (
             "cancel",
             "sub_1",
@@ -116,20 +132,30 @@ def test_a_resumed_erasure_cancels_nothing_already_ended() -> None:
     assert [w for w in fake.writes if w[0] == "cancel"] == []
 
 
-@pytest.mark.parametrize("call", ["list_subs", "cancel", "list_methods", "detach", "update"])
+_CALLS = ["list_sessions", "expire", "list_subs", "cancel", "list_methods", "detach", "update"]
+
+
+@pytest.mark.parametrize("call", _CALLS)
 def test_already_gone_counts_as_done(call: str) -> None:
-    fake = _Fake(subscriptions=[("sub_1", "active")], methods=["pm_1"], fail={call: _gone()})
+    fake = _Fake(
+        subscriptions=[("sub_1", "active")],
+        methods=["pm_1"],
+        sessions=["cs_1"],
+        fail={call: _gone()},
+    )
 
     counts = StripeAccountEraser(fake).erase_customer("cus_1", erasure_id=_ERASURE)
 
     assert all(n >= 0 for n in counts.values())
-    assert sum(counts.values()) < 3, "the gone object is not counted as changed"
+    assert sum(counts.values()) == 3, "the gone object is not counted as changed, the rest are"
 
 
-@pytest.mark.parametrize("call", ["list_subs", "cancel", "list_methods", "detach", "update"])
+@pytest.mark.parametrize("call", _CALLS)
 def test_any_other_stripe_error_is_raised(call: str) -> None:
     error = stripe.APIConnectionError("network down")
-    fake = _Fake(subscriptions=[("sub_1", "active")], methods=["pm_1"], fail={call: error})
+    fake = _Fake(
+        subscriptions=[("sub_1", "active")], methods=["pm_1"], sessions=["cs_1"], fail={call: error}
+    )
 
     with pytest.raises(stripe.APIConnectionError):
         StripeAccountEraser(fake).erase_customer("cus_1", erasure_id=_ERASURE)
@@ -141,3 +167,85 @@ def test_another_invalid_request_is_raised() -> None:
 
     with pytest.raises(stripe.InvalidRequestError):
         StripeAccountEraser(fake).erase_customer("cus_1", erasure_id=_ERASURE)
+
+
+# ---- a subscription made for an erased account (review M4) -------------------------------
+
+
+class _Customers:
+    def __init__(self, metadata: dict[str, str] | None) -> None:
+        self.metadata = metadata
+        self.cancelled: list[tuple[str, Any, Any]] = []
+
+    def client(self) -> SimpleNamespace:
+        def retrieve(customer_id: str) -> SimpleNamespace:  # noqa: ARG001
+            if self.metadata is None:
+                raise _gone()
+            return SimpleNamespace(metadata=self.metadata)
+
+        def cancel(sub_id: str, *, params: Any, options: Any) -> None:  # noqa: ANN401
+            self.cancelled.append((sub_id, params, options))
+
+        return SimpleNamespace(
+            customers=SimpleNamespace(retrieve=retrieve),
+            subscriptions=SimpleNamespace(cancel=cancel),
+        )
+
+
+def test_a_subscription_for_an_erased_customer_is_cancelled_at_once() -> None:
+    from persona_api.billing.account_erasure import cancel_if_erased  # noqa: PLC0415
+
+    fake = _Customers({"user_id": _ERASURE})
+
+    assert cancel_if_erased(fake.client(), customer_id="cus_1", subscription_id="sub_new")
+    assert fake.cancelled == [
+        ("sub_new", ERASURE_CANCEL_PARAMS, {"idempotency_key": f"erase:{_ERASURE}:cancel:sub_new"})
+    ]
+
+
+@pytest.mark.parametrize("metadata", [{"user_id": "user_2abc"}, {}, None])
+def test_a_live_or_unknown_customer_is_left_alone(metadata: dict[str, str] | None) -> None:
+    from persona_api.billing.account_erasure import cancel_if_erased  # noqa: PLC0415
+
+    fake = _Customers(metadata)
+
+    assert not cancel_if_erased(fake.client(), customer_id="cus_1", subscription_id="sub_new")
+    assert fake.cancelled == []
+
+
+def test_the_webhook_cancels_a_subscription_made_for_an_erased_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """customer.subscription.updated for a customer no user owns, relabelled by an erasure."""
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    fake = _Customers({"user_id": _ERASURE})
+    monkeypatch.setattr(
+        handlers.subscription_service, "resolve_user_by_customer", lambda *_a, **_k: None
+    )
+    written: list[str] = []
+    monkeypatch.setattr(handlers, "_apply_scoped", lambda *_a: written.append("x"))
+    context = SimpleNamespace(admin_engine=None, stripe_client=fake.client(), config=None)
+    event = SimpleNamespace(data=SimpleNamespace(object={"id": "sub_new", "customer": "cus_1"}))
+
+    handlers.handle_subscription_updated(event, context)  # type: ignore[arg-type]
+    handlers.handle_subscription_created(event, context)  # type: ignore[arg-type]
+
+    assert [c[0] for c in fake.cancelled] == ["sub_new", "sub_new"]
+    assert written == [], "nothing is written for an account that no longer exists"
+
+
+def test_a_known_customer_costs_no_stripe_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    from persona_api.billing import handlers  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        handlers.subscription_service, "resolve_user_by_customer", lambda *_a, **_k: "user_live"
+    )
+    client = SimpleNamespace()  # any Stripe call would fail on this
+    context = SimpleNamespace(admin_engine=None, stripe_client=client)
+
+    assert not handlers._cancelled_for_an_erased_account(  # noqa: SLF001
+        context,  # type: ignore[arg-type]
+        {"customer": "cus_live"},
+        "sub_1",
+    )

@@ -83,12 +83,14 @@ def test_nothing_that_needs_the_users_row_runs_after_it() -> None:
 
 def test_the_late_writes_fence_rekey_and_delete_again(monkeypatch: pytest.MonkeyPatch) -> None:
     ran: list[str] = []
-    for name in ("_step_fence", "_step_audit", "_step_row"):
+    for name in ("_step_fence", "_step_audit", "_step_row", "_step_stripe"):
         monkeypatch.setattr(ae, name, lambda *_a, n=name: ran.append(n) or {n.strip("_"): 0})
 
     ae._step_late_writes(None, None)  # type: ignore[arg-type]  # noqa: SLF001
 
-    assert ran == ["_step_fence", "_step_audit", "_step_row"]
+    assert ran == ["_step_fence", "_step_audit", "_step_row", "_step_stripe"], (
+        "the stripe step again, after the row is gone (review M4)"
+    )
 
 
 # ---- the runner ------------------------------------------------------------------------

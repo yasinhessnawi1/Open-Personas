@@ -399,10 +399,13 @@ def _step_row(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
 
 
 def _step_late_writes(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
+    # The stripe step again, after the row is gone (review M4): a Checkout that completed or a
+    # subscription that appeared while the erasure ran is expired or cancelled now.
     return {
         **_step_fence(deps, erasure),
         **_step_audit(deps, erasure),
         **_step_row(deps, erasure),
+        **_step_stripe(deps, erasure),
     }
 
 
