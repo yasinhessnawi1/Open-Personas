@@ -197,6 +197,13 @@ class AccountErasureUnavailableError(PersonaError):
     """This process cannot run an account erasure (no runner or platform engine) (→ 503)."""
 
 
+class ClerkWebhookRejectedError(PersonaError):
+    """A Clerk webhook delivery failed verification or could not be read (→ 400; R9-284 T9).
+
+    ``context`` carries a short ``reason`` code, never the body or a header value.
+    """
+
+
 class ClerkCallError(PersonaError):
     """A call to Clerk's Backend API failed (R9-284 T9 account erasure).
 
@@ -678,6 +685,13 @@ def register_exception_handlers(app: FastAPI) -> None:
                 exc.message or "account deletion is not available",
                 {},
             ),
+        )
+
+    @app.exception_handler(ClerkWebhookRejectedError)
+    async def _clerk_webhook_400(_: Request, exc: ClerkWebhookRejectedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=_body("webhook_rejected", exc.message or "the webhook was rejected", {}),
         )
 
     @app.exception_handler(AccountErasedError)

@@ -251,6 +251,11 @@ class APIConfig(BaseSettings):
     clerk_secret_key: SecretStr | None = Field(
         default=None, repr=False, validation_alias="PERSONA_CLERK_SECRET_KEY"
     )
+    # R9-284 T9: the Svix signing secret (``whsec_...``) of the Clerk webhook endpoint that
+    # receives ``user.deleted``. Owner-supplied from the Clerk dashboard; never logged.
+    clerk_webhook_secret: SecretStr | None = Field(
+        default=None, repr=False, validation_alias="PERSONA_CLERK_WEBHOOK_SECRET"
+    )
     stripe_publishable_key: str = Field(
         default="", validation_alias="PERSONA_STRIPE_PUBLISHABLE_KEY"
     )

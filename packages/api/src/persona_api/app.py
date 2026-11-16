@@ -87,6 +87,7 @@ from persona_api.routes import (
     autonomy,
     billing,
     calls,
+    clerk_webhook,
     connectors,
     conversations,
     documents,
@@ -1343,6 +1344,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(runs.router)
     app.include_router(me.router)
     app.include_router(account_erase.router)  # R9-284 T9: POST /v1/me/erase (cloud only)
+    app.include_router(clerk_webhook.router)  # R9-284 T9: Clerk user.deleted (cloud only)
     app.include_router(health.router)
     app.include_router(tools.router)
     app.include_router(documents.router)
