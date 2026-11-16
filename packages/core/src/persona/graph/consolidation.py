@@ -314,6 +314,12 @@ class ConsolidationPass:
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
         started_at = datetime.now(UTC)  # a SYSTEM timestamp (watermark axis) — never salience
+        # The epoch is recorded before anything is merged, with the old watermark, so a run
+        # that dies after merging cannot hand its tag to the next run (round 10 LOW-3): the
+        # tag names the run's mirrors, closes and records, and must never be reused.
+        self._backend.advance_marker(
+            owner_id, epoch=new_epoch, watermark=watermark, last_run_at=started_at
+        )
 
         floor = self._settings.semantic_link_threshold
         ceil = self._settings.merge_extend_threshold

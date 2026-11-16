@@ -55,6 +55,9 @@ class _Backend:
         self.marker: tuple[int, datetime | None] = (0, None)
         self.disuse: list[int] = []
         self.broken_decays = 0
+        self.advances = 0
+        self.crash_at_advance = 0
+        self.run_ids: list[str] = []
 
     @contextmanager
     def maintenance_lock(self, _owner: str) -> Iterator[None]:
@@ -104,6 +107,8 @@ class _Backend:
         self.nodes[node_id] = node.model_copy(update={"metadata": kw["metadata"]})
         self.merged[node_id] = kw["merged_into"]
         state = json.loads(kw["metadata"]["_k7_merge"])["state"] if kw["merged_into"] else None
+        if kw["merged_into"]:
+            self.run_ids.append(json.loads(kw["metadata"]["_k7_merge"])["run_id"])
         self.events.append(f"record {node_id} {state or 'cleared'}")
 
     def close_edges_incident(self, _owner: str, node_id: str, **_k: Any) -> list[str]:  # noqa: ANN401
@@ -162,6 +167,9 @@ class _Backend:
         self.disuse.append(kw["current_epoch"])
 
     def advance_marker(self, _owner: str, **kw: Any) -> None:  # noqa: ANN401
+        self.advances += 1
+        if self.advances == self.crash_at_advance:
+            raise _Deadlock("the process died before the final marker")
         self.marker = (kw["epoch"], kw["watermark"])
 
 
@@ -344,13 +352,30 @@ def test_each_epoch_decays_once_through_a_crash_and_two_skipped_runs() -> None:
     consolidation = _pass(backend)
 
     with pytest.raises(_Deadlock):
-        consolidation.run("u1")  # m left pending; the run dies before its marker
-    assert backend.marker == (0, None)
+        consolidation.run("u1")  # m left pending; the run dies in its decay
+    assert backend.marker == (1, None), "its epoch was recorded first (round 10 LOW-3)"
     consolidation.run("u1")  # skipped: the give back fails
     consolidation.run("u1")  # skipped again
     healthy = consolidation.run("u1")  # given back, merges
 
     assert healthy.clusters_formed == 1
     per_epoch = Counter(backend.disuse)
-    assert sorted(per_epoch) == [1, 2, 3], "one decay pass per epoch"
+    assert sorted(per_epoch) == [2, 3, 4], "one decay pass per epoch; epoch 1 died in it"
     assert len(set(per_epoch.values())) == 1, "never twice at one epoch"
+
+
+def test_a_run_that_dies_after_merging_never_hands_its_tag_to_the_next() -> None:
+    """Round 10 LOW-3: the epoch is recorded before the merge phase."""
+    backend = _Backend(deadlocks=0)
+    backend.crash_at_advance = 2  # the run's final marker write: after it merged
+    consolidation = _pass(backend)
+
+    with pytest.raises(_Deadlock):
+        consolidation.run("u1")
+    first = set(backend.run_ids)
+    consolidation._unmerge("u1", "m")  # noqa: SLF001 - so the next run merges again
+    backend.run_ids.clear()
+    consolidation.run("u1")
+
+    assert first == {"u1:1"}
+    assert set(backend.run_ids) == {"u1:2"}, "a new tag"
