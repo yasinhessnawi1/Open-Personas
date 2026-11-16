@@ -541,3 +541,62 @@ def test_a_resume_does_not_call_stripe_or_clerk_again(
     assert "stripe" not in ran
     assert "clerk" not in ran
     assert "late_writes" in ran, "late_writes still runs (and re-runs Stripe itself)"
+
+
+# ---- survivors (review round 2: M07, M10, M44) -----------------------------------------
+
+
+def test_a_resume_runs_every_internal_step_again(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M07: only Stripe and Clerk are skipped once done; the personas step (and every other
+    internal one) runs again, since a persona may have appeared since."""
+    ran = _recording(monkeypatch)
+    erasure = _claim(engine)
+    ledger = ErasureLedger(engine)
+    for name in ("fence", "stripe", "personas", "billing", "audit", "clerk", "row"):
+        ledger.record_step(erasure.id, name, {"done": 1})
+    ledger.fail(erasure.id, "late_writes_failed")
+
+    ae.erase_account(_deps(engine), erasure)
+
+    assert ran == ["fence", "personas", "billing", "audit", "row", "late_writes"]
+
+
+def _subscription(engine: Engine, **values: object) -> None:
+    from persona_api.db.models import subscription  # noqa: PLC0415
+    from sqlalchemy import insert  # noqa: PLC0415
+
+    with engine.begin() as conn:
+        conn.execute(insert(subscription).values(user_id=_OWNER, **values))
+
+
+def test_a_free_subscription_row_is_not_a_paid_snapshot(billing_engine: Engine) -> None:
+    """M10: a subscription row with no Stripe ids is the free plan; nothing is retained."""
+    _subscription(billing_engine, plan_code="free")
+
+    erasure = ae.begin_account_erasure(billing_engine, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE)
+
+    assert erasure.captured["subscription_plan"] == []
+    assert ae.retained_subscription(erasure) is None
+
+
+def test_the_snapshot_carries_when_the_subscription_started(billing_engine: Engine) -> None:
+    """M44: the start is captured with the plan, and the retained record carries it."""
+    from datetime import datetime  # noqa: PLC0415
+
+    started = datetime(2026, 3, 1, 9, 30)  # noqa: DTZ001 - SQLite hands timestamps back naive
+    _subscription(
+        billing_engine,
+        plan_code="plus",
+        stripe_customer_id="cus_1",
+        stripe_subscription_id="sub_1",
+        created_at=started,
+    )
+
+    erasure = ae.begin_account_erasure(billing_engine, owner_id=_OWNER, origin=ae.ORIGIN_ROUTE)
+
+    assert erasure.captured["subscription_started"] == [started.isoformat()]
+    record = ae.retained_subscription(erasure)
+    assert record is not None
+    assert record["occurred_at"] == started

@@ -198,3 +198,28 @@ def test_a_success_clears_the_backoff(engine: Engine, monkeypatch: pytest.Monkey
     runner._run(erasure)  # noqa: SLF001
 
     assert not runner.backing_off(erasure.id)
+
+
+def test_boot_on_cloud_warns_about_missing_secrets(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M36: start_account_erasures calls warn_missing_secrets on a cloud boot."""
+    import asyncio  # noqa: PLC0415
+    import contextlib  # noqa: PLC0415
+
+    warned: list[object] = []
+    monkeypatch.setattr(runner_mod, "account_erase_deps_from_state", lambda _s: _deps(engine))
+    monkeypatch.setattr(runner_mod, "warn_missing_secrets", warned.append)
+    state = _state(Edition.cloud)
+
+    async def _boot() -> None:
+        task = runner_mod.start_account_erasures(state, interval_seconds=3600)
+        assert task is not None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        state.account_erase_runner.close()
+
+    asyncio.run(_boot())
+
+    assert warned == [state.config]
