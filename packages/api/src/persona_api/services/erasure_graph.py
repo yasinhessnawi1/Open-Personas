@@ -46,6 +46,7 @@ from persona.graph.maintenance_lock import (
 )
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
 from persona.graph.postgres import reopen_statement
+from persona.logging import get_logger
 from sqlalchemy import (
     BigInteger,
     Text,
@@ -69,6 +70,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from sqlalchemy.engine import Connection, Engine
+
+_log = get_logger("api.erasure")
 
 __all__ = [
     "GraphMaintenanceBusyError",
@@ -472,6 +475,13 @@ def _give_back_entity_links(
         _set_metadata(conn, owner_id, member, metadata)
     if remove and depth < _CHAIN_LIMIT:
         _pass_entity_links_up(conn, owner_id, canonical, remove, doomed, depth=depth)
+    elif remove:
+        # Round 2 LOW-3: a chain this long is not one consolidation writes; say so, ids only.
+        _log.warning(
+            "entity links not followed past the chain bound canonical={canonical} limit={limit}",
+            canonical=canonical,
+            limit=_CHAIN_LIMIT,
+        )
 
 
 #: A merge chain longer than this is not followed further (a cycle cannot be one; a guard).
