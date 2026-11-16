@@ -261,3 +261,40 @@ def test_a_fresh_move_clears_a_stale_offset(tmp_path: Path) -> None:
 
     target = tmp_path / f"{_ERASURE}.jsonl"
     assert len(target.read_text(encoding="utf-8").splitlines()) == 3, "all three kept"
+
+
+def test_each_removal_and_rename_is_synced_before_the_next(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Round 4 LOW-2: the directory is synced after the stale offset goes (before the rename),
+    after the rename, and between removing .moving and removing its offset."""
+    import pathlib  # noqa: PLC0415
+
+    from persona_api.services import account_erasure_audit as audit  # noqa: PLC0415
+
+    steps: list[str] = []
+    real_unlink, real_replace = pathlib.Path.unlink, pathlib.Path.replace
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:  # noqa: FBT001, FBT002
+        steps.append(f"unlink {self.name}")
+        real_unlink(self, missing_ok=missing_ok)
+
+    def replace(self: Path, target: Path) -> Path:
+        steps.append(f"replace {self.name}")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)  # type: ignore[attr-defined]
+    monkeypatch.setattr(pathlib.Path, "replace", replace)  # type: ignore[attr-defined]
+    monkeypatch.setattr(audit, "_fsync_dir", lambda _d: steps.append("sync"))  # type: ignore[attr-defined]
+    _owner_log(tmp_path, n=1)
+
+    audit.rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE)
+
+    moving, offset = f"{_ERASURE}.jsonl.moving", f"{_ERASURE}.jsonl.moving.offset"
+    order = [
+        s
+        for s in steps
+        if s in {f"unlink {offset}", f"replace {_OWNER}.jsonl", f"unlink {moving}", "sync"}
+    ]
+    assert order[:4] == [f"unlink {offset}", "sync", f"replace {_OWNER}.jsonl", "sync"]
+    assert order[-4:] == [f"unlink {moving}", "sync", f"unlink {offset}", "sync"]

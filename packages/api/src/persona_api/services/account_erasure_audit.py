@@ -113,12 +113,15 @@ def rekey_store_audit_file(audit_root: Path | None, *, owner_id: str, erasure_id
             if not moving.exists():
                 if not source.exists():
                     offset.unlink(missing_ok=True)  # stale: its .moving is already gone
+                    _fsync_dir(audit_root)
                     return moved
                 offset.unlink(missing_ok=True)
+                _fsync_dir(audit_root)  # the stale offset is gone for good before the rename
                 source.replace(moving)
                 _fsync_dir(audit_root)
             moved += _land(moving, target, offset, owner_id=owner_id, erasure_id=erasure_id)
             moving.unlink()
+            _fsync_dir(audit_root)  # .moving is gone for good before its offset goes
             offset.unlink(missing_ok=True)
             _fsync_dir(audit_root)
             if not source.exists():
