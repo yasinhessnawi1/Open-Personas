@@ -223,3 +223,17 @@ def test_boot_on_cloud_warns_about_missing_secrets(
     asyncio.run(_boot())
 
     assert warned == [state.config]
+
+
+@pytest.mark.parametrize("value", ["__OWNER_CLERK_PROD__", "__FROM_ENV__", " __GEN_X__ "])
+def test_a_template_placeholder_is_no_secret(value: str) -> None:
+    """Round 3 LOW-5: an unreplaced token is not a key; the feature reads as unconfigured."""
+    from pydantic import SecretStr  # noqa: PLC0415
+
+    assert runner_mod.secret_value(SecretStr(value)) is None
+
+
+def test_a_real_secret_is_kept() -> None:
+    from pydantic import SecretStr  # noqa: PLC0415
+
+    assert runner_mod.secret_value(SecretStr("sk_live_abc")) == "sk_live_abc"

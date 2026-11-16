@@ -11,6 +11,7 @@ safe.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -52,10 +53,17 @@ MAX_BACKOFF_SECONDS = 3600.0
 _DAYS_PER_YEAR = 366
 
 
+#: An env-template placeholder (``__OWNER_CLERK_PROD__`` and the like) that was never replaced.
+_PLACEHOLDER = re.compile(r"__[A-Z0-9_]+__")
+
+
 def secret_value(secret: Any) -> str | None:  # noqa: ANN401 - a SecretStr or None
-    """The secret's value, or ``None`` when it is unset or empty (an env line left blank)."""
-    value = None if secret is None else secret.get_secret_value()
-    return value or None
+    """The secret's value, or ``None`` when it is unset, empty (an env line left blank) or still
+    a template placeholder (review round 3 LOW-5): none of those is a key."""
+    value: str | None = None if secret is None else str(secret.get_secret_value()).strip()
+    if not value or _PLACEHOLDER.fullmatch(value):
+        return None
+    return value
 
 
 def warn_missing_secrets(config: Any) -> list[str]:  # noqa: ANN401 - APIConfig
