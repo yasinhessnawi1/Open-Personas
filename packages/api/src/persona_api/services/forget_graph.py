@@ -48,7 +48,7 @@ from persona_api.services.erasure_graph import (
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
-__all__ = ["ForgetReleaser", "merged_below", "shared_legacy_mirrors"]
+__all__ = ["ForgetReleaser", "merged_below", "merged_member_texts", "shared_legacy_mirrors"]
 
 _MERGE_KEY = "_k7_merge"
 
@@ -71,33 +71,50 @@ def shared_legacy_mirrors(record: dict[str, Any], others: list[dict[str, Any]]) 
     return unsourced_mirrors(record) & listed
 
 
-def merged_below(conn: Connection, owner_id: str, node_id: str) -> list[str]:
-    """Every node merged into ``node_id``, directly or down a chain, locked, in a stable order.
+def merged_below(conn: Connection, owner_id: str, node_id: str, *, lock: bool = True) -> list[str]:
+    """Every node merged into ``node_id``, directly or down a chain, in a stable order.
 
-    A pending member is merged too (``merged_into`` is set while its act runs), so it goes and
-    the next consolidation run has nothing to give back to life.
+    Locked for the forget (``lock``); read plainly for its preview. A pending member is merged
+    too (``merged_into`` is set while its act runs), so it goes and the next consolidation run
+    has nothing to give back to life. A node met twice (a cycle, which consolidation never
+    writes) is followed once.
     """
     found: list[str] = []
     seen = {node_id}
     frontier = [node_id]
     while frontier:
-        below = [
-            str(m)
-            for m in conn.execute(
-                select(nodes_t.c.id)
-                .where(
-                    nodes_t.c.owner_id == owner_id,
-                    _any_of(nodes_t.c.merged_into, frontier, Text),
-                )
-                .order_by(nodes_t.c.id)
-                .with_for_update()
-            ).scalars()
-            if str(m) not in seen
-        ]
+        stmt = (
+            select(nodes_t.c.id)
+            .where(
+                nodes_t.c.owner_id == owner_id,
+                _any_of(nodes_t.c.merged_into, frontier, Text),
+            )
+            .order_by(nodes_t.c.id)
+        )
+        if lock:
+            stmt = stmt.with_for_update()
+        below = [str(m) for m in conn.execute(stmt).scalars() if str(m) not in seen]
         seen.update(below)
         found.extend(below)
         frontier = below
     return found
+
+
+def merged_member_texts(conn: Connection, owner_id: str, node_id: str) -> list[str]:
+    """The content of every node merged into ``node_id``: what a forget of it also removes.
+
+    Round 2 LOW-1: the forget takes the members (D-R9-287-forget-canonical), so its preview
+    offers their own evidence too.
+    """
+    members = merged_below(conn, owner_id, node_id, lock=False)
+    if not members:
+        return []
+    rows = conn.execute(
+        select(nodes_t.c.content)
+        .where(nodes_t.c.owner_id == owner_id, _any_of(nodes_t.c.id, members, Text))
+        .order_by(nodes_t.c.id)
+    ).scalars()
+    return [str(content) for content in rows if content]
 
 
 def _read_sources(conn: Connection, owner_id: str) -> tuple[_Mirrors, dict[str, dict[str, Any]]]:

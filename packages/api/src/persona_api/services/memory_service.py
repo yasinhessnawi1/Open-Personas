@@ -541,6 +541,9 @@ def forget_preview(
     node = graph_store.get_node(owner_id, node_id)
     if node is None:
         return []
+    # R9-287 round 2 LOW-1: the forget takes every node merged into this one, so their own
+    # evidence is offered too.
+    texts = [node.content, *_member_texts(rls_engine, owner_id, node_id)]
     episodic = EpisodicStore(backend=memory_backend, audit_logger=audit_logger)
     personas = _list_all_owner_personas(rls_engine)
     candidates: list[ForgetCandidate] = []
@@ -548,7 +551,7 @@ def forget_preview(
         persona_id = str(row["id"])
         persona_name = persona_name_from_yaml(str(row.get("yaml") or "")) or persona_id
         for chunk, similarity in _match_episodic_chunks(
-            episodic, persona_id, [node.content], floor, top_k=_FORGET_QUERY_TOP_K
+            episodic, persona_id, texts, floor, top_k=_FORGET_QUERY_TOP_K
         ):
             candidates.append(
                 ForgetCandidate(
@@ -562,6 +565,14 @@ def forget_preview(
             )
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
+
+
+def _member_texts(rls_engine: Engine, owner_id: str, node_id: str) -> list[str]:
+    """The content of the nodes merged into ``node_id`` (owner-scoped, on the RLS engine)."""
+    from persona_api.services.forget_graph import merged_member_texts  # noqa: PLC0415
+
+    with rls_engine.connect() as conn:
+        return merged_member_texts(conn, owner_id, node_id)
 
 
 def _match_episodic_chunks(
