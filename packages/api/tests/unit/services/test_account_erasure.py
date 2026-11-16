@@ -648,3 +648,27 @@ def test_the_personas_step_records_every_persona_it_met(
     recorded = ErasureLedger(billing_engine).get(SubjectKind.ACCOUNT, _OWNER)
     assert recorded is not None
     assert recorded.captured["personas"] == ["persona_a", "persona_late"]
+
+
+def test_the_audit_step_rekeys_the_logs_of_the_whole_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4 LOW-4 (the reviewer's M10): the audit step passes personas_ever_owned (captured,
+    met and erased before) to the log re-key, not only the claim's captured personas."""
+    asked: list[list[str]] = []
+    monkeypatch.setattr(ae, "personas_ever_owned", lambda *_a: ["persona_now", "persona_old"])
+    monkeypatch.setattr(ae, "rekey_store_audit_rows", lambda *_a, **_k: 0)
+    monkeypatch.setattr(ae, "rekey_store_audit_file", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        ae, "rekey_persona_audit_files", lambda _root, ids, **_k: asked.append(ids) or 0
+    )
+    conn = _RowConn([])
+    deps = _deps(_RowEngine(conn))  # type: ignore[arg-type]
+    deps.persona.audit_root = None  # type: ignore[attr-defined]
+    erasure = SimpleNamespace(
+        owner_id=_OWNER, id="erasure_1", captured={"personas": ["persona_now"]}
+    )
+
+    ae._step_audit(deps, erasure)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert asked == [["persona_now", "persona_old"]]

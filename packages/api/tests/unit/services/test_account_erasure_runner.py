@@ -237,3 +237,12 @@ def test_a_real_secret_is_kept() -> None:
     from pydantic import SecretStr  # noqa: PLC0415
 
     assert runner_mod.secret_value(SecretStr("sk_live_abc")) == "sk_live_abc"
+
+
+def test_a_real_key_with_a_placeholder_like_part_is_kept() -> None:
+    """Round 4 LOW-4 (the reviewer's M12): only a whole placeholder is unset."""
+    from pydantic import SecretStr  # noqa: PLC0415
+
+    key = "sk_live_ab__X__cd"
+
+    assert runner_mod.secret_value(SecretStr(key)) == key

@@ -315,3 +315,14 @@ def test_an_offset_past_the_end_never_pads_the_log(tmp_path: Path) -> None:
     data = target.read_bytes()
     assert b"\x00" not in data, "no NUL padding"
     assert len(data.decode("utf-8").splitlines()) == 2
+
+
+def test_a_stale_offset_with_nothing_to_move_is_removed(tmp_path: Path) -> None:
+    """Round 4 LOW-4 (the reviewer's M5): no owner log and no .moving, only a stale offset
+    from a crash between the removals; nothing is moved and no file is left behind."""
+    stale = tmp_path / f"{_ERASURE}.jsonl.moving.offset"
+    stale.write_text("0", encoding="ascii")
+
+    assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 0
+
+    assert not stale.exists()
