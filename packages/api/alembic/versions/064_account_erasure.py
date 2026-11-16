@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from alembic import op
 from persona_api.db.models import erasures, retained_billing_records
+from sqlalchemy import inspect, text
 
 revision = "064_account_erasure"
 down_revision = "063_graph_erasure_backfill"
@@ -38,5 +39,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    retained_billing_records.drop(op.get_bind(), checkfirst=True)
-    _INDEX.drop(op.get_bind(), checkfirst=True)
+    """Refuses while the table holds records (review L5): they are kept for the legal retention
+    period, and a downgrade must not be the way they are lost."""
+    bind = op.get_bind()
+    if inspect(bind).has_table(_TABLE):
+        kept = bind.execute(text(f"SELECT 1 FROM {_TABLE} LIMIT 1")).first()  # noqa: S608
+        if kept is not None:
+            msg = (
+                f"refusing to downgrade 064: {_TABLE} holds billing records kept for the legal "
+                "retention period; move them out first"
+            )
+            raise RuntimeError(msg)
+    retained_billing_records.drop(bind, checkfirst=True)
+    _INDEX.drop(bind, checkfirst=True)

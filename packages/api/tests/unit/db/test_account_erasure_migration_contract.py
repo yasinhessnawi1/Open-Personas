@@ -44,3 +44,47 @@ def test_the_retained_table_outlives_the_user_and_is_platform_only() -> None:
 def test_a_resumed_copy_cannot_add_a_row_twice() -> None:
     (unique,) = [i for i in retained_billing_records.indexes if i.unique]
     assert [c.name for c in unique.columns] == ["erasure_id", "source_table", "source_id"]
+
+
+def _sqlite_with_tables(*, kept: bool) -> object:
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
+
+    engine = create_engine("sqlite://")
+    erasures.create(engine)
+    with engine.begin() as conn:  # the real table needs Postgres; its name is what matters
+        conn.execute(text("CREATE TABLE retained_billing_records (id TEXT PRIMARY KEY)"))
+        if kept:
+            conn.execute(text("INSERT INTO retained_billing_records (id) VALUES ('r1')"))
+    return engine
+
+
+def _downgrade_on(engine: object, monkeypatch: object) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    module = _module()
+    with engine.begin() as conn:  # type: ignore[attr-defined]
+        monkeypatch.setattr(module, "op", SimpleNamespace(get_bind=lambda: conn))  # type: ignore[attr-defined]
+        module.downgrade()
+
+
+def test_the_downgrade_refuses_while_records_are_retained(monkeypatch: object) -> None:
+    """Review L5: retained billing records are not lost to a downgrade."""
+    import pytest  # noqa: PLC0415
+    from sqlalchemy import inspect  # noqa: PLC0415
+
+    engine = _sqlite_with_tables(kept=True)
+
+    with pytest.raises(RuntimeError, match="refusing to downgrade 064"):
+        _downgrade_on(engine, monkeypatch)
+
+    assert inspect(engine).has_table("retained_billing_records"), "nothing was dropped"
+
+
+def test_the_downgrade_drops_an_empty_table(monkeypatch: object) -> None:
+    from sqlalchemy import inspect  # noqa: PLC0415
+
+    engine = _sqlite_with_tables(kept=False)
+
+    _downgrade_on(engine, monkeypatch)
+
+    assert not inspect(engine).has_table("retained_billing_records")
