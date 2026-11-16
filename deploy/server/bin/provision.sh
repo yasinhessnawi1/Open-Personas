@@ -434,30 +434,16 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 # --- containerd's root on the block volume (R9-289) -----------------------------------------
 # Docker keeps image layers in containerd's snapshotter, under containerd's root and not under
-# its data-root: on the boot disk unless moved. The root is set once, on a fresh host, and
-# containerd restarts on it before Docker restarts below. A root already holding containers or
-# images is never moved (lib/containerd_root.sh refuses another root already set).
+# its data-root: on the boot disk unless moved. Set on a fresh host, before Docker restarts
+# below; a host already on the root (the Oracle host, moved by hand) is a clean no-op, images
+# and all. A root that must still move is never moved under containers or images
+# (lib/containerd_root.sh, apply_containerd_root).
 if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then
   # shellcheck source=lib/containerd_root.sh
   . "${SCRIPT_DIR}/lib/containerd_root.sh"
-  containerd_config="$(containerd_config_with_root /etc/containerd/config.toml "${OP_CONTAINERD_ROOT}")" \
-    || die "containerd's root is set elsewhere; move what it holds before switching to ${OP_CONTAINERD_ROOT}"
-  if [ "${containerd_config}" != "$(cat /etc/containerd/config.toml 2>/dev/null || true)" ]; then
-    if [ -n "$(docker ps -aq 2>/dev/null)$(docker images -q 2>/dev/null)" ]; then
-      die "Docker holds containers or images; move them before putting containerd's root at ${OP_CONTAINERD_ROOT}"
-    fi
-    install -d -m 0711 "${OP_CONTAINERD_ROOT}"
-    printf '%s\n' "${containerd_config}" | write_file /etc/containerd/config.toml
-  fi
-  if [ -n "${OP_DATA_MOUNT:-}" ]; then
-    # containerd never starts without the block volume either.
-    write_file /etc/systemd/system/containerd.service.d/10-open-persona.conf <<EOF
-[Unit]
-RequiresMountsFor=${OP_DATA_MOUNT}
-EOF
-  fi
-  systemctl daemon-reload
-  systemctl restart containerd
+  apply_containerd_root /etc/containerd/config.toml "${OP_CONTAINERD_ROOT}" "${OP_DATA_MOUNT:-}" \
+    /etc/systemd/system/containerd.service.d/10-open-persona.conf \
+    || die "containerd's root cannot move to ${OP_CONTAINERD_ROOT} (see above): RUNBOOK.md, 'containerd's root'"
 fi
 # Moving the data root under existing containers or images would orphan them silently.
 current_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"

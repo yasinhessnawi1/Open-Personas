@@ -244,8 +244,36 @@ backup of the block volume, "provisioned, empty".
   missing".
 
 Reattach it in the console (paravirtualized), then `sudo mount /srv` and
-`sudo systemctl start docker`. `provision.sh` refuses to format a device that already holds
+`sudo systemctl start containerd docker`. `provision.sh` refuses to format a device that already holds
 anything but its own `op-data` filesystem, and refuses to mount over a non-empty `/srv`.
+
+### containerd's root (R9-289)
+
+Docker keeps its image layers in containerd's snapshotter, under containerd's root, not under
+Docker's data root. `provision.sh` puts that root on the block volume (`OP_CONTAINERD_ROOT`,
+`/srv/containerd` on Oracle) on a fresh host. It refuses to move a root that must change
+while Docker holds containers or images, and it is a clean no-op on a host already on the
+root (no change, no restart).
+
+**The Oracle core host was moved by hand on 2026-11-16, 17:22 to 17:28 UTC**, with the
+owner's approval: its `/etc/containerd/config.toml` starts with `root = "/srv/containerd"`,
+the original is kept as `/etc/containerd/config.toml.bak-r9289`, and `/var/lib/containerd`
+is gone. Re-running `provision.sh` there changes nothing.
+
+For any other host that already holds images on the boot disk, as root, outside call hours:
+
+```bash
+systemctl stop docker docker.socket containerd
+cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289
+rsync -aHAX /var/lib/containerd/ /srv/containerd/
+sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
+systemctl start containerd docker
+docker images                      # the images are all there
+rm -rf /var/lib/containerd         # only once they are
+```
+
+Then re-run `provision.sh`: it adds containerd's wait for the block volume and is otherwise
+a no-op.
 
 ## Step 4: the env files
 

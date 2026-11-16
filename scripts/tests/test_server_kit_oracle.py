@@ -621,12 +621,90 @@ def test_a_missing_config_becomes_just_the_root(tmp_path: Path) -> None:
     assert result.stdout == 'root = "/srv/containerd"\n'
 
 
-def test_provision_moves_containerd_before_docker_restarts_and_never_under_images() -> None:
+def test_provision_sets_containerds_root_before_docker_restarts() -> None:
     provision = _text("bin/provision.sh")
-    containerd = provision.index("systemctl restart containerd")
-    assert provision.index('. "${SCRIPT_DIR}/lib/containerd_root.sh"') < containerd
-    assert containerd < provision.index("systemctl restart docker")
-    block = provision[provision.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then') : containerd]
-    assert "$(docker ps -aq 2>/dev/null)$(docker images -q 2>/dev/null)" in block
-    assert "containerd.service.d/10-open-persona.conf" in block
-    assert "RequiresMountsFor=${OP_DATA_MOUNT}" in block
+    lib = provision.index('. "${SCRIPT_DIR}/lib/containerd_root.sh"')
+    apply = provision.index("apply_containerd_root /etc/containerd/config.toml")
+    assert lib < apply < provision.index("systemctl restart docker")
+    call = provision[apply : provision.index("\n", provision.index("|| die", apply))]
+    assert '"${OP_CONTAINERD_ROOT}" "${OP_DATA_MOUNT:-}"' in call
+    assert "containerd.service.d/10-open-persona.conf" in call
+
+
+STUB_DOCKER = '#!/usr/bin/env bash\ncat "${STUB_DIR}/docker.out" 2>/dev/null || true\n'
+STUB_SYSTEMCTL = '#!/usr/bin/env bash\necho "$*" >> "${STUB_DIR}/systemctl.log"\n'
+# `install -d -m MODE DIR`, as the lib calls it: the directory, without the chmod (which Git
+# Bash cannot do under a Windows temp directory).
+STUB_INSTALL = '#!/usr/bin/env bash\nmkdir -p "${@: -1}"\n'
+MOVED = 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+DROPIN = "[Unit]\nRequiresMountsFor=/srv\n"
+
+
+def _apply(
+    tmp_path: Path, *, config: str | None, images: str, dropin: str | None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """apply_containerd_root on files under tmp_path, with docker and systemctl stubbed."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in (
+        ("docker", STUB_DOCKER),
+        ("systemctl", STUB_SYSTEMCTL),
+        ("install", STUB_INSTALL),
+    ):
+        (stubs / name).write_text(body, encoding="utf-8", newline="\n")
+        (stubs / name).chmod(0o755)
+    (stubs / "docker.out").write_text(images, encoding="utf-8", newline="\n")
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    if config is not None:
+        (etc / "config.toml").write_text(config, encoding="utf-8", newline="\n")
+    if dropin is not None:
+        (etc / "dropin.conf").write_text(dropin, encoding="utf-8", newline="\n")
+    result = _bash(
+        # A POSIX path for PATH: a "C:/..." entry would split at its colon.
+        f'set -eu; export STUB_DIR="{stubs.as_posix()}"; '
+        f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"; '
+        f'. "{(LIB / "containerd_root.sh").as_posix()}"; '
+        f'apply_containerd_root "{(etc / "config.toml").as_posix()}" '
+        f'"{(tmp_path / "srv-containerd").as_posix()}" /srv "{(etc / "dropin.conf").as_posix()}"'
+    )
+    log = stubs / "systemctl.log"
+    return result, log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@needs_bash
+def test_a_host_already_on_the_root_with_images_is_a_clean_no_op(tmp_path: Path) -> None:
+    """The Oracle host, moved by hand on 2026-11-16: the root is set and Docker holds images.
+
+    Re-running provision must neither die on the images nor touch or restart anything.
+    """
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=DROPIN)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert systemctl == [], "no reload, no restart"
+    assert not (tmp_path / "srv-containerd").exists(), "nothing created"
+
+
+@needs_bash
+def test_a_root_to_move_under_images_is_refused_and_nothing_changes(tmp_path: Path) -> None:
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="sha256:abc\n", dropin=None
+    )
+    assert result.returncode == 1
+    assert "Docker holds containers or images" in result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
+
+
+@needs_bash
+def test_a_fresh_host_gets_the_root_the_drop_in_and_one_restart(tmp_path: Path) -> None:
+    root = (tmp_path / "srv-containerd").as_posix()
+    result, systemctl = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    config = (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8")
+    assert config == f'root = "{root}"\n' + CONTAINERD_DEFAULT
+    assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
+    assert (tmp_path / "srv-containerd").is_dir()
+    assert systemctl == ["daemon-reload", "restart containerd"]
