@@ -32,7 +32,11 @@ from persona_api.db.models import jobs as jobs_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
 from persona_api.jobs.queue import JobQueue
-from persona_api.services.erasure_graph import erase_persona_graph, erased_personas_in_graph
+from persona_api.services.erasure_graph import (
+    GraphMaintenanceBusyError,
+    erase_persona_graph,
+    erased_personas_in_graph,
+)
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_service import (
     PERMANENT_REFUSALS,
@@ -384,7 +388,17 @@ class PersonaEraseSweep:
                 self._last_full_pass = now
         for owner_id, persona_id in sorted({*found, *self._retry}):
             try:
-                counts = erase_persona_graph(self._engine, owner_id=owner_id, persona_id=persona_id)
+                # Never wait here: the sweep runs on the worker's event loop, and a
+                # consolidation run of this owner may hold the graph lock (round 6 M-3).
+                counts = erase_persona_graph(
+                    self._engine, owner_id=owner_id, persona_id=persona_id, wait=False
+                )
+            except GraphMaintenanceBusyError:
+                self._retry.add((owner_id, persona_id))
+                _log.info(
+                    "graph backstop deferred, consolidation running persona={pid}", pid=persona_id
+                )
+                continue
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
                 self._retry.add((owner_id, persona_id))
                 _log.error(

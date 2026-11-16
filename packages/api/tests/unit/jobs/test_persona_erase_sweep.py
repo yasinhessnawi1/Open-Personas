@@ -133,7 +133,7 @@ def test_the_graph_backstop_runs_every_sweep_and_marks_nothing(
     left = {(_OWNER, _persona("a")), (_OWNER, _persona("b"))}
     erased: list[str] = []
 
-    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str, **_kw: bool) -> dict[str, int]:
         erased.append(persona_id)
         if persona_id == _persona("a"):
             raise RuntimeError("a lock timed out")
@@ -195,7 +195,7 @@ def test_a_backstop_aborted_by_postgres_is_tried_again_next_sweep(
     left = {(_OWNER, _persona("a"))}
     tries: list[str] = []
 
-    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str, **_kw: bool) -> dict[str, int]:
         tries.append(persona_id)
         if len(tries) == 1:
             raise OperationalError("DELETE", {}, psycopg.errors.lookup(sqlstate)("aborted"))
@@ -299,7 +299,7 @@ def test_a_persona_only_the_full_pass_found_is_retried_on_the_next_sweep(
     def _find(_engine: Engine, *, since: datetime | None) -> list[tuple[str, str]]:
         return [old] if since is None else []
 
-    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:  # noqa: ARG001
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str, **_kw: bool) -> dict[str, int]:  # noqa: ARG001
         tries.append(persona_id)
         if len(tries) == 1:
             raise RuntimeError("a lock timed out")
@@ -320,3 +320,43 @@ def test_a_persona_only_the_full_pass_found_is_retried_on_the_next_sweep(
         sweep()
 
     assert tries == [_persona("a"), _persona("a")], "retried once, then done"
+
+
+def test_a_busy_graph_lock_defers_the_persona_and_nothing_waits(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 6 M-3: the sweep runs on the worker's event loop, so it never waits for the lock."""
+    from persona_api.services.erasure_graph import GraphMaintenanceBusyError  # noqa: PLC0415
+
+    left = {(_OWNER, _persona("a"))}
+    calls: list[bool] = []
+    errors: list[str] = []
+    infos: list[str] = []
+
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str, wait: bool) -> dict[str, int]:
+        calls.append(wait)
+        if len(calls) == 1:
+            raise GraphMaintenanceBusyError(owner_id)
+        left.discard((owner_id, persona_id))
+        return {"nodes_deleted": 1}
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
+    monkeypatch.setattr(persona_erase._log, "error", lambda msg, **_k: errors.append(msg))  # noqa: SLF001
+    monkeypatch.setattr(persona_erase._log, "info", lambda msg, **_k: infos.append(msg))  # noqa: SLF001
+    clock = _Clock()
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, *, since: sorted(left) if since is None else [],  # noqa: ARG005
+        clock=clock,
+    )
+
+    sweep()
+    clock.now = _NOW + timedelta(minutes=1)
+    sweep()  # a windowed look, which does not see it: the retry does
+
+    assert calls == [False, False], "never asked to wait"
+    assert left == set()
+    assert errors == []
+    assert any("deferred" in m for m in infos)

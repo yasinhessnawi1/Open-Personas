@@ -240,3 +240,27 @@ def test_a_merge_from_a_canonical_read_before_an_erasure_leaves_nothing_of_it(
     canonical = backend.get_node(_OWNER, "s_k")
     assert canonical is not None
     assert {p.persona_id for p in canonical.provenance} == {_Q}
+
+
+def test_the_sweep_returns_promptly_while_a_consolidation_holds_the_lock(
+    migrated_engine: Engine, backend: PostgresGraphBackend
+) -> None:
+    """Round 6 M-3: the sweep runs on the worker's event loop; it defers the owner, not waits."""
+    import time  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona_api.jobs.handlers.persona_erase import PersonaEraseSweep  # noqa: PLC0415
+
+    sweep = PersonaEraseSweep(
+        engine=migrated_engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: [(_OWNER, _P)],
+    )
+    with backend.maintenance_lock(_OWNER):
+        started = time.perf_counter()
+        sweep()
+        elapsed = time.perf_counter() - started
+
+    assert elapsed < 5.0, f"the sweep waited {elapsed:.1f}s"
+    assert sweep._retry == {(_OWNER, _P)}  # noqa: SLF001 - deferred to the next sweep

@@ -40,6 +40,7 @@ __all__ = [
     "GRAPH_MAINTENANCE_CLASS",
     "graph_maintenance_held",
     "take_graph_maintenance_lock",
+    "try_graph_maintenance_lock",
 ]
 
 _log = get_logger("graph.maintenance_lock")
@@ -50,6 +51,7 @@ _KEY = f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)"
 _SESSION_LOCK = text(f"SELECT pg_advisory_lock({_KEY})")
 _SESSION_UNLOCK = text(f"SELECT pg_advisory_unlock({_KEY})")
 _XACT_LOCK = text(f"SELECT pg_advisory_xact_lock({_KEY})")
+_XACT_TRY = text(f"SELECT pg_try_advisory_xact_lock({_KEY})")
 
 
 def take_graph_maintenance_lock(conn: Connection, owner_id: str) -> None:
@@ -60,6 +62,18 @@ def take_graph_maintenance_lock(conn: Connection, owner_id: str) -> None:
     """
     if conn.dialect.name == "postgresql":
         conn.execute(_XACT_LOCK, {"owner": owner_id})
+
+
+def try_graph_maintenance_lock(conn: Connection, owner_id: str) -> bool:
+    """Take the owner's lock for the rest of the transaction if it is free; never wait.
+
+    For a caller on an event loop (the sweep runs as a worker maintenance hook): waiting for a
+    whole consolidation run there would stall every other task (round 6 M-3). ``True`` off
+    Postgres, where there is no graph and nothing to wait for.
+    """
+    if conn.dialect.name != "postgresql":
+        return True
+    return bool(conn.execute(_XACT_TRY, {"owner": owner_id}).scalar())
 
 
 @contextmanager

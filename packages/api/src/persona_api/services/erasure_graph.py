@@ -40,7 +40,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from persona.graph.maintenance_lock import take_graph_maintenance_lock
+from persona.graph.maintenance_lock import (
+    take_graph_maintenance_lock,
+    try_graph_maintenance_lock,
+)
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
 from sqlalchemy import cast, delete, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -55,6 +58,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
 __all__ = [
+    "GraphMaintenanceBusyError",
     "GraphPlan",
     "erase_persona_graph",
     "delete_mirrors",
@@ -924,7 +928,13 @@ def erased_personas_in_graph(
         return [(str(o), str(p)) for o, p in conn.execute(_LEFTOVERS, {"since": since})]
 
 
-def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:
+class GraphMaintenanceBusyError(RuntimeError):
+    """A consolidation run holds the owner's graph lock, and the caller would not wait."""
+
+
+def erase_persona_graph(
+    engine: Engine, *, owner_id: str, persona_id: str, wait: bool = True
+) -> dict[str, int]:
     """Take the persona out of its owner's graph, in one transaction; return the counts.
 
     Nodes first, so the edges and entity links of deleted nodes go by cascade before the
@@ -939,7 +949,12 @@ def erase_persona_graph(engine: Engine, *, owner_id: str, persona_id: str) -> di
         # starts, and none starts until this commits (D-R9-284-graph-mutex; why no deadlock
         # cycle passes through it: persona.graph.maintenance_lock). The persona row itself was
         # deleted earlier, in its own transaction, without this lock.
-        take_graph_maintenance_lock(conn, owner_id)
+        # ``wait=False`` (the sweep, on the worker's event loop, round 6 M-3) does not wait
+        # for a running consolidation: it raises, and the sweep tries the persona again.
+        if wait:
+            take_graph_maintenance_lock(conn, owner_id)
+        elif not try_graph_maintenance_lock(conn, owner_id):
+            raise GraphMaintenanceBusyError(owner_id)
         mirrors = _read_mirrors(conn, owner_id, persona_id)
         return {
             **_nodes(conn, owner_id, persona_id, mirrors),

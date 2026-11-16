@@ -55,3 +55,29 @@ def test_the_graph_step_takes_the_owners_lock_before_any_row_lock() -> None:
     assert first.startswith("SELECT pg_advisory_xact_lock(")
     assert f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)" in first
     assert params == {"owner": "u1"}
+
+
+class _BusyConn(_Conn):
+    def execute(self, stmt: Any, params: Any = None) -> Any:  # noqa: ANN401
+        self._log.append((str(stmt), params))
+        return type("R", (), {"scalar": lambda _self: False})()
+
+
+class _BusyEngine(_Engine):
+    @contextmanager
+    def begin(self) -> Iterator[_Conn]:
+        yield _BusyConn(self.log)
+
+
+def test_without_waiting_a_busy_lock_raises_before_any_other_statement() -> None:
+    """Round 6 M-3: the sweep's call tries the lock once and gives up."""
+    from persona_api.services.erasure_graph import GraphMaintenanceBusyError  # noqa: PLC0415
+
+    engine = _BusyEngine()
+
+    with pytest.raises(GraphMaintenanceBusyError):
+        erase_persona_graph(engine, owner_id="u1", persona_id="persona_" + "a" * 32, wait=False)  # type: ignore[arg-type]
+
+    ((first, params),) = engine.log
+    assert first.startswith("SELECT pg_try_advisory_xact_lock(")
+    assert params == {"owner": "u1"}
