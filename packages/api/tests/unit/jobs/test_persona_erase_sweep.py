@@ -452,3 +452,29 @@ def test_on_the_event_loop_the_bounded_wait_runs_in_a_thread(
     assert len(threads) == 1
     assert threads[0] != loop_thread, "the wait ran in a worker thread"
     assert sweep._deferrals == {}  # noqa: SLF001
+
+
+def test_after_a_timed_out_wait_a_later_sweep_waits_again(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer's M20: a failed wait leaves the persona to be waited for again."""
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    failure = OperationalError("SELECT pg_advisory_xact_lock", {}, Exception("lock timeout"))
+    calls, erase = _always_busy_then(failure)
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", erase)
+    monkeypatch.setattr(persona_erase._log, "error", lambda _msg, **_k: None)  # noqa: SLF001
+    key = (_OWNER, _persona("a"))
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: [key],
+    )
+
+    for _ in range(persona_erase.DEFERRALS_BEFORE_WAIT):
+        sweep()
+    assert len([c for c in calls if c["wait"] is True]) == 1
+    sweep()
+
+    assert len([c for c in calls if c["wait"] is True]) == 2, "it waits again"

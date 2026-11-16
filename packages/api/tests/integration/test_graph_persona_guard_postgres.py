@@ -169,3 +169,31 @@ def test_the_row_stays_held_until_the_write_commits(
         assert "racing" in _nodes(migrated_engine), "the writer that held the row committed"
     with migrated_engine.begin() as conn:  # once the write has committed, the delete goes through
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+
+def test_a_record_that_fails_after_the_insert_lands_no_link(app_engine: Engine) -> None:
+    """Reviewer's M22: the links and the record are one transaction on Postgres too."""
+    from persona.graph.models import CanonicalEntity  # noqa: PLC0415
+
+    backend = PostgresGraphBackend(engine=app_engine, persona_guard=True)
+    backend.insert_node(_OWNER, _node("r_k"), [0.0] * 384)
+    backend.insert_entity(
+        _OWNER, CanonicalEntity(id="r_ent", canonical_name="r_ent", created_at=_NOW), [0.0] * 384
+    )
+
+    def _broken(_added: list[str]) -> tuple[dict[str, str], str]:
+        raise RuntimeError("the record could not be built")
+
+    with pytest.raises(RuntimeError, match="could not be built"):
+        backend.associate_entities_recording(
+            _OWNER,
+            "r_k",
+            ["r_ent"],
+            member_id="r_m",
+            merged_into="r_k",
+            replaces="{}",
+            record=_broken,
+            guard_personas=[_PERSONA],
+        )
+
+    assert backend.entities_for_node(_OWNER, "r_k") == []

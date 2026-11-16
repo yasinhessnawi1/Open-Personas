@@ -167,3 +167,33 @@ def test_the_erasures_unmerge_of_members_never_makes_a_second_open_row() -> None
 
     reopen = next(sql for sql, _ in log if sql.startswith("UPDATE graph_edges"))
     assert "NOT (EXISTS (SELECT open_twin.id" in reopen
+
+
+def test_a_bounded_wait_sets_a_local_lock_timeout_before_the_lock() -> None:
+    """Reviewer's M15 and M16: set_config(..., true) is SET LOCAL, and it comes first."""
+
+    class _TwoStatements(_Conn):
+        def execute(self, stmt: Any, params: Any = None) -> _EmptyResult:  # noqa: ANN401
+            self._log.append((str(stmt), params))
+            if len(self._log) == 2:
+                raise _StopError
+            return _EmptyResult()
+
+    class _Engine2(_Engine):
+        @contextmanager
+        def begin(self) -> Iterator[_Conn]:
+            yield _TwoStatements(self.log)
+
+    engine = _Engine2()
+    with pytest.raises(_StopError):
+        erase_persona_graph(
+            engine,  # type: ignore[arg-type]
+            owner_id="u1",
+            persona_id="persona_" + "a" * 32,
+            lock_timeout_ms=60_000,
+        )
+
+    (timeout_sql, timeout_params), (lock_sql, _) = engine.log
+    assert timeout_sql == "SELECT set_config('lock_timeout', :t, true)", "true: this txn only"
+    assert timeout_params == {"t": "60000ms"}
+    assert lock_sql.startswith("SELECT pg_advisory_xact_lock(")
