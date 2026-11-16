@@ -360,3 +360,95 @@ def test_a_busy_graph_lock_defers_the_persona_and_nothing_waits(
     assert left == set()
     assert errors == []
     assert any("deferred" in m for m in infos)
+
+
+def _always_busy_then(outcome: object) -> tuple[list[dict[str, object]], object]:
+    """A graph step that is always busy without waiting, and does ``outcome`` when it waits."""
+    from persona_api.services.erasure_graph import GraphMaintenanceBusyError  # noqa: PLC0415
+
+    calls: list[dict[str, object]] = []
+
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str, **kw: object) -> dict[str, int]:
+        calls.append({"persona": persona_id, **kw})
+        if kw.get("wait", True):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return {"nodes_deleted": 1}
+        raise GraphMaintenanceBusyError(owner_id)
+
+    return calls, _erase
+
+
+@pytest.mark.parametrize("outcome", ["success", "timeout"])
+def test_ten_deferrals_in_a_row_make_the_sweep_wait_for_the_lock(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """Round 7 LOW-4: the waiting run is bounded, and a timeout is an operator alert."""
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    failure = OperationalError("SELECT pg_advisory_xact_lock", {}, Exception("lock timeout"))
+    calls, erase = _always_busy_then(failure if outcome == "timeout" else None)
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", erase)
+    errors: list[str] = []
+    monkeypatch.setattr(persona_erase._log, "error", lambda msg, **_k: errors.append(msg))  # noqa: SLF001
+    key = (_OWNER, _persona("a"))
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: [key],
+    )
+
+    for _ in range(persona_erase.DEFERRALS_BEFORE_WAIT - 1):
+        sweep()
+    assert all(c["wait"] is False for c in calls), "nine deferrals: still never waits"
+    sweep()  # the tenth: no event loop here, so the bounded wait runs inline
+
+    waited = [c for c in calls if c["wait"] is True]
+    assert waited == [
+        {"persona": key[1], "wait": True, "lock_timeout_ms": persona_erase.WAIT_LOCK_TIMEOUT_MS}
+    ]
+    if outcome == "success":
+        assert sweep._deferrals == {}, "reset on success"  # noqa: SLF001
+        assert key not in sweep._retry  # noqa: SLF001
+        assert errors == []
+    else:
+        assert any(m.startswith("OPERATOR ALERT: graph backstop blocked") for m in errors)
+        assert key in sweep._retry, "tried again next sweep"  # noqa: SLF001
+
+
+def test_on_the_event_loop_the_bounded_wait_runs_in_a_thread(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep returns at once; the wait happens off the loop."""
+    import asyncio  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+
+    calls, erase = _always_busy_then(None)
+    threads: list[int] = []
+
+    def _erase(*args: object, **kwargs: object) -> object:
+        if kwargs.get("wait") is True:
+            threads.append(threading.get_ident())
+        return erase(*args, **kwargs)  # type: ignore[operator]
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine, **_kw: [(_OWNER, _persona("a"))],
+    )
+    sweep._deferrals[(_OWNER, _persona("a"))] = persona_erase.DEFERRALS_BEFORE_WAIT - 1  # noqa: SLF001
+
+    async def _on_the_loop() -> int:
+        sweep()
+        loop_thread = threading.get_ident()
+        await asyncio.gather(*sweep._tasks)  # noqa: SLF001
+        return loop_thread
+
+    loop_thread = asyncio.run(_on_the_loop())
+
+    assert len(threads) == 1
+    assert threads[0] != loop_thread, "the wait ran in a worker thread"
+    assert sweep._deferrals == {}  # noqa: SLF001

@@ -995,7 +995,12 @@ class GraphMaintenanceBusyError(RuntimeError):
 
 
 def erase_persona_graph(
-    engine: Engine, *, owner_id: str, persona_id: str, wait: bool = True
+    engine: Engine,
+    *,
+    owner_id: str,
+    persona_id: str,
+    wait: bool = True,
+    lock_timeout_ms: int | None = None,
 ) -> dict[str, int]:
     """Take the persona out of its owner's graph, in one transaction; return the counts.
 
@@ -1013,6 +1018,11 @@ def erase_persona_graph(
         # deleted earlier, in its own transaction, without this lock.
         # ``wait=False`` (the sweep, on the worker's event loop, round 6 M-3) does not wait
         # for a running consolidation: it raises, and the sweep tries the persona again.
+        if lock_timeout_ms is not None:
+            # A bounded wait (the sweep's escalation, round 7 LOW-4): this transaction only.
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :t, true)"), {"t": f"{lock_timeout_ms}ms"}
+            )
         if wait:
             take_graph_maintenance_lock(conn, owner_id)
         elif not try_graph_maintenance_lock(conn, owner_id):

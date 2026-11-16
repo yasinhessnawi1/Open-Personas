@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -293,6 +294,11 @@ def resume_persona_erasures(
 #: An erasure unfinished for longer than this is stalled: the operator is told.
 STALL_AFTER = timedelta(minutes=15)
 
+#: After this many sweeps in a row found the owner's graph lock busy, the backstop waits for
+#: it, in a thread, for at most WAIT_LOCK_TIMEOUT_MS (round 7 LOW-4).
+DEFERRALS_BEFORE_WAIT = 10
+WAIT_LOCK_TIMEOUT_MS = 60_000
+
 #: The graph backstop's every-sweep look covers erasures completed this recently ...
 BACKSTOP_RECENT = timedelta(hours=24)
 #: ... and it looks at every completed erasure this often (review MEDIUM-3).
@@ -347,6 +353,12 @@ class PersonaEraseSweep:
         self._clock = clock
         self._last_full_pass: datetime | None = None
         self._retry: set[tuple[str, str]] = set()
+        # Consecutive busy-lock deferrals per (owner, persona), and the waits in flight. A wait
+        # runs in a worker thread, so these are shared with it under a lock (round 7 LOW-4).
+        self._deferrals: dict[tuple[str, str], int] = {}
+        self._waiting: set[tuple[str, str]] = set()
+        self._state = threading.Lock()
+        self._tasks: set[asyncio.Task[None]] = set()
 
     def __call__(self) -> int:
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
@@ -386,7 +398,10 @@ class PersonaEraseSweep:
         else:
             if full:
                 self._last_full_pass = now
-        for owner_id, persona_id in sorted({*found, *self._retry}):
+        with self._state:
+            todo = sorted({*found, *self._retry} - self._waiting)
+        for key in todo:
+            owner_id, persona_id = key
             try:
                 # Never wait here: the sweep runs on the worker's event loop, and a
                 # consolidation run of this owner may hold the graph lock (round 6 M-3).
@@ -394,25 +409,79 @@ class PersonaEraseSweep:
                     self._engine, owner_id=owner_id, persona_id=persona_id, wait=False
                 )
             except GraphMaintenanceBusyError:
-                self._retry.add((owner_id, persona_id))
-                _log.info(
-                    "graph backstop deferred, consolidation running persona={pid}", pid=persona_id
-                )
+                self._deferred(key)
                 continue
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
-                self._retry.add((owner_id, persona_id))
+                with self._state:
+                    self._retry.add(key)
                 _log.error(
                     "graph backstop failed persona={pid} error={err}",
                     pid=persona_id,
                     err=type(exc).__name__,
                 )
                 continue
-            self._retry.discard((owner_id, persona_id))
-            _log.warning(
-                "graph backstop removed what an erased persona left persona={pid} counts={counts}",
-                pid=persona_id,
-                counts=counts,
+            self._done(key, counts)
+
+    def _done(self, key: tuple[str, str], counts: dict[str, int]) -> None:
+        with self._state:
+            self._retry.discard(key)
+            self._deferrals.pop(key, None)
+        _log.warning(
+            "graph backstop removed what an erased persona left persona={pid} counts={counts}",
+            pid=key[1],
+            counts=counts,
+        )
+
+    def _deferred(self, key: tuple[str, str]) -> None:
+        """A busy lock: try again next sweep; after too many in a row, wait for it (LOW-4)."""
+        with self._state:
+            self._retry.add(key)
+            count = self._deferrals.get(key, 0) + 1
+            self._deferrals[key] = count
+            escalate = count >= DEFERRALS_BEFORE_WAIT and key not in self._waiting
+            if escalate:
+                self._waiting.add(key)
+        _log.info(
+            "graph backstop deferred, consolidation running persona={pid} deferrals={n}",
+            pid=key[1],
+            n=count,
+        )
+        if escalate:
+            self._spawn(lambda: self._wait_for_lock(key, count))
+
+    def _spawn(self, work: Callable[[], None]) -> None:
+        """Run ``work`` off the event loop when there is one; inline where there is none."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # the inline resume loop: already in a worker thread
+            work()
+            return
+        task = loop.create_task(asyncio.to_thread(work))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _wait_for_lock(self, key: tuple[str, str], deferrals: int) -> None:
+        owner_id, persona_id = key
+        try:
+            counts = erase_persona_graph(
+                self._engine,
+                owner_id=owner_id,
+                persona_id=persona_id,
+                wait=True,
+                lock_timeout_ms=WAIT_LOCK_TIMEOUT_MS,
             )
+        except Exception as exc:  # noqa: BLE001 - the operator is told; the sweep tries again
+            _log.error(
+                "OPERATOR ALERT: graph backstop blocked persona={pid} deferrals={n} error={err}",
+                pid=persona_id,
+                n=deferrals,
+                err=type(exc).__name__,
+            )
+            return
+        finally:
+            with self._state:
+                self._waiting.discard(key)
+        self._done(key, counts)
 
 
 def build_persona_erase_sweep(platform_engine: Engine) -> PersonaEraseSweep:
