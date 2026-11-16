@@ -403,11 +403,16 @@ def test_the_mirror_of_an_edge_the_persona_asserted_on_a_kept_member_goes(
     """Review M-3: the persona's edge goes by the edge rule; its mirror must go with it."""
     engine, _backend = consolidated
     assert _open_edges(engine, "q_canon2") == {"q_canon2::causal::q_x"}
+    assert "q_canon::causal::q_other" in _open_edges(engine, "q_canon")
 
     counts = erase_persona_graph(engine, owner_id=_OWNER, persona_id=_PERSONA)
 
     assert _open_edges(engine, "q_canon2") == set()
-    assert counts["mirrors_of_asserted_deleted"] == 1
+    # Since round 5 HIGH-2 the mirrors found from the seeds are counted here, so this also
+    # counts the doomed member p_into_q's mirror on q_canon (its edge is a seed), which
+    # _give_back used to remove uncounted.
+    assert "q_canon::causal::q_other" not in _open_edges(engine, "q_canon")
+    assert counts["mirrors_of_asserted_deleted"] == 2
 
 
 # --- HIGH-1: an erasure interleaved with a merge act (D-R9-284-write-guard) ----------------
