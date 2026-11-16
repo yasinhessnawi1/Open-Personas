@@ -80,6 +80,9 @@ class _Result:
     def scalar_one_or_none(self) -> int:
         return 1
 
+    def scalars(self) -> list[str]:
+        return ["x"]
+
     def mappings(self) -> _Mappings:
         return _Mappings(self._mapping)
 
@@ -188,6 +191,37 @@ _WRITES = {
     ),
     "add_alias": (
         lambda b: b.add_alias("u1", "x", EntityAlias(surface="my doctor", persona_id=_P)),
+        "update",
+    ),
+    # Round 7: every other method that takes guard_personas.
+    "associate_entities": (
+        lambda b: b.associate_entities("u1", "n1", ["x"], guard_personas=[_P]),
+        "insert",
+    ),
+    "associate_entities_returning": (
+        lambda b: b.associate_entities_returning("u1", "n1", ["x"], guard_personas=[_P]),
+        "insert",
+    ),
+    "associate_entities_recording": (
+        lambda b: b.associate_entities_recording(
+            "u1",
+            "k",
+            ["x"],
+            member_id="m",
+            merged_into="k",
+            record=lambda added: ({"_k7_merge": str(added)}, "h"),
+            guard_personas=[_P],
+        ),
+        "insert",
+    ),
+    "insert_edge_if_absent": (
+        lambda b: b.insert_edge_if_absent("u1", _edge(None), guard_personas=[_P]),
+        "insert",
+    ),
+    "set_merged_into": (
+        lambda b: b.set_merged_into(
+            "u1", "m", merged_into="k", metadata={}, content_hash="h", guard_personas=[_P]
+        ),
         "update",
     ),
 }
