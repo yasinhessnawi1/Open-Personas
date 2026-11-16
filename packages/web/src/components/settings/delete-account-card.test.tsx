@@ -41,11 +41,26 @@ vi.mock("next/navigation", () => ({
 }));
 
 /** The server's expected confirmation (review M5), as GET /v1/me/erase answers it. */
-function expects(confirm: string) {
-  apiGet.mockResolvedValue({
-    response: new Response(null, { status: 200 }),
-    data: { confirm },
-  });
+function expects(
+  confirm: string,
+  wallet: { plan_code: string; lots?: number[] } = { plan_code: "free" },
+) {
+  apiGet.mockImplementation((path: string) =>
+    Promise.resolve({
+      response: new Response(null, { status: 200 }),
+      data:
+        path === "/v1/me/wallet"
+          ? {
+              plan_code: wallet.plan_code,
+              payg_lots: (wallet.lots ?? []).map((remaining) => ({
+                credits_remaining: remaining,
+                credits_total: 1000,
+                expires_at: "2027-01-01T00:00:00Z",
+              })),
+            }
+          : { confirm },
+    }),
+  );
 }
 
 function renderCard() {
@@ -144,5 +159,33 @@ describe("delete account card", () => {
     expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
       false,
     );
+  });
+
+  it.each([
+    ["a paid plan", { plan_code: "pro" }],
+    ["prepaid credits left", { plan_code: "free", lots: [500] }],
+  ])("says nothing is refunded for %s", async (_name, wallet) => {
+    expects("ann@example.test", wallet);
+    renderCard();
+    await openAndType("");
+
+    const line = await waitFor(() => {
+      const found = slot("delete-account-refund");
+      expect(found).not.toBeNull();
+      return found;
+    });
+    expect(line.textContent).toBe(messages.settings.deleteAccountRefund);
+    expect(line.textContent).toContain("Your plan ends now");
+    expect(line.textContent).toContain("not refunded");
+    expect(line.textContent).toContain("contact support before");
+  });
+
+  it("does not mention refunds to a free user with no prepaid credits", async () => {
+    expects("ann@example.test", { plan_code: "free", lots: [0] });
+    renderCard();
+    await openAndType("");
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith("/v1/me/wallet"));
+    expect(slot("delete-account-refund")).toBeNull();
   });
 });

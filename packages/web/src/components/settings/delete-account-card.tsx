@@ -31,6 +31,10 @@ export function DeleteAccountCard() {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [expected, setExpected] = useState<string | null>(null);
+  // Whether there is money the deletion forfeits (a paid plan, or prepaid credits left), so
+  // the no-refund line shows only where it applies. Unknown until read; a wallet that cannot
+  // be read counts as yes, since saying it needlessly costs less than not saying it.
+  const [paid, setPaid] = useState<boolean | null>(null);
 
   // Read the expected confirmation once the form opens; until then nothing can match.
   useEffect(() => {
@@ -48,6 +52,27 @@ export function DeleteAccountCard() {
       live = false;
     };
   }, [open, expected, api]);
+
+  useEffect(() => {
+    if (!open || paid !== null) return;
+    let live = true;
+    void (async () => {
+      try {
+        const wallet = await unwrap(await api.GET("/v1/me/wallet"));
+        if (live) {
+          setPaid(
+            wallet.plan_code !== "free" ||
+              wallet.payg_lots.some((lot) => lot.credits_remaining > 0),
+          );
+        }
+      } catch {
+        if (live) setPaid(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, paid, api]);
 
   const matches =
     expected !== null && typed.trim().toLowerCase() === expected.toLowerCase();
@@ -91,6 +116,14 @@ export function DeleteAccountCard() {
             if (matches && !busy) void erase();
           }}
         >
+          {paid ? (
+            <p
+              className="type-body max-w-prose text-foreground"
+              data-slot="delete-account-refund"
+            >
+              {t("deleteAccountRefund")}
+            </p>
+          ) : null}
           <label
             htmlFor="delete-account-confirm"
             className="type-ui flex flex-col gap-1.5"
