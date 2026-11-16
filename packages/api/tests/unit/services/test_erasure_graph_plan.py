@@ -451,3 +451,41 @@ def test_a_listing_keeps_only_its_live_sources_and_a_backed_mirror_stays() -> No
     assert doomed == [], "B's source and A's key 3 still back m"
     assert rewrites == {"a": {**a, "mirror_sources": {"m": [3]}}}, "old (no sources) is kept"
     assert orphaned_mirrors({"b": b}, {_M: {9}}, existing={2, 9}) == ([], {}), "nothing stale"
+
+
+def test_fewer_unexplained_pieces_outrank_more_doomed_names() -> None:
+    """Reviewer's E6: the doomed-name tie-break applies only between equally explained readings.
+
+    "q,a" read whole is a known name; read as q and a it holds the doomed "a" but leaves "q"
+    unexplained, so it loses.
+    """
+    assert split_alias_list("q,a", ["q,a", "a"], doomed=["a"]) == ["q,a"]
+
+
+class _CountingSlices(str):
+    """A legacy list that counts how many candidate tokens are cut from it."""
+
+    __slots__ = ()
+    cuts: list[int] = []  # noqa: RUF012 - one shared counter for the test
+
+    def __getitem__(self, key: object) -> str:  # type: ignore[override]
+        if isinstance(key, slice):
+            _CountingSlices.cuts.append(1)
+        return str.__getitem__(self, key)  # type: ignore[index]
+
+
+def test_a_known_name_is_tried_only_up_to_the_longest_known_name() -> None:
+    """Reviewer's E7: without the bound every later comma is tried, O(n^2) cuts."""
+    names = [f"n{i:03d}" for i in range(300)]
+    _CountingSlices.cuts.clear()
+
+    found = split_alias_list(_CountingSlices(",".join(names)), names)
+
+    assert found == names
+    assert len(_CountingSlices.cuts) <= 3 * len(names), len(_CountingSlices.cuts)
+
+
+def test_a_json_list_with_a_non_string_entry_is_not_taken_as_json() -> None:
+    """Reviewer's E11: read as a legacy comma list instead, never trusted as names."""
+    assert split_alias_list('["a", 1]', []) == ['["a"', " 1]"]
+    assert split_alias_list('["a", null]', ["a"]) == ['["a"', " null]"]

@@ -316,3 +316,12 @@ def test_only_the_entity_links_the_association_added_are_recorded() -> None:
     )._merge_cluster("u1", canonical, [member], run_id="r1", now=_NOW, epoch=1)  # noqa: SLF001
 
     assert backend.records[-1]["added_entities"] == []
+
+
+def test_both_record_writes_hold_the_sources_asserter() -> None:
+    """Reviewer's C10: the fake kept only the last record write; the pending one went untested."""
+    backend = _merge()
+
+    held = [personas for name, personas in backend.calls if name == "set_merged_into"]
+
+    assert held == [(_P, _Q), (_P, _Q)], "the pending write and the done write"

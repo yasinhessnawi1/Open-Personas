@@ -75,3 +75,11 @@ def test_a_role_that_rls_would_blind_is_refused_before_anything_is_inserted(
         assert f"'{table}'" in check
     assert "'personas'" in check
     assert "'erasures'" in check
+
+
+def test_the_role_check_counts_rls_that_applies_to_the_running_role() -> None:
+    """Reviewer's M1: RLS binds the role when it is forced, or when the role is not the owner."""
+    check = _module().ROLE_CHECK
+    assert "AND c.relrowsecurity" in check
+    assert "AND (c.relforcerowsecurity OR pg_get_userbyid(c.relowner) <> current_user)" in check
+    assert "ns.nspname = current_schema()" in check
