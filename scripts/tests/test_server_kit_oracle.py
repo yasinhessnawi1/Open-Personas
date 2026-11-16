@@ -418,6 +418,17 @@ def test_the_api_image_runs_as_the_data_uid(service: str) -> None:
     assert definition["environment"]["HOME"].startswith(("/var/lib/persona/", "/tmp"))
 
 
+@pytest.mark.parametrize("service", ["api", "migrate"])
+def test_the_data_uid_has_a_user_name_in_the_environment(service: str) -> None:
+    # The data uid has no passwd entry in the image, so getpass.getuser() falls through to
+    # pwd.getpwuid() and raises KeyError. torch calls it on import (its cache dir), which left
+    # torch._dynamo half registered and made every persona creation answer 500 on Oracle.
+    # getpass.getuser() reads USER before it ever asks pwd.
+    environment = _compose()["services"][service]["environment"]
+    assert environment.get("USER")
+    assert environment.get("LOGNAME") == environment.get("USER")
+
+
 def test_restore_unpacks_as_the_profiles_data_uid() -> None:
     restore = _text("bin/restore.sh")
     assert 'DATA_UID="${OP_DATA_UID:-2001}"' in restore

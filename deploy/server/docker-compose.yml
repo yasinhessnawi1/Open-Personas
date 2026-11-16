@@ -101,6 +101,10 @@ services:
     user: "${OP_DATA_UID:-2001}:${OP_DATA_UID:-2001}"
     environment:
       HOME: /tmp
+      # The data uid has no passwd entry in the image; a name here keeps getpass.getuser()
+      # (torch calls it on import) from failing on pwd.getpwuid().
+      USER: persona
+      LOGNAME: persona
     networks: [db]
     cap_drop: [ALL]
     pids_limit: 256
@@ -141,6 +145,12 @@ services:
       - ${OP_ENV_DIR:-/opt/open-persona/env}/common.env
       - ${OP_ENV_DIR:-/opt/open-persona/env}/api.env
     environment:
+      # The data uid (above) has no passwd entry in the image, so getpass.getuser() would fall
+      # through to pwd.getpwuid() and raise. torch calls it on import; without a name here the
+      # first embedder load left torch._dynamo half registered and every persona creation
+      # answered 500.
+      USER: persona
+      LOGNAME: persona
       # Carried over from packages/api/fly.toml [env].
       PERSONA_LOG_LEVEL: INFO
       PERSONA_EDITION: cloud
