@@ -64,6 +64,10 @@ _MERGE_KEY = "_k7_merge"
 #: Reserved canonical-metadata key holding the accreted alias list (K7-D-4.4).
 _ALIAS_KEY = "_k7_aliases"
 
+#: A merge record's state: the act is still running, or it finished (R9-284).
+_PENDING = "pending"
+_DONE = "done"
+
 
 def _personas_of(node: ConceptNode) -> list[str]:
     """The personas a node's trail names, for the R9-284 write guard."""
@@ -116,6 +120,7 @@ class _ConsolidationBackend(Protocol):
     """The transport surface the pass composes (PostgresGraphBackend satisfies it)."""
 
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
+    def pending_merges(self, owner_id: str) -> list[str]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
         self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
@@ -231,6 +236,10 @@ class ConsolidationPass:
             return self._run_locked(owner_id)
 
     def _run_locked(self, owner_id: str) -> ConsolidationReport:
+        # A member whose merge act stopped part way (its record still "pending") is given
+        # back first, so this run starts from whole merges only (D-R9-284-graph-mutex).
+        for node_id in self._backend.pending_merges(owner_id):
+            self._unmerge(owner_id, node_id)
         epoch, watermark = self._backend.get_marker(owner_id)
         new_epoch = epoch + 1
         run_id = f"{owner_id}:{new_epoch}"  # deterministic + unique; NOT a clock/random
@@ -361,6 +370,7 @@ class ConsolidationPass:
                 # The record lists knowledge of the sources' asserters too (review round 5 H1).
                 personas=sorted({*personas, *asserters.values()}),
                 sources=sources,
+                state=_PENDING,
             )
             # A mirror never overwrites an edge the canonical already has open (review
             # MEDIUM-1); the record then keeps only the mirrors actually made.
@@ -373,17 +383,19 @@ class ConsolidationPass:
             ]
             self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
             self._backend.associate_entities(owner_id, canonical.id, added, guard_personas=personas)
-            if made != [m.id for m in mirrors]:
-                self._mark_merged(
-                    owner_id,
-                    member,
-                    canonical,
-                    run_id=run_id,
-                    mirrored=made,
-                    added=added,
-                    personas=personas,
-                    sources={m: sources[m] for m in made if m in sources},
-                )
+            # The act is whole: the record says so, listing only the mirrors made. Until this
+            # write it stays "pending", and the next run gives the member back.
+            self._mark_merged(
+                owner_id,
+                member,
+                canonical,
+                run_id=run_id,
+                mirrored=made,
+                added=added,
+                personas=sorted({*personas, *asserters.values()}),
+                sources={m: sources[m] for m in made if m in sources},
+                state=_DONE,
+            )
             surrogate = self._backend.surrogate_for(owner_id, member.id)
             if surrogate is not None:
                 self._index.remove(surrogate)  # leave the dense index (visibility)
@@ -487,8 +499,12 @@ class ConsolidationPass:
         added: list[str],
         personas: Sequence[str] = (),
         sources: dict[str, int] | None = None,
+        state: str = _DONE,
     ) -> None:
         record = {
+            # "pending" while the member's merge act runs, "done" at its end; a record from
+            # before this has no state and is done (D-R9-284-graph-mutex).
+            "state": state,
             "run_id": run_id,
             "canonical": canonical.id,
             "mirrored_edges": mirrored,

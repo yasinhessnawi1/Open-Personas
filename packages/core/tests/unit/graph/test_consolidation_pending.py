@@ -1,0 +1,173 @@
+"""A merge act that stops part way is given back by the next run (R9-284 round 5 MEDIUM-1).
+
+The record is written first, as "pending", and marked "done" only at the act's end. A failure in
+between (here a simulated deadlock, SQLSTATE 40P01, after the record) leaves it pending; the next
+run, first thing under the owner's lock, unmerges every pending member and then merges afresh.
+A stateful fake backend holds the two nodes.
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from persona.audit import MemoryAuditLogger
+from persona.graph.config import GraphSettings
+from persona.graph.consolidation import ConsolidationPass
+from persona.graph.models import ConceptNode, NodeKind, NodeProvenance
+from persona.schema.chunks import WriteSource
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+_NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+_P = "persona_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+class _Deadlock(Exception):  # noqa: N818 - named for what it simulates
+    sqlstate = "40P01"
+
+
+def _node(node_id: str) -> ConceptNode:
+    return ConceptNode(
+        id=node_id,
+        node_kind=NodeKind.FACT,
+        concept_name=node_id,
+        content=f"about {node_id}",
+        provenance=(NodeProvenance(source=WriteSource.SYSTEM, persona_id=_P, written_at=_NOW),),
+        created_at=_NOW,
+    )
+
+
+class _Backend:
+    def __init__(self, *, deadlocks: int) -> None:
+        self.nodes = {"k": _node("k"), "m": _node("m")}
+        self.merged: dict[str, str | None] = {"k": None, "m": None}
+        self.events: list[str] = []
+        self._deadlocks = deadlocks
+
+    @contextmanager
+    def maintenance_lock(self, _owner: str) -> Iterator[None]:
+        yield
+
+    def pending_merges(self, _owner: str) -> list[str]:
+        out = []
+        for node in self.nodes.values():
+            raw = node.metadata.get("_k7_merge")
+            if self.merged[node.id] and raw and json.loads(raw).get("state") == "pending":
+                out.append(node.id)
+        return out
+
+    def get_marker(self, _owner: str) -> tuple[int, None]:
+        return 0, None
+
+    def dirty_candidates(self, _owner: str, _watermark: object) -> list[ConceptNode]:
+        return [self.nodes["k"]]
+
+    def band_semantic_neighbors(self, _owner: str, node_id: str, **_k: Any) -> list[ConceptNode]:  # noqa: ANN401
+        return [n for n in self.nodes.values() if n.id != node_id and self.merged[n.id] is None]
+
+    def get_embeddings(self, _owner: str, ids: Any) -> dict[str, list[float]]:  # noqa: ANN401
+        return {i: [1.0, 0.0] for i in ids}
+
+    def get_node(self, _owner: str, node_id: str) -> ConceptNode | None:
+        return self.nodes.get(node_id)
+
+    def open_assertion_edges(self, *_a: Any) -> list[Any]:  # noqa: ANN401
+        return []
+
+    def open_assertion_edge_keys(self, *_a: Any) -> dict[str, int]:  # noqa: ANN401
+        return {}
+
+    def entities_for_node(self, *_a: Any) -> list[str]:  # noqa: ANN401
+        return []
+
+    def set_merged_into(self, _owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        node = self.nodes[node_id]
+        self.nodes[node_id] = node.model_copy(update={"metadata": kw["metadata"]})
+        self.merged[node_id] = kw["merged_into"]
+        state = json.loads(kw["metadata"]["_k7_merge"])["state"] if kw["merged_into"] else None
+        self.events.append(f"record {node_id} {state or 'cleared'}")
+
+    def close_edges_incident(self, _owner: str, node_id: str, **_k: Any) -> list[str]:  # noqa: ANN401
+        if self._deadlocks:
+            self._deadlocks -= 1
+            raise _Deadlock("deadlock detected")
+        self.events.append(f"close {node_id}")
+        return []
+
+    def reopen_edges_incident(self, _owner: str, node_id: str, **_k: Any) -> None:  # noqa: ANN401
+        self.events.append(f"reopen {node_id}")
+
+    def associate_entities(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def remove_entity_associations(self, *_a: Any) -> None:  # noqa: ANN401
+        return None
+
+    def delete_open_mirror(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def surrogate_for(self, *_a: Any) -> None:  # noqa: ANN401
+        return None
+
+    def bump_salience(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def update_node(self, _owner: str, node: ConceptNode, *_a: Any, **_k: Any) -> int:  # noqa: ANN401
+        self.nodes[node.id] = node
+        return 1
+
+    def apply_disuse_decay(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def advance_marker(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+
+def _pass(backend: _Backend) -> ConsolidationPass:
+    return ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=object(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+
+def _state(backend: _Backend) -> str | None:
+    raw = backend.nodes["m"].metadata.get("_k7_merge")
+    return None if raw is None else str(json.loads(raw)["state"])
+
+
+def test_a_deadlock_after_the_record_leaves_it_pending_and_the_next_run_gives_it_back() -> None:
+    backend = _Backend(deadlocks=1)
+    consolidation = _pass(backend)
+
+    first = consolidation.run("u1")
+
+    assert first.clusters_formed == 0
+    assert backend.merged["m"] == "k"
+    assert _state(backend) == "pending"
+
+    backend.events.clear()
+    second = consolidation.run("u1")
+
+    assert backend.events[:2] == ["reopen m", "record m cleared"], "given back first"
+    assert second.clusters_formed == 1
+    assert backend.merged["m"] == "k"
+    assert _state(backend) == "done"
+    assert backend.events[2:] == ["record m pending", "close m", "record m done"]
+
+
+def test_a_done_record_and_one_without_a_state_are_left_alone() -> None:
+    backend = _Backend(deadlocks=0)
+    _pass(backend).run("u1")
+    assert _state(backend) == "done"
+    legacy = {"run_id": "u1:0", "canonical": "k", "mirrored_edges": [], "added_entities": []}
+    node = backend.nodes["m"]
+    backend.nodes["m"] = node.model_copy(update={"metadata": {"_k7_merge": json.dumps(legacy)}})
+
+    assert backend.pending_merges("u1") == []

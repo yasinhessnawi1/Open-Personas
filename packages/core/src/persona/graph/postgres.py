@@ -22,6 +22,7 @@ Decisions in force:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -1179,6 +1180,34 @@ class PostgresGraphBackend:
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]:
         """The owner's graph maintenance lock, held on its own session (D-R9-284-graph-mutex)."""
         return graph_maintenance_held(self._engine, owner_id)
+
+    def pending_merges(self, owner_id: str) -> list[str]:
+        """Members whose merge record is still ``pending``: their act stopped part way (R9-284).
+
+        Filtered in SQL by the record's text, then read in Python, so a record that is not JSON
+        is never cast; one without a state is done.
+        """
+        record = graph_nodes.c.metadata["_k7_merge"].astext
+        stmt = (
+            select(graph_nodes.c.id, record)
+            .where(
+                graph_nodes.c.owner_id == owner_id,
+                graph_nodes.c.merged_into.is_not(None),
+                record.contains('"state": "pending"'),
+            )
+            .order_by(graph_nodes.c.id)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        pending = []
+        for node_id, raw in rows:
+            try:
+                parsed = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and parsed.get("state") == "pending":
+                pending.append(str(node_id))
+        return pending
 
     def insert_edge_if_absent(
         self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()

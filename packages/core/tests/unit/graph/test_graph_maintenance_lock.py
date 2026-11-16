@@ -45,6 +45,10 @@ class _Backend:
         if name == self._fail:
             raise RuntimeError(name)
 
+    def pending_merges(self, _owner: str) -> list[str]:
+        self._read("pending_merges")
+        return []
+
     def get_marker(self, _owner: str) -> tuple[int, None]:
         self._read("get_marker")
         return 0, None
@@ -79,11 +83,13 @@ def test_the_run_takes_the_lock_before_its_first_read_and_releases_it() -> None:
     _pass(backend).run("u1")
 
     assert backend.calls[0] == "lock u1", "nothing is read before the lock is held"
-    assert backend.calls[1] == "get_marker"
+    assert backend.calls[1:3] == ["pending_merges", "get_marker"]
     assert backend.calls[-1] == "unlock u1"
 
 
-@pytest.mark.parametrize("fail", ["get_marker", "dirty_candidates", "advance_marker"])
+@pytest.mark.parametrize(
+    "fail", ["pending_merges", "get_marker", "dirty_candidates", "advance_marker"]
+)
 def test_a_failing_run_releases_the_lock(fail: str) -> None:
     backend = _Backend(fail=fail)
 

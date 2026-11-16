@@ -360,3 +360,31 @@ def test_pass_is_owner_scoped(
     assert all(nid.startswith("u1::") for nid in touched)
     # u2's would-be member is untouched (non-vacuous: it WOULD merge if scanned).
     assert backend.is_merged("u2", "u2::node::00000001") is False
+
+
+def test_pending_merges_names_only_records_still_pending(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 5 MEDIUM-1: the next run gives these back; done and stateless ones stay."""
+    import json  # noqa: PLC0415
+
+    backend, _, _ = env
+    records = {
+        "u1::node::00000001": json.dumps({"state": "pending", "run_id": "r"}, sort_keys=True),
+        "u1::node::00000002": json.dumps({"state": "done", "run_id": "r"}, sort_keys=True),
+        "u1::node::00000003": json.dumps({"run_id": "r"}, sort_keys=True),
+        "u1::node::00000004": '{"state": "pending"',  # not JSON: never cast, never returned
+    }
+    backend.insert_node("u1", _node("u1::node::00000000", "Canonical"), _vec(0))
+    for node_id, raw in records.items():
+        backend.insert_node("u1", _node(node_id, node_id), _vec(0))
+        backend.set_merged_into(
+            "u1",
+            node_id,
+            merged_into="u1::node::00000000",
+            metadata={"_k7_merge": raw},
+            content_hash="h",
+        )
+
+    assert backend.pending_merges("u1") == ["u1::node::00000001"]
+    assert backend.pending_merges("u2") == []

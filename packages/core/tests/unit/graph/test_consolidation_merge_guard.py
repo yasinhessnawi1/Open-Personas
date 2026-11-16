@@ -162,10 +162,14 @@ def test_a_mirror_never_overwrites_an_edge_the_canonical_already_has() -> None:
     assert backend.records[-1]["mirrored_edges"] == [], "narrowed to the mirrors made"
 
 
-def test_a_record_with_nothing_to_narrow_is_written_once() -> None:
+def test_the_record_is_pending_while_the_act_runs_and_done_at_its_end() -> None:
+    """Round 5 MEDIUM-1: a member left pending is given back by the next run."""
     backend = _merge()
 
-    assert len(backend.records) == 1
+    assert [r["state"] for r in backend.records] == ["pending", "done"]
+    names = [name for name, _ in backend.calls]
+    last_record = len(names) - 1 - names[::-1].index("set_merged_into")
+    assert last_record > names.index("associate_entities ['ent_m']"), "done after the act"
 
 
 def test_the_accreted_alias_names_are_recorded_as_json() -> None:
