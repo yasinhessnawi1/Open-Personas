@@ -382,9 +382,21 @@ def test_a_self_rename_that_lost_the_race_is_redone_on_a_fresh_read(
     backend.nodes[self_node.id] = (1, self_node, _vec(0))
     tries: list[str] = []
 
+    racer = NodeProvenance(source=WriteSource.SYSTEM, written_at=NOW, reason="concurrent")
+    raced = self_node.model_copy(
+        update={
+            "content": "Old, as another writer left it",
+            "provenance": (*self_node.provenance, racer),
+        }
+    )
+    raced = ConceptNode.model_validate(raced.model_dump(exclude={"content_hash"}))
+
     def _update(_owner: str, node: ConceptNode, _vector: object, **kw: str) -> int:
         tries.append(kw["expected_content_hash"])
-        if len(tries) == 1:
+        if len(tries) == 1:  # another writer changed the SELF node meanwhile
+            backend.nodes[node.id] = (1, raced, _vec(0))
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        if kw["expected_content_hash"] != backend.nodes[node.id][1].content_hash:
             raise GraphStaleWriteError("changed", context={"node_id": node.id})
         backend.nodes[node.id] = (1, node, _vec(0))
         return 1
@@ -395,5 +407,46 @@ def test_a_self_rename_that_lost_the_race_is_redone_on_a_fresh_read(
 
     renamed = store._rename_self_node("u1", self_node, "New")  # noqa: SLF001
 
+    assert raced.content_hash != self_node.content_hash, "the fresh read differs from the stale"
     assert renamed.concept_name == "New"
-    assert tries == [self_node.content_hash, self_node.content_hash], "read afresh, then written"
+    assert tries == [self_node.content_hash, raced.content_hash], "read afresh, then written"
+    assert racer in renamed.provenance, "the other writer's entry is kept"
+
+
+def test_a_restore_that_lost_the_race_is_redone_on_a_fresh_read() -> None:
+    """Round 11 LOW-4 (M11): the restore re-reads the node and tries again (node CAS)."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    backend = _FakeBackend()
+    node_id = "u1::node::00000001"
+    backend.register(node_id, 11, _vec(0))
+    stale = backend.nodes[node_id][1]
+    racer = NodeProvenance(source=WriteSource.SYSTEM, written_at=NOW, reason="concurrent")
+    raced = ConceptNode.model_validate(
+        stale.model_copy(
+            update={"content": "changed meanwhile", "provenance": (*stale.provenance, racer)}
+        ).model_dump(exclude={"content_hash"})
+    )
+    version = stale.model_copy(update={"content": "the old account"})
+    backend.read_version_for_restore = lambda *_a: (version, _vec(1))  # type: ignore[attr-defined]
+    tries: list[str] = []
+
+    def _update(_owner: str, node: ConceptNode, _vector: object, **kw: str) -> int:
+        tries.append(kw["expected_content_hash"])
+        if len(tries) == 1:  # another writer changed the node meanwhile
+            backend.nodes[node.id] = (11, raced, _vec(0))
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        if kw["expected_content_hash"] != backend.nodes[node.id][1].content_hash:
+            raise GraphStaleWriteError("changed", context={"node_id": node.id})
+        backend.nodes[node.id] = (11, node, _vec(1))
+        return 11
+
+    backend.update_node = _update  # type: ignore[attr-defined]
+    store = _store(backend, _FakeIndex(), _created_merge(), MemoryAuditLogger())
+
+    restored = store.restore_node_version("u1", node_id, "7")
+
+    assert restored.content == "the old account"
+    assert tries == [stale.content_hash, raced.content_hash], "read afresh, then written"
+    assert racer in restored.provenance, "the other writer's entry is kept"
+    assert restored.provenance[-1].superseded_content == "changed meanwhile"
