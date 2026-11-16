@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 from persona_api.workspace_paths import PERSONA_ID_PATTERN
 
 _MIGRATION = (
@@ -51,3 +52,26 @@ def test_it_records_only_minted_personas_that_are_gone_and_not_yet_erased() -> N
     assert "r.owner_id = named.owner_id" in sql, "per owner: the backstop looks per owner"
     assert "ON CONFLICT (id) DO NOTHING" in sql
     assert "'complete'" in sql, "complete, so the backstop (not the resume) acts on it"
+
+
+def test_a_role_that_rls_would_blind_is_refused_before_anything_is_inserted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 5 LOW-4: under RLS a plain role sees no other owner's rows and would insert nothing."""
+    module = _module()
+    ran: list[str] = []
+    bind = type("Bind", (), {"dialect": type("D", (), {"name": "postgresql"})()})()
+    monkeypatch.setattr(module.op, "get_bind", lambda: bind)
+    monkeypatch.setattr(module.op, "execute", ran.append)
+
+    module.upgrade()
+
+    assert ran == [module.ROLE_CHECK, module.BACKFILL], "the check runs first"
+    check = module.ROLE_CHECK
+    assert "rolsuper OR rolbypassrls" in check
+    assert "RAISE EXCEPTION" in check
+    assert "%" not in check, "no format placeholder for the driver to rewrite"
+    for table in ("graph_nodes", "graph_node_versions", "graph_edges", "graph_entities"):
+        assert f"'{table}'" in check
+    assert "'personas'" in check
+    assert "'erasures'" in check

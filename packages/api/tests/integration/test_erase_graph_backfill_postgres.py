@@ -110,3 +110,29 @@ def test_a_persona_deleted_before_r9_284_is_backfilled_and_swept(
     corrected = backend.get_node(_OWNER, "bf_shared")
     assert corrected is not None
     assert "the user's own correction" in corrected.content
+
+
+def test_a_role_row_level_security_would_blind_is_refused(migrated_engine: Engine) -> None:
+    """Round 5 LOW-4: persona_app sees only its own rows, so the backfill refuses to run as it."""
+    import os  # noqa: PLC0415
+
+    from sqlalchemy import create_engine  # noqa: PLC0415
+    from sqlalchemy.exc import DBAPIError  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location("backfill_063", _MIGRATION)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with migrated_engine.begin() as conn:  # the superuser: passes
+        conn.execute(text(module.ROLE_CHECK))
+
+    app_url = os.environ.get("APP_DATABASE_URL")
+    if not app_url:
+        pytest.skip("APP_DATABASE_URL not set")
+    app = create_engine(app_url)
+    try:
+        with pytest.raises(DBAPIError, match="would not see every row"), app.begin() as conn:
+            conn.execute(text(module.ROLE_CHECK))
+    finally:
+        app.dispose()
