@@ -772,6 +772,7 @@ def test_the_config_is_moved_into_place_and_the_original_kept(tmp_path: Path) ->
     etc = tmp_path / "etc"
     assert (etc / "config.toml.bak-r9289").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
     assert not (etc / "config.toml.tmp").exists()
+    assert not (etc / "config.toml.bak-r9289.tmp").exists()
     assert not (etc / "dropin.conf.tmp").exists()
 
 
@@ -781,6 +782,7 @@ def test_the_config_is_moved_into_place_and_the_original_kept(tmp_path: Path) ->
     [
         ("install", "srv-containerd"),  # the new root
         ("cp", "bak-r9289"),  # the original's copy
+        ("mv", "bak-r9289.tmp"),  # ...moved into place
         ("chmod", "config.toml.tmp"),
         ("mv", "config.toml.tmp"),
     ],

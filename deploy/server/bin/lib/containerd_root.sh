@@ -110,7 +110,8 @@ apply_containerd_root() {
     install -d -m 0755 "$(dirname "${config}")" || return 1
     # The first rewrite keeps the package's config beside it; a later one never overwrites it.
     if [ -e "${config}" ] && [ ! -e "${config}.bak-r9289" ]; then
-      cp -p "${config}" "${config}.bak-r9289" || return 1
+      cp -p "${config}" "${config}.bak-r9289.tmp" || return 1
+      mv -f "${config}.bak-r9289.tmp" "${config}.bak-r9289" || return 1
     fi
     # Written whole, then moved over the config: containerd never reads half of it.
     printf '%s\n' "${wanted}" > "${config}.tmp" || return 1
