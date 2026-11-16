@@ -51,6 +51,7 @@ class _Backend:
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.record: dict[str, Any] | None = None
         self.records: list[dict[str, Any]] = []
+        self.already_linked: set[str] = set()
 
     def open_assertion_edges_keyed(self, _owner: str, node_id: str) -> list[tuple[TypedLink, int]]:
         if node_id != "m":
@@ -81,8 +82,15 @@ class _Backend:
         self.calls.append(("close_edges_incident", ()))
         return []
 
-    def associate_entities(self, _owner: str, _node: str, ids: Any, **kw: Any) -> None:  # noqa: ANN401
+    def associate_entities_returning(
+        self,
+        _owner: str,
+        _node: str,
+        ids: Any,  # noqa: ANN401
+        **kw: Any,  # noqa: ANN401
+    ) -> list[str]:
         self.calls.append((f"associate_entities {list(ids)}", tuple(kw.get("guard_personas", ()))))
+        return [i for i in ids if i not in self.already_linked]
 
     def surrogate_for(self, *_a: Any) -> None:  # noqa: ANN401
         return None
@@ -287,3 +295,24 @@ def test_a_member_of_another_cluster_in_the_run_shares_the_mirror_too() -> None:
     assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
 
     assert backend.deleted == [], "A1's share keeps the mirror"
+
+
+def test_only_the_entity_links_the_association_added_are_recorded() -> None:
+    """Round 6 L-4: a give back must never remove a link the canonical had before."""
+    fresh = _merge()
+    assert fresh.records[0]["added_entities"] == [], "a pending record lists none"
+    assert fresh.records[-1]["added_entities"] == ["ent_m"]
+
+    canonical = _node("k", _Q)
+    member = _node("m", _P, None, _P)
+    backend = _Backend(canonical, member)
+    backend.already_linked = {"ent_m"}  # linked meanwhile, by another path
+    ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )._merge_cluster("u1", canonical, [member], run_id="r1", now=_NOW, epoch=1)  # noqa: SLF001
+
+    assert backend.records[-1]["added_entities"] == []

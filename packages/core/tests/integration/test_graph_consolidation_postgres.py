@@ -388,3 +388,16 @@ def test_pending_merges_names_only_records_still_pending(
 
     assert backend.pending_merges("u1") == ["u1::node::00000001"]
     assert backend.pending_merges("u2") == []
+
+
+def test_associate_entities_returning_names_only_the_links_it_inserted(
+    env: tuple[PostgresGraphBackend, _FakeIndex, ConsolidationPass],
+) -> None:
+    """R9-284 round 6 L-4: the merge records only these, so a give back removes only these."""
+    backend, _, _ = env
+    _seed_cluster(backend)
+    member = "u1::node::00000001"
+
+    assert backend.associate_entities_returning("u1", member, [E]) == [], "already linked"
+    assert backend.associate_entities_returning("u1", C, [E, E]) == [E]
+    assert backend.associate_entities_returning("u1", C, [E]) == []

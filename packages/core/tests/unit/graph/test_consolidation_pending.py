@@ -115,8 +115,8 @@ class _Backend:
             raise _Deadlock("the connection went too")
         self.events.append(f"reopen {node_id}")
 
-    def associate_entities(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
-        return None
+    def associate_entities_returning(self, *_a: Any, **_k: Any) -> list[str]:  # noqa: ANN401
+        return []
 
     def remove_entity_associations(self, *_a: Any) -> None:  # noqa: ANN401
         return None

@@ -951,8 +951,25 @@ class PostgresGraphBackend:
         guard_personas: Sequence[str] = (),
     ) -> None:
         """Record that ``node_id`` concerns each entity (idempotent on the PK)."""
+        self.associate_entities_returning(
+            owner_id, node_id, entity_ids, guard_personas=guard_personas
+        )
+
+    def associate_entities_returning(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        guard_personas: Sequence[str] = (),
+    ) -> list[str]:
+        """:meth:`associate_entities`, returning the links this call inserted (round 6 L-4).
+
+        A link the node already had is not returned: consolidation records only these, so a
+        give back never removes a link the canonical had before the merge.
+        """
         if not entity_ids:
-            return
+            return []
         now = datetime.now(UTC)
         rows = [
             {"owner_id": owner_id, "node_id": node_id, "entity_id": eid, "created_at": now}
@@ -962,10 +979,11 @@ class PostgresGraphBackend:
             pg_insert(graph_node_entities)
             .values(rows)
             .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
+            .returning(graph_node_entities.c.entity_id)
         )
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, guard_personas)
-            conn.execute(stmt)
+            return [str(e) for e in conn.execute(stmt).scalars()]
 
     def nodes_for_entity(self, owner_id: str, entity_id: str) -> list[ConceptNode]:
         """All nodes that concern ``entity_id`` (criterion 2 — the entity thread)."""

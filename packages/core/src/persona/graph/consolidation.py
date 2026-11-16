@@ -156,14 +156,14 @@ class _ConsolidationBackend(Protocol):
     ) -> bool: ...
     def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None: ...
     def entities_for_node(self, owner_id: str, node_id: str) -> list[str]: ...
-    def associate_entities(
+    def associate_entities_returning(
         self,
         owner_id: str,
         node_id: str,
         entity_ids: Sequence[str],
         *,
         guard_personas: Sequence[str] = (),
-    ) -> None: ...
+    ) -> list[str]: ...
     def remove_entity_associations(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
@@ -416,9 +416,11 @@ class ConsolidationPass:
             mirrors, sources, asserters = self._plan_mirrors(
                 owner_id, member, canonical, tag=tag, now=now
             )
-            added = self._entities_to_copy(owner_id, member, canonical)
+            to_copy = self._entities_to_copy(owner_id, member, canonical)
             # R9-284 (D-R9-284-write-guard): the merge record first, in a transaction that holds
-            # the member's personas, listing the mirrors and entity links this merge will make.
+            # the member's personas, listing the mirrors this merge will make. Its entity links
+            # are recorded only once made, and only those the association added (round 6 L-4):
+            # a pending record lists none, so a give back removes none.
             # An erasure landing at any later point finds them through the record; one that has
             # already landed refuses this write, and nothing below happens.
             self._mark_merged(
@@ -427,7 +429,7 @@ class ConsolidationPass:
                 canonical,
                 run_id=run_id,
                 mirrored=[m.id for m in mirrors],
-                added=added,
+                added=[],
                 # The record lists knowledge of the sources' asserters too (review round 5 H1).
                 personas=sorted({*personas, *asserters.values()}),
                 sources=sources,
@@ -443,7 +445,9 @@ class ConsolidationPass:
                 )
             ]
             self._backend.close_edges_incident(owner_id, member.id, invalidated_by=tag)
-            self._backend.associate_entities(owner_id, canonical.id, added, guard_personas=personas)
+            added = self._backend.associate_entities_returning(
+                owner_id, canonical.id, to_copy, guard_personas=personas
+            )
             # The act is whole: the record says so, listing only the mirrors made. Until this
             # write it stays "pending", and the next run gives the member back.
             self._mark_merged(
