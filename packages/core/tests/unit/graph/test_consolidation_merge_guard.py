@@ -572,3 +572,66 @@ def test_the_alias_accretion_retries_on_a_fresh_read_after_a_stale_write() -> No
     )._accrete_aliases("u1", "k", ["m"], run_id="r1", now=_NOW)  # noqa: SLF001
 
     assert backend.expected == [canonical.content_hash, canonical.content_hash]
+
+
+class _GiveBackFails(_ClobberedRecord):
+    """Round 10 LOW-2: the give back from the record in hand fails part way."""
+
+    def __init__(self, canonical: ConceptNode, member: ConceptNode, *, gone: bool) -> None:
+        super().__init__(canonical, member)
+        self._gone = gone
+        self.restored: list[dict[str, Any]] = []
+
+    def delete_open_mirror(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        raise RuntimeError("the connection broke")
+
+    def get_node(self, owner: str, node_id: str) -> ConceptNode | None:
+        if self._gone and node_id == "m":
+            return None
+        return super().get_node(owner, node_id)
+
+    def is_merged(self, *_a: Any) -> bool:  # noqa: ANN401
+        return True
+
+    def set_merged_into(self, owner: str, node_id: str, **kw: Any) -> None:  # noqa: ANN401
+        record = json.loads(kw["metadata"]["_k7_merge"])
+        if record["state"] == "pending" and len(self.records) >= 1:
+            self.restored.append(record)
+        super().set_merged_into(owner, node_id, **kw)
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_a_failed_give_back_from_the_record_in_hand_stays_findable(
+    gone: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from persona.graph import consolidation as module  # noqa: PLC0415
+    from persona.graph.errors import GraphMergeConflictError  # noqa: PLC0415
+
+    alerts: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(module._log, "error", lambda msg, **kw: alerts.append((msg, kw)))  # noqa: SLF001
+    canonical = _node("k", _Q)
+    member = _node("m", _P, None, _P)
+    backend = _GiveBackFails(canonical, member, gone=gone)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    with pytest.raises(GraphMergeConflictError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            "u1", canonical, [member], run_id="r1", now=_NOW, epoch=1
+        )
+
+    if gone:
+        ((message, fields),) = alerts
+        assert message.startswith("OPERATOR ALERT: consolidation give back failed")
+        assert fields["mirrors"] == ["k::causal::x"]
+        assert backend.restored == []
+    else:
+        assert alerts == []
+        ((restored),) = backend.restored
+        assert restored["run_id"] == "r1"
+        assert restored["state"] == "pending", "the next run finds and finishes it"

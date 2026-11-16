@@ -135,6 +135,7 @@ class _ConsolidationBackend(Protocol):
 
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
     def pending_merges(self, owner_id: str) -> list[str]: ...
+    def is_merged(self, owner_id: str, node_id: str) -> bool: ...
     def merge_records_listing(
         self, owner_id: str, *, run_id: str, mirror_ids: Sequence[str]
     ) -> dict[str, str]: ...
@@ -872,7 +873,55 @@ class ConsolidationPass:
             on_row = None
         if isinstance(on_row, dict) and on_row.get("run_id") == pending.get("run_id"):
             return  # the row's own record: the cluster's give back reads it
-        self._unmerge_with(owner_id, node_id, current, pending)
+        try:
+            self._unmerge_with(owner_id, node_id, current, pending)
+        except Exception as exc:  # noqa: BLE001 - kept findable; the conflict is still raised
+            self._keep_pending_findable(owner_id, node_id, pending, exc)
+
+    def _keep_pending_findable(
+        self, owner_id: str, node_id: str, pending: dict[str, object], exc: Exception
+    ) -> None:
+        """A give back from the record in hand failed part way (round 10 LOW-2).
+
+        If the member is still there and merged, the pending record goes back onto its row, so
+        the next run's recovery finds and finishes it. If it is gone, nothing could carry the
+        record: the operator is told which mirrors may be left.
+        """
+        mirrors = pending.get("mirrored_edges")
+        mirror_ids = sorted(map(str, mirrors)) if isinstance(mirrors, list) else []
+        current = self._backend.get_node(owner_id, node_id)
+        if current is None:
+            _log.error(
+                "OPERATOR ALERT: consolidation give back failed for a removed member "
+                "owner={owner} node={node} mirrors={mirrors} error={err}",
+                owner=owner_id,
+                node=node_id,
+                mirrors=mirror_ids,
+                err=type(exc).__name__,
+            )
+            return
+        if not self._backend.is_merged(owner_id, node_id):
+            return  # the give back got as far as clearing it: nothing left to find
+        record = {**pending, "state": _PENDING}
+        metadata = {**current.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
+        try:
+            self._backend.set_merged_into(
+                owner_id,
+                node_id,
+                merged_into=str(pending.get("canonical")),
+                metadata=metadata,
+                content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
+                expected_content_hash=current.content_hash,
+            )
+        except Exception as again:  # noqa: BLE001 - the operator is told
+            _log.error(
+                "OPERATOR ALERT: consolidation give back failed and its record could not be "
+                "restored owner={owner} node={node} mirrors={mirrors} error={err}",
+                owner=owner_id,
+                node=node_id,
+                mirrors=mirror_ids,
+                err=type(again).__name__,
+            )
 
     def _unmerge_with(
         self,
