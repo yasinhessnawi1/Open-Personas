@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import credit_transactions as credit_transactions_t
+from persona_api.db.models import erasures as erasures_t
 from persona_api.db.models import jobs as jobs_t
 from persona_api.db.models import payg_grants as payg_grants_t
 from persona_api.db.models import personas as personas_t
@@ -270,8 +271,30 @@ def _step_personas(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
     owner = erasure.owner_id
     with deps.engine.connect() as conn:
         now = _ids(conn, select(personas_t.c.id).where(personas_t.c.owner_id == owner))
+    if now:
+        # Recorded, so the later steps (the audit re-key) know every persona this run met,
+        # one created since the claim included (review round 3 MEDIUM-1).
+        ErasureLedger(deps.engine).add_captured(erasure.id, "personas", now)
     ids = sorted(set(erasure.captured.get("personas", [])) | set(now))
     return {"personas": sum(_erase_one_persona(deps, owner, pid) for pid in ids)}
+
+
+def personas_ever_owned(deps: AccountEraseDeps, erasure: Erasure) -> list[str]:
+    """Every persona whose kept audit log may name the owner (review round 3 MEDIUM-1).
+
+    The personas the claim captured, those the personas step met (recorded in the ledger),
+    and every persona of this owner the ledger ever erased: one deleted before the account
+    keeps its ``{persona}.jsonl`` too (ruling 5), with the owner as an author in it.
+    """
+    with deps.engine.connect() as conn:
+        erased = _ids(
+            conn,
+            select(erasures_t.c.subject_id).where(
+                erasures_t.c.subject_kind == SubjectKind.PERSONA.value,
+                erasures_t.c.owner_id == erasure.owner_id,
+            ),
+        )
+    return sorted(set(erasure.captured.get("personas", [])) | set(erased))
 
 
 def _retained_rows(conn: Connection, erasure: Erasure, until: datetime) -> list[dict[str, Any]]:
@@ -392,7 +415,7 @@ def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
         deps.persona.audit_root, owner_id=erasure.owner_id, erasure_id=erasure.id
     ) + rekey_persona_audit_files(
         deps.persona.audit_root,
-        list(erasure.captured.get("personas", [])),
+        personas_ever_owned(deps, erasure),
         owner_id=erasure.owner_id,
         erasure_id=erasure.id,
     )

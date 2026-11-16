@@ -489,3 +489,33 @@ def test_no_store_audit_column_names_the_account(
             {"o": OWNER},
         ).scalar_one()
     assert naming == 0
+
+
+_OLD = "persona_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+
+def test_no_kept_audit_file_names_the_account(
+    seeded: Seeded,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Review round 3 MEDIUM-1: a persona deleted before the account keeps its JSONL log,
+    with the owner as an author in it; the account erasure re-keys that one too."""
+    import json  # noqa: PLC0415
+
+    old = ErasureLedger(seeded.engine).claim(
+        owner_id=OWNER, subject_kind=SubjectKind.PERSONA, subject_id=_OLD, captured={}
+    )
+    ErasureLedger(seeded.engine).complete(old.id)
+    event = {"persona_id": _OLD, "written_by": OWNER, "action": "write", "store": "identity"}
+    (seeded.audit_root / f"{_OLD}.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+    erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
+
+    ae.erase_account(_deps(seeded, platform, embedder), erasure)
+
+    naming = [
+        path.name
+        for path in seeded.audit_root.rglob("*")
+        if path.is_file() and OWNER.encode() in path.read_bytes()
+    ]
+    assert naming == [], "no kept audit file names the account"

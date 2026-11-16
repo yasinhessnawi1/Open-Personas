@@ -607,3 +607,44 @@ def test_the_snapshot_carries_when_the_subscription_started(billing_engine: Engi
     record = ae.retained_subscription(erasure)
     assert record is not None
     assert record["occurred_at"] == started
+
+
+# ---- every persona's kept log (review round 3 MEDIUM-1) --------------------------------
+
+
+def test_the_audit_rekey_covers_every_persona_the_owner_ever_had(engine: Engine) -> None:
+    """Captured at the claim, met later, and erased before the account (ledger rows)."""
+    ledger = ErasureLedger(engine)
+    old = ledger.claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id="persona_old", captured={}
+    )
+    ledger.complete(old.id)
+    ledger.claim(
+        owner_id="user_someone_else",
+        subject_kind=SubjectKind.PERSONA,
+        subject_id="persona_theirs",
+        captured={},
+    )
+    erasure = _claim(engine, {"personas": ["persona_now"], "origin": [ae.ORIGIN_ROUTE]})
+
+    assert ae.personas_ever_owned(_deps(engine), erasure) == ["persona_now", "persona_old"]
+
+
+def test_the_personas_step_records_every_persona_it_met(
+    billing_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persona created after the claim is recorded, so the audit step re-keys its log."""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    monkeypatch.setattr(ae, "_erase_one_persona", lambda *_a: 1)
+    erasure = _claim(billing_engine, {"personas": ["persona_a"], "origin": [ae.ORIGIN_ROUTE]})
+    with billing_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id) VALUES ('persona_late', :o)"), {"o": _OWNER}
+        )
+
+    ae._step_personas(_deps(billing_engine), erasure)  # noqa: SLF001
+
+    recorded = ErasureLedger(billing_engine).get(SubjectKind.ACCOUNT, _OWNER)
+    assert recorded is not None
+    assert recorded.captured["personas"] == ["persona_a", "persona_late"]
