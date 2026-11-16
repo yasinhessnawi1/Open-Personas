@@ -585,3 +585,26 @@ def test_an_event_about_another_persona_names_no_owner(engine: Engine, root: Pat
     assert owner_candidates(store, _GONE) == {_OWNER}
     assert sweep_legacy_audit_files(engine, root) == LegacySweepCounts(claimed=1)
     assert _erasures(engine) == [(_OWNER, _GONE, ErasureState.PENDING.value)]
+
+
+def test_the_cli_exits_1_on_a_refusal(
+    engine: Engine,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 2 MEDIUM-2: an engine that cannot see every row is a failure to the operator."""
+    import persona_api.config  # noqa: PLC0415
+    import persona_api.db.engine  # noqa: PLC0415
+
+    class _Config:
+        database_url = "sqlite://"
+        audit_root = str(root)
+
+    monkeypatch.setattr(persona_api.config, "APIConfig", _Config)
+    monkeypatch.setattr(persona_api.db.engine, "create_db_engine", lambda _url: engine)
+    monkeypatch.setattr(legacy_audit_sweep, "sees_every_row", lambda _engine: False)
+
+    assert legacy_audit_sweep.main([]) == 1
+
+    assert "refused=1" in capsys.readouterr().out
