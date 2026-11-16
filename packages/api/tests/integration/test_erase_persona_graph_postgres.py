@@ -394,3 +394,77 @@ def test_the_mirror_of_an_edge_the_persona_asserted_on_a_kept_member_goes(
 
     assert _open_edges(engine, "q_canon2") == set()
     assert counts["mirrors_of_asserted_deleted"] == 1
+
+
+# --- HIGH-1: an erasure interleaved with a merge act (D-R9-284-write-guard) ----------------
+
+
+@pytest.mark.parametrize("after", ["set_merged_into", "upsert_edge"])
+def test_an_erasure_in_the_middle_of_a_merge_leaves_no_mirror(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+    after: str,
+) -> None:
+    """The record is written first, so an erasure landing after it, or after the first mirror,
+    finds every mirror through it; and the merge's next guarded write is refused."""
+    from persona.graph.errors import GraphPersonaGoneError  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node in (_node("i_canon", _OTHER), _node("i_member", _PERSONA), _node("i_x", _OTHER)):
+        backend.insert_node(_OWNER, node, vector)
+    backend.upsert_edge(_OWNER, _edge("e_ix", "i_member", "i_x", _OTHER))
+    erased: list[bool] = []
+    real = getattr(backend, after)
+
+    def _then_erase(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        result = real(*args, **kwargs)
+        if not erased:
+            erased.append(True)
+            with migrated_engine.begin() as conn:
+                conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+            erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+        return result
+
+    setattr(backend, after, _then_erase)
+    settings = GraphSettings()
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=settings,
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=settings,
+    )
+
+    with pytest.raises(GraphPersonaGoneError):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, "i_canon"),
+            [backend.get_node(_OWNER, "i_member")],
+            run_id="ri",
+            now=_NOW,
+            epoch=1,
+        )
+
+    assert erased == [True]
+    assert backend.get_node(_OWNER, "i_member") is None
+    with migrated_engine.connect() as conn:
+        mirrors = conn.execute(
+            text(
+                "SELECT id FROM graph_edges WHERE owner_id = :o "
+                "AND provenance->>'reason' = 'consolidation:ri'"
+            ),
+            {"o": _OWNER},
+        ).all()
+    assert mirrors == [], "no mirror of the erased persona's member survives"

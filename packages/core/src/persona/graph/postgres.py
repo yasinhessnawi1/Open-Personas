@@ -930,7 +930,14 @@ class PostgresGraphBackend:
 
     # ===== node ↔ entity associations (T6b) ===============================
 
-    def associate_entities(self, owner_id: str, node_id: str, entity_ids: Sequence[str]) -> None:
+    def associate_entities(
+        self,
+        owner_id: str,
+        node_id: str,
+        entity_ids: Sequence[str],
+        *,
+        guard_personas: Sequence[str] = (),
+    ) -> None:
         """Record that ``node_id`` concerns each entity (idempotent on the PK)."""
         if not entity_ids:
             return
@@ -945,6 +952,7 @@ class PostgresGraphBackend:
             .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, guard_personas)
             conn.execute(stmt)
 
     def nodes_for_entity(self, owner_id: str, entity_id: str) -> list[ConceptNode]:
@@ -1173,6 +1181,7 @@ class PostgresGraphBackend:
         merged_into: str | None,
         metadata: dict[str, str],
         content_hash: str,
+        guard_personas: Sequence[str] = (),
     ) -> None:
         """Set/clear ``merged_into`` + bookkeeping ``metadata``/``content_hash`` (K7-D-4.4).
 
@@ -1191,6 +1200,7 @@ class PostgresGraphBackend:
             )
         )
         with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, guard_personas)
             conn.execute(stmt)
 
     def merged_members(self, owner_id: str, canonical_id: str) -> list[ConceptNode]:
