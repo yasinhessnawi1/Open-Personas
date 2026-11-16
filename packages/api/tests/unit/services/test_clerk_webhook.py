@@ -393,3 +393,45 @@ def test_a_non_ascii_signature_header_answers_400(monkeypatch: pytest.MonkeyPatc
 
     assert resp.status_code == 400
     assert handled == []
+
+
+# The limit written out (64 KiB), not read from the constant: a constant changed by mistake
+# (a thousand times larger, say) must fail here, not move the tests along with it.
+_LIMIT_LITERAL = 65536
+
+
+def test_the_body_limit_is_64_kib_on_what_is_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, handled = _client(monkeypatch)
+    body = _event()
+
+    resp = client.post(
+        "/v1/webhooks/clerk",
+        content=body,
+        headers={**_signed(body), "content-length": str(_LIMIT_LITERAL + 1)},
+    )
+
+    assert resp.status_code == 413
+    assert handled == []
+
+
+def test_the_body_limit_is_64_kib_on_what_is_streamed(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, handled = _client(monkeypatch)
+
+    def _chunks() -> Any:  # noqa: ANN401
+        yield b"x" * _LIMIT_LITERAL
+        yield b"x"
+
+    resp = client.post("/v1/webhooks/clerk", content=_chunks(), headers=_signed(b""))
+
+    assert resp.status_code == 413
+    assert handled == []
+
+
+def test_exactly_64_kib_gets_past_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, handled = _client(monkeypatch)
+    body = b"x" * _LIMIT_LITERAL
+
+    resp = client.post("/v1/webhooks/clerk", content=body, headers=_signed(body))
+
+    assert resp.status_code == 200, "at the limit: verified and handled, not refused"
+    assert handled == [body]
