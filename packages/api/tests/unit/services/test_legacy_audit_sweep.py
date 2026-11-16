@@ -24,6 +24,7 @@ from persona_api.services.erasure_service import PersonaEraseDeps, erase_persona
 from persona_api.services.legacy_audit_sweep import (
     QUIET_FOR,
     LegacySweepCounts,
+    owner_candidates,
     sweep_legacy_audit_files,
 )
 from sqlalchemy import select, update
@@ -555,3 +556,32 @@ def test_a_tool_log_written_to_just_now_keeps_the_persona_for_a_later_run(
     assert _erasures(engine) == []
     assert tools.exists()
     assert store.read_bytes() == before
+
+
+def test_a_dry_run_counts_a_log_with_nothing_to_clean_as_already_clean(
+    engine: Engine, root: Path
+) -> None:
+    """Review M6: a clean log is not reported as work (no reason, no content key, no tools)."""
+    store = root / f"{_GONE}.jsonl"
+    event = json.loads(_event(_GONE, source="user", written_by="author"))
+    store.write_text(
+        json.dumps({**event, "reason": None, "metadata": {"to_version": "3"}}) + "\n", "utf-8"
+    )
+    _old(store)
+
+    counts = sweep_legacy_audit_files(engine, root, dry_run=True)
+
+    assert counts == LegacySweepCounts(already_clean=1)
+
+
+def test_an_event_about_another_persona_names_no_owner(engine: Engine, root: Path) -> None:
+    """Review M8: only the file's own persona's user events say who owns it."""
+    other_persona = "persona_dddddddddddddddddddddddddddddddd"
+    store, _ = _logs(root, _GONE, _OWNER)
+    with store.open("a", encoding="utf-8") as out:
+        out.write(_event(other_persona, source="user", written_by=_OTHER) + "\n")
+    _old(store)
+
+    assert owner_candidates(store, _GONE) == {_OWNER}
+    assert sweep_legacy_audit_files(engine, root) == LegacySweepCounts(claimed=1)
+    assert _erasures(engine) == [(_OWNER, _GONE, ErasureState.PENDING.value)]
