@@ -13,6 +13,7 @@ from persona.graph.postgres import NodeRelease
 from persona_api.services.forget_graph import (
     ForgetReleaser,
     merged_below,
+    merged_member_texts,
     shared_legacy_mirrors,
 )
 
@@ -156,3 +157,37 @@ def test_a_cycle_below_the_node_is_walked_once() -> None:
 
     assert merged_below(conn, "u1", "n1") == ["n2", "n3"]  # type: ignore[arg-type]
     assert conn.reads == 3
+
+
+class _TreeConn:
+    """n1 has m1 and m2 merged into it, and m2 has m3: their contents, read plainly."""
+
+    below = {"n1": ["m1", "m2"], "m2": ["m3"]}
+    content = {"m1": "first", "m2": "", "m3": "third"}
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+
+    def execute(self, stmt: Any, params: Any = None) -> _Rows:  # noqa: ANN401, ARG002
+        from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+        self.sql.append(str(stmt.compile(dialect=postgresql.dialect())))
+        ids = next(v for v in stmt.compile().params.values() if isinstance(v, list))
+        if "graph_nodes.content" in self.sql[-1]:
+            return _Rows([self.content[i] for i in sorted(ids)])
+        return _Rows([m for node in ids for m in self.below.get(node, [])])
+
+
+def test_a_previews_member_texts_come_from_every_node_merged_below() -> None:
+    """Round 3 LOW-3: the member contents down the chain, empty ones skipped, nothing locked."""
+    conn = _TreeConn()
+
+    assert merged_member_texts(conn, "u1", "n1") == ["first", "third"]  # type: ignore[arg-type]
+    assert not any("FOR UPDATE" in sql for sql in conn.sql), "the preview locks nothing"
+
+
+def test_a_node_with_nothing_merged_below_has_no_member_texts() -> None:
+    conn = _TreeConn()
+
+    assert merged_member_texts(conn, "u1", "lonely") == []  # type: ignore[arg-type]
+    assert len(conn.sql) == 1, "no content read without members"
