@@ -93,6 +93,7 @@ class _Conn:
 
     def execute(self, stmt: Any, params: dict[str, str] | None = None) -> _Result:  # noqa: ANN401
         sql = str(stmt)
+        self._engine.statements.append((self._txn, sql))
         if "FOR KEY SHARE" in sql:
             assert params is not None
             self._engine.log.append((self._txn, f"hold {params['p']}"))
@@ -110,6 +111,7 @@ class _Engine:
     def __init__(self, gone: frozenset[str] = frozenset()) -> None:
         self.gone = set(gone)
         self.log: list[tuple[int, str]] = []
+        self.statements: list[tuple[int, str]] = []
         self._next = 0
 
     def _open(self) -> _Conn:
@@ -239,3 +241,16 @@ def test_a_write_with_no_persona_and_the_guard_off_hold_nothing() -> None:
     _backend(engine, guard=False).insert_node("u1", _node(_P), _VECTOR)
 
     assert [e for e in engine.entries() if e.startswith("hold")] == []
+
+
+def test_add_alias_appends_in_one_statement_in_the_held_transaction() -> None:
+    """Review MEDIUM-2: no read on another connection; the append and the dedupe are SQL."""
+    engine = _Engine()
+
+    _backend(engine).add_alias("u1", "x", EntityAlias(surface="my doctor", persona_id=_P))
+
+    assert engine.entries() == [f"hold {_P}", "update"], "one transaction, no separate read"
+    assert len({txn for txn, _ in engine.log}) == 1
+    (append,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE")]
+    assert "graph_entities.aliases ||" in append, "appended in SQL, not rewritten from a read"
+    assert "NOT (graph_entities.aliases @>" in append, "an alias already there is not repeated"

@@ -317,6 +317,19 @@ def test_entity_crud_and_alias(backend: PostgresGraphBackend) -> None:
     assert got2 is not None
     assert {a.surface for a in got2.aliases} == {"my doctor", "the GP"}
 
+    # R9-284 MEDIUM-2: the append is SQL; the same alias again is not repeated, and one that
+    # differs in any field is appended.
+    backend.add_alias("u1", ent.id, EntityAlias(surface="the GP", confidence=0.8))
+    backend.add_alias("u1", ent.id, EntityAlias(surface="the GP", confidence=0.5))
+    got3 = backend.get_entity("u1", ent.id)
+    assert got3 is not None
+    assert [(a.surface, a.confidence) for a in got3.aliases] == [
+        ("my doctor", None),
+        ("the GP", 0.8),
+        ("the GP", 0.5),
+    ]
+    backend.add_alias("u1", "u1::entity::missing", EntityAlias(surface="x"))  # a no-op
+
 
 def test_entity_candidates_ranks_by_cosine(backend: PostgresGraphBackend) -> None:
     near = CanonicalEntity(id="u1::entity::00000001", canonical_name="near", created_at=NOW)

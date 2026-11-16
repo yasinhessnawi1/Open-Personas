@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import BigInteger, cast, delete, func, or_, select, text, update
+from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -860,15 +860,23 @@ class PostgresGraphBackend:
         return None if row is None else self._row_to_entity(dict(row))
 
     def add_alias(self, owner_id: str, entity_id: str, alias: EntityAlias) -> None:
-        """Append a confirmed surface form to an entity's alias set (K2's MERGE callback)."""
-        existing = self.get_entity(owner_id, entity_id)
-        if existing is None:
-            return
-        merged = [*existing.aliases, alias]
+        """Append a confirmed surface form to an entity's alias set (K2's MERGE callback).
+
+        One UPDATE appends in SQL, in the transaction that holds the alias's persona (R9-284
+        review MEDIUM-2): reading the list on one connection and writing it back on another
+        could rewrite an alias an erasure had just removed, or lose a concurrent append. An
+        alias already in the set, field for field, is not appended again. A missing entity is
+        a no-op, as before.
+        """
+        new = func.jsonb_build_array(literal(alias.model_dump(mode="json"), JSONB))
         stmt = (
             update(graph_entities)
-            .where(graph_entities.c.id == entity_id, graph_entities.c.owner_id == owner_id)
-            .values(aliases=[a.model_dump(mode="json") for a in merged])
+            .where(
+                graph_entities.c.id == entity_id,
+                graph_entities.c.owner_id == owner_id,
+                ~graph_entities.c.aliases.contains(new),
+            )
+            .values(aliases=graph_entities.c.aliases.concat(new))
         )
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, [alias.persona_id])
