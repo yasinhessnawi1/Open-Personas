@@ -4,31 +4,22 @@
  * R9-284 T9: the user deletes their account (D-R9-284-erase ruling 2, cloud only).
  *
  * Immediate, with no grace period (ruling 3), so the card says plainly what goes and what is
- * kept before it asks, and the user confirms by typing their email (or the phrase, when the
- * account has no real email). The server checks the same rule; this only keeps the button off
- * until the text matches. On success the session is signed out and the user lands on the
+ * kept before it asks, and the user confirms by typing what the server expects: the email the
+ * account was stored with, or a phrase when it has no real email (review M5: read from
+ * ``GET /v1/me/erase``, not the identity provider's primary email, which can differ). The
+ * server checks the same string; this only keeps the button off until the text matches. On success the session is signed out and the user lands on the
  * public goodbye page: every later request from this account answers 410.
  */
 
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAccount } from "@/auth";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { unwrap } from "@/lib/api/client";
 import { useApi } from "@/lib/api/use-api";
-
-/** What an account without a real email types (mirrors the api's ``CONFIRM_PHRASE``). */
-export const CONFIRM_PHRASE = "delete my account";
-const NOREPLY = "@users.noreply";
-
-/** What the user must type to confirm: their email, or the phrase without a real one. */
-export function confirmationFor(email: string | null): string {
-  if (!email || email.endsWith(NOREPLY)) return CONFIRM_PHRASE;
-  return email.trim().toLowerCase();
-}
 
 export function DeleteAccountCard() {
   const t = useTranslations("settings");
@@ -39,9 +30,27 @@ export function DeleteAccountCard() {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [expected, setExpected] = useState<string | null>(null);
 
-  const expected = confirmationFor(account.email);
-  const matches = typed.trim().toLowerCase() === expected;
+  // Read the expected confirmation once the form opens; until then nothing can match.
+  useEffect(() => {
+    if (!open || expected !== null) return;
+    let live = true;
+    void (async () => {
+      try {
+        const answer = await unwrap(await api.GET("/v1/me/erase"));
+        if (live) setExpected(answer.confirm);
+      } catch {
+        if (live) setFailed(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, expected, api]);
+
+  const matches =
+    expected !== null && typed.trim().toLowerCase() === expected.toLowerCase();
 
   async function erase() {
     setBusy(true);
@@ -86,7 +95,9 @@ export function DeleteAccountCard() {
             htmlFor="delete-account-confirm"
             className="type-ui flex flex-col gap-1.5"
           >
-            {t("deleteAccountConfirmLabel", { expected })}
+            {expected === null
+              ? t("deleteAccountWorking")
+              : t("deleteAccountConfirmLabel", { expected })}
           </label>
           <Input
             id="delete-account-confirm"

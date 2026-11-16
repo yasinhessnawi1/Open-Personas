@@ -38,6 +38,44 @@ class AccountEraseResponse(BaseModel):
     state: str
 
 
+class AccountEraseConfirmation(BaseModel):
+    """What the caller must type to confirm (review M5): the stored email, or the phrase."""
+
+    confirm: str
+
+
+def _stored_email(platform: Any, user_id: str) -> str | None:  # noqa: ANN401 - an Engine
+    profile = get_user_profile(platform, user_id=user_id)
+    email = None if profile is None else profile.get("email")
+    return email if isinstance(email, str) else None
+
+
+def _platform_or_404(request: Request) -> Any:  # noqa: ANN401 - an Engine
+    state: Any = request.app.state
+    if state.config.edition is not Edition.cloud:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    platform = getattr(state, "platform_engine", None)
+    if platform is None:
+        raise AccountErasureUnavailableError("account deletion is not available", context={})
+    return platform
+
+
+@router.get("/erase", response_model=AccountEraseConfirmation)
+def account_erase_confirmation(  # sync: the profile read blocks
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> AccountEraseConfirmation:
+    """The confirmation the delete expects, read from the account as stored here.
+
+    The web shows this rather than the identity provider's primary email, which can differ
+    from the email this account was provisioned with.
+    """
+    platform = _platform_or_404(request)
+    return AccountEraseConfirmation(
+        confirm=_expected_confirmation(_stored_email(platform, user.id))
+    )
+
+
 def _expected_confirmation(email: str | None) -> str:
     if not email or email.endswith(_NOREPLY):
         return CONFIRM_PHRASE
@@ -58,11 +96,7 @@ def erase_account(  # sync: the claim and the profile read block, so it runs in 
     platform = getattr(state, "platform_engine", None)
     if runner is None or platform is None:
         raise AccountErasureUnavailableError("account deletion is not available", context={})
-    profile = get_user_profile(platform, user_id=user.id)
-    email = None if profile is None else profile.get("email")
-    if body.confirm.strip().lower() != _expected_confirmation(
-        email if isinstance(email, str) else None
-    ):
+    if body.confirm.strip().lower() != _expected_confirmation(_stored_email(platform, user.id)):
         raise AccountEraseConfirmationError("the confirmation does not match", context={})
     if runner.unready_reason(owner_id=user.id, origin=ORIGIN_ROUTE) is not None:
         # Review H2: never accept a deletion the runner would only fail to finish.

@@ -12,19 +12,17 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import messages from "@/i18n/messages/en.json";
-import {
-  CONFIRM_PHRASE,
-  confirmationFor,
-  DeleteAccountCard,
-} from "./delete-account-card";
+import { DeleteAccountCard } from "./delete-account-card";
 
 const apiPost = vi.fn();
+const apiGet = vi.fn();
+const PHRASE = "delete my account";
 const signOut = vi.fn();
 const replace = vi.fn();
 let email: string | null = "Ann@Example.test";
 
 vi.mock("@/lib/api/use-api", () => ({
-  useApi: () => ({ POST: apiPost }),
+  useApi: () => ({ POST: apiPost, GET: apiGet }),
 }));
 
 vi.mock("@/auth", () => ({
@@ -42,6 +40,14 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace }),
 }));
 
+/** The server's expected confirmation (review M5), as GET /v1/me/erase answers it. */
+function expects(confirm: string) {
+  apiGet.mockResolvedValue({
+    response: new Response(null, { status: 200 }),
+    data: { confirm },
+  });
+}
+
 function renderCard() {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
@@ -54,8 +60,10 @@ function slot(name: string): HTMLElement {
   return document.querySelector(`[data-slot="${name}"]`) as HTMLElement;
 }
 
-function openAndType(text: string) {
+async function openAndType(text: string) {
   fireEvent.click(slot("delete-account-start"));
+  await waitFor(() => expect(apiGet).toHaveBeenCalledWith("/v1/me/erase"));
+  await screen.findByText(/To confirm, type/);
   fireEvent.change(slot("delete-account-confirm"), {
     target: { value: text },
   });
@@ -63,26 +71,17 @@ function openAndType(text: string) {
 
 afterEach(() => {
   apiPost.mockReset();
+  apiGet.mockReset();
   signOut.mockReset();
   replace.mockReset();
   email = "Ann@Example.test";
 });
 
-describe("confirmationFor", () => {
-  it("is the email, trimmed and in lower case", () => {
-    expect(confirmationFor(" Ann@Example.test ")).toBe("ann@example.test");
-  });
-
-  it("is the phrase without a real email", () => {
-    expect(confirmationFor(null)).toBe(CONFIRM_PHRASE);
-    expect(confirmationFor("user_2abc@users.noreply")).toBe(CONFIRM_PHRASE);
-  });
-});
-
 describe("delete account card", () => {
-  it("keeps the button off until the confirmation matches", () => {
+  it("keeps the button off until the confirmation matches", async () => {
+    expects("ann@example.test");
     renderCard();
-    openAndType("someone@else.test");
+    await openAndType("someone@else.test");
 
     expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
       true,
@@ -98,8 +97,9 @@ describe("delete account card", () => {
       response: new Response(null, { status: 202 }),
       data: { erasure_id: "erasure_1", state: "pending" },
     });
+    expects("ann@example.test");
     renderCard();
-    openAndType("ann@example.test");
+    await openAndType("ann@example.test");
 
     fireEvent.click(slot("delete-account-submit"));
 
@@ -117,8 +117,9 @@ describe("delete account card", () => {
       response: new Response(null, { status: 422 }),
       error: { error: "account_erase_unconfirmed", detail: "no" },
     });
+    expects("ann@example.test");
     renderCard();
-    openAndType("ann@example.test");
+    await openAndType("ann@example.test");
 
     fireEvent.click(slot("delete-account-submit"));
 
@@ -127,10 +128,18 @@ describe("delete account card", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
-  it("asks for the phrase when the account has no real email", () => {
-    email = null;
+  it("asks for what the server expects, not the provider's email", async () => {
+    // Review M5: Clerk says Ann@Example.test, the stored account has no real email.
+    expects(PHRASE);
     renderCard();
-    openAndType(CONFIRM_PHRASE);
+    await openAndType("ann@example.test");
+    expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    fireEvent.change(slot("delete-account-confirm"), {
+      target: { value: PHRASE },
+    });
 
     expect((slot("delete-account-submit") as HTMLButtonElement).disabled).toBe(
       false,

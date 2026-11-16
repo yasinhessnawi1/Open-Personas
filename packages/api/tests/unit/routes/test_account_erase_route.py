@@ -145,3 +145,31 @@ def test_a_deletion_the_runner_could_not_finish_is_503_and_claims_nothing(
     assert runner.asked == [(_USER, "route")]
     assert claims == []
     assert runner.submitted == []
+
+
+@pytest.mark.parametrize(
+    ("email", "expected"),
+    [
+        ("Ann@Example.test", "ann@example.test"),
+        (None, route.CONFIRM_PHRASE),
+        (f"{_USER}@users.noreply", route.CONFIRM_PHRASE),
+    ],
+)
+def test_the_expected_confirmation_is_read_from_the_stored_account(
+    monkeypatch: pytest.MonkeyPatch, email: str | None, expected: str
+) -> None:
+    """Review M5: the web shows this, not the identity provider's primary email."""
+    client, claims = _client(monkeypatch, email=email, runner=_Runner())
+
+    resp = client.get("/v1/me/erase", headers={"Authorization": f"Bearer {_USER}"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"confirm": expected}
+    assert claims == [], "reading it claims nothing"
+    assert _post(client, expected).status_code == 202, "and it is what the delete accepts"
+
+
+def test_off_cloud_there_is_no_confirmation_either(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client(monkeypatch, edition=Edition.community, runner=_Runner())
+
+    assert client.get("/v1/me/erase").status_code == 404

@@ -1223,7 +1223,14 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Account Erase Confirmation
+     * @description The confirmation the delete expects, read from the account as stored here.
+     *
+     *     The web shows this rather than the identity provider's primary email, which can differ
+     *     from the email this account was provisioned with.
+     */
+    get: operations["account_erase_confirmation_v1_me_erase_get"];
     put?: never;
     /**
      * Erase Account
@@ -2830,6 +2837,14 @@ export interface components {
       statement: string;
       /** Status */
       status: string;
+    };
+    /**
+     * AccountEraseConfirmation
+     * @description What the caller must type to confirm (review M5): the stored email, or the phrase.
+     */
+    AccountEraseConfirmation: {
+      /** Confirm */
+      confirm: string;
     };
     /** AccountEraseRequest */
     AccountEraseRequest: {
@@ -7786,6 +7801,26 @@ export interface operations {
         };
         content: {
           "application/json": unknown;
+        };
+      };
+    };
+  };
+  account_erase_confirmation_v1_me_erase_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AccountEraseConfirmation"];
         };
       };
     };

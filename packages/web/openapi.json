@@ -2231,6 +2231,24 @@
       }
     },
     "/v1/me/erase": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Account Erase Confirmation",
+        "description": "The confirmation the delete expects, read from the account as stored here.\n\nThe web shows this rather than the identity provider's primary email, which can differ\nfrom the email this account was provisioned with.",
+        "operationId": "account_erase_confirmation_v1_me_erase_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountEraseConfirmation"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": ["me"],
         "summary": "Erase Account",
@@ -5237,6 +5255,18 @@
         "type": "object",
         "required": ["id", "statement", "status"],
         "title": "AcceptanceCriterionOut"
+      },
+      "AccountEraseConfirmation": {
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "title": "Confirm"
+          }
+        },
+        "type": "object",
+        "required": ["confirm"],
+        "title": "AccountEraseConfirmation",
+        "description": "What the caller must type to confirm (review M5): the stored email, or the phrase."
       },
       "AccountEraseRequest": {
         "properties": {
