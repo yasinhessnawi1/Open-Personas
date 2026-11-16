@@ -680,3 +680,64 @@ def test_a_dry_run_counts_a_claimed_personas_rekey(engine: Engine, root: Path) -
 
     assert counts == LegacySweepCounts(claimed=1, rekeyed=1)
     assert store.read_bytes() == before
+
+
+def test_a_persona_with_an_open_erasure_beside_a_complete_one_is_not_backlog(
+    engine: Engine, root: Path
+) -> None:
+    """Survivor m08: a second erasure is running; its own files step cleans the log."""
+    _complete(engine, _GONE)
+    ErasureLedger(engine).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=_GONE, captured={}
+    )
+    store, tools = _logs(root, _GONE, _OWNER)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(kept_known=1)
+    assert store.read_bytes() == before
+    assert tools.exists()
+
+
+def test_the_latest_account_erasure_names_the_author(engine: Engine, root: Path) -> None:
+    """Survivor m10: an account erased twice is named by its latest erasure."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    erased = "user_erased"
+    ledger = ErasureLedger(engine)
+    first = ledger.claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            update(erasures_t)
+            .where(erasures_t.c.id == first.id)
+            .values(
+                state=ErasureState.COMPLETE.value,
+                requested_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+    latest = ledger.claim(
+        owner_id=erased, subject_kind=SubjectKind.ACCOUNT, subject_id=erased, captured={}
+    )
+    assert latest.id != first.id
+    store, _ = _logs(root, _GONE, erased)
+
+    sweep_legacy_audit_files(engine, root)
+
+    events = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert {e["written_by"] for e in events if e["source"] == "user"} == {latest.id}
+
+
+def test_a_dry_run_counts_only_backlog_with_something_to_clean(engine: Engine, root: Path) -> None:
+    """Survivor m23: a completed erasure's log with nothing left is not reported as work."""
+    _complete(engine, _GONE)
+    store = root / f"{_GONE}.jsonl"
+    event = json.loads(_event(_GONE, source="user", written_by=_OWNER))
+    store.write_text(
+        json.dumps({**event, "reason": None, "metadata": {"to_version": "3"}}) + "\n", "utf-8"
+    )
+    _old(store)
+
+    assert sweep_legacy_audit_files(engine, root, dry_run=True) == LegacySweepCounts(kept_known=1)
