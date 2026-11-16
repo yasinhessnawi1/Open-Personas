@@ -103,3 +103,19 @@ def test_the_preview_still_needs_the_node(client: TestClient) -> None:
     preview = client.post("/v1/memory/nodes/n1/forget-preview", headers=_AUTH)
 
     assert preview.status_code == 404
+
+
+def test_only_the_owners_personas_evidence_is_removed(client: TestClient) -> None:
+    """A pair naming a persona that is not the caller's is dropped before any delete."""
+    _Episodic.fail_next = False
+    body = {
+        "episodic": [
+            {"persona_id": "p1", "chunk_id": "c1"},
+            {"persona_id": "p_foreign", "chunk_id": "c2"},
+        ]
+    }
+
+    resp = client.post("/v1/memory/nodes/n1/forget", json=body, headers=_AUTH)
+
+    assert resp.status_code == 204
+    assert _Episodic.removed == [("p1", ["c1"])]
