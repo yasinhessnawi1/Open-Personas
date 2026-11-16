@@ -7,7 +7,7 @@
  * `@clerk/*` itself — it's edition-agnostic.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account } from "@/auth/types";
@@ -50,7 +50,7 @@ describe("AccountMenu", () => {
     };
   });
 
-  it("cloud: shows the user name and a Sign-out action", () => {
+  it("cloud: shows the user name and a Sign-out action", async () => {
     const signOut = vi.fn();
     account = {
       name: "Ada Lovelace",
@@ -66,7 +66,8 @@ describe("AccountMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Account" }));
     const signOutItem = screen.getByText("Sign out");
     fireEvent.click(signOutItem);
-    expect(signOut).toHaveBeenCalled();
+    // Called on the next microtask, so a throw is caught too (R9-284 T9 round 4 LOW-5).
+    await waitFor(() => expect(signOut).toHaveBeenCalled());
   });
 
   it("cloud without a name: renders the email ONCE, not twice (R4 T1)", () => {
@@ -144,5 +145,59 @@ describe("billing entry point (R9-137)", () => {
       billing.getAttribute("href") ??
       billing.closest("a")?.getAttribute("href");
     expect(href).toBe("/settings/billing");
+  });
+});
+
+describe("sign-out that fails (R9-284 T9, round 3 LOW-7)", () => {
+  it("is caught, not left as an unhandled rejection", async () => {
+    // The menu must attach a handler to the promise sign-out returns.
+    const failed = Promise.reject(new Error("clerk is down"));
+    failed.catch(() => undefined); // this test's own copy never goes unhandled
+    const handled = vi.spyOn(failed, "then");
+    // A plain function: vi.fn would itself call .then on what it returns, to track it.
+    let calls = 0;
+    const signOut = () => {
+      calls += 1;
+      return failed;
+    };
+    account = {
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut,
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    fireEvent.click(screen.getByText("Sign out"));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+    expect(handled).toHaveBeenCalled();
+  });
+
+  it("catches a sign-out that throws at once (round 4 LOW-5)", async () => {
+    let calls = 0;
+    const signOut = () => {
+      calls += 1;
+      throw new Error("clerk not loaded");
+    };
+    account = {
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      imageUrl: null,
+      available: true,
+      signOut,
+      manageAccount: vi.fn(),
+    };
+    wrap(<AccountMenu />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    expect(() => fireEvent.click(screen.getByText("Sign out"))).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toBe(1);
   });
 });

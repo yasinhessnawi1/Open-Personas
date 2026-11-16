@@ -71,6 +71,13 @@ grep -q "^PERSONA_INITIATIVE_ENABLED='\?false'\?$" "${OP_ENV_DIR}/api.env" 2>/de
   && ok "initiative OFF (owner condition)" || warn "PERSONA_INITIATIVE_ENABLED is not false: was the A5-R-1 re-run green and did the owner say so?"
 grep -q "^PERSONA_ALLOW_PER_TENANT_MCP='\?0'\?$" "${OP_ENV_DIR}/api.env" 2>/dev/null \
   && ok "per-tenant MCP OFF" || warn "PERSONA_ALLOW_PER_TENANT_MCP is not 0: is its runtime (the MCP seam) deployed?"
+# Account deletion (R9-284 T9). Its two Clerk keys carry __OWNER_CLERK_PROD__ in the template,
+# so the unresolved-token check above blocks until each is pasted or deliberately set empty.
+# Set empty, the feature is off (every deletion answers 503): warned here like the flags above.
+for key in PERSONA_CLERK_SECRET_KEY PERSONA_CLERK_WEBHOOK_SECRET; do
+  grep -qE "^${key}='?[^'[:space:]]+" "${OP_ENV_DIR}/api.env" 2>/dev/null \
+    && ok "${key} set" || warn "${key} is empty: account deletion answers 503 until it is set"
+done
 if grep -qE '^(FLY_API_TOKEN|PERSONA_MCP_RUNTIME_FLY_APP)=' "${OP_ENV_DIR}"/*.env 2>/dev/null; then
   bad "a Fly MCP runtime setting is present; its Fly app no longer exists"
 fi

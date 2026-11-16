@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 from persona.billing import PAYG_PACKS, PaygPack, get_plan
 from persona.logging import get_logger
 
+from persona_api.billing.account_erasure import cancel_if_erased
 from persona_api.billing.gateway import AUTO_TOPUP_SOURCE
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services import subscription_service
@@ -143,10 +144,32 @@ def _apply_scoped(context: WebhookContext, container: Any, write_fn: Callable[[s
 # --- the per-event handlers ---------------------------------------------------
 
 
+def _cancelled_for_an_erased_account(
+    context: WebhookContext,
+    container: Any,  # noqa: ANN401
+    subscription_id: str,
+) -> bool:
+    """R9-284 T9 (review M4): a subscription for a Customer no user owns any more is checked
+    against the erasure relabel and, if it is an erased account's, cancelled at once. Only for
+    an unknown customer, so the normal path makes no extra Stripe call."""
+    customer = str(_field(container, "customer") or "")
+    if not customer or context.stripe_client is None or not subscription_id:
+        return False
+    if subscription_service.resolve_user_by_customer(
+        context.admin_engine, stripe_customer_id=customer
+    ):
+        return False
+    return cancel_if_erased(
+        context.stripe_client, customer_id=customer, subscription_id=subscription_id
+    )
+
+
 def handle_checkout_completed(event: stripe.Event, context: WebhookContext) -> None:
     """``checkout.session.completed`` — bind the subscription id + mark active."""
     session = _obj(event)
     subscription_id = str(_field(session, "subscription") or "")
+    if _cancelled_for_an_erased_account(context, session, subscription_id):
+        return
 
     def _write(user_id: str) -> None:
         subscription_service.bind_subscription(
@@ -162,6 +185,8 @@ def handle_checkout_completed(event: stripe.Event, context: WebhookContext) -> N
 def handle_subscription_updated(event: stripe.Event, context: WebhookContext) -> None:
     """``customer.subscription.updated`` — plan/status/period/cancel (monotonic-guarded)."""
     sub = _obj(event)
+    if _cancelled_for_an_erased_account(context, sub, str(_field(sub, "id") or "")):
+        return
     plan_code = context.config.plan_code_for_price(_nested_price_id(sub) or "")
     period_start = _epoch_to_dt(_field(sub, "current_period_start"))
     period_end = _epoch_to_dt(_field(sub, "current_period_end"))
@@ -180,6 +205,16 @@ def handle_subscription_updated(event: stripe.Event, context: WebhookContext) ->
         )
 
     _apply_scoped(context, sub, _write)
+
+
+def handle_subscription_created(event: stripe.Event, context: WebhookContext) -> None:
+    """``customer.subscription.created``: only the erased-account guard (R9-284 T9 M4).
+
+    A created subscription is bound by ``checkout.session.completed``; this event matters
+    only when the Customer belongs to an erased account, where it is cancelled at once.
+    """
+    sub = _obj(event)
+    _cancelled_for_an_erased_account(context, sub, str(_field(sub, "id") or ""))
 
 
 def handle_subscription_deleted(event: stripe.Event, context: WebhookContext) -> None:
@@ -416,6 +451,7 @@ def lifecycle_handlers() -> dict[str, Callable[[stripe.Event, WebhookContext], N
     """The subscription-lifecycle + PAYG handler registry (Spec M4, T3b/T4a)."""
     return {
         "checkout.session.completed": handle_checkout_completed,
+        "customer.subscription.created": handle_subscription_created,
         "customer.subscription.updated": handle_subscription_updated,
         "customer.subscription.deleted": handle_subscription_deleted,
         "invoice.paid": handle_invoice_paid,

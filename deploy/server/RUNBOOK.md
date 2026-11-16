@@ -282,6 +282,10 @@ Edit the files in `~/op-env`:
     keys > the JWT public key, PEM format. The same PEM in both.
   - `PERSONA_CONNECTORS_JWT_JWKS_URL`: `https://clerk.openpersonas.si/.well-known/jwks.json`.
   - `PERSONA_CONNECTORS_JWT_SECRET`: the HS256 development path; delete the line.
+  - `PERSONA_CLERK_SECRET_KEY` (Configure > API keys > the secret key) and
+    `PERSONA_CLERK_WEBHOOK_SECRET` (Webhooks > the `user.deleted` endpoint's signing secret,
+    `whsec_...`): paste from the production instance, or set empty to leave account deletion
+    off (every deletion then answers 503, and preflight and the api's boot log say so).
   - Check under Configure > JWT templates that the `persona-api` template has
     `aud` = `persona-api`.
 - `PERSONA_VOICE_SERVICE_URL` stays **empty**: voice is not up yet, and the api answers its
@@ -542,7 +546,8 @@ check each of these in the rendered files.
 
 | where | the new value |
 |---|---|
-| Stripe (test mode): webhook endpoint | `https://api.openpersonas.si/v1/billing/webhook` (then the new signing secret into `PERSONA_STRIPE_WEBHOOK_SECRET`) |
+| Stripe (test mode): webhook endpoint | `https://api.openpersonas.si/v1/billing/webhook` (then the new signing secret into `PERSONA_STRIPE_WEBHOOK_SECRET`), subscribed to `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed` and `payment_intent.succeeded`. `customer.subscription.created` is new with account deletion (R9-284 T9): it is how a subscription made for an erased account's Customer is cancelled at once |
+| Clerk (production instance): webhook endpoint | `https://api.openpersonas.si/v1/webhooks/clerk`, subscribed to `user.deleted` (then its signing secret into `PERSONA_CLERK_WEBHOOK_SECRET`; the Backend API secret key goes into `PERSONA_CLERK_SECRET_KEY`) |
 | Stripe checkout and portal return URLs (`PERSONA_STRIPE_CHECKOUT_*_URL`, `PERSONA_STRIPE_PORTAL_RETURN_URL`) | on `https://app.openpersonas.si` |
 | Discord and Slack OAuth redirect URIs (their developer portals, and `PERSONA_CONNECTORS_*_OAUTH_REDIRECT_URI`) | `https://connectors.openpersonas.si/discord/oauth/callback`, `.../slack/oauth/callback` |
 | Slack events URL | `https://connectors.openpersonas.si/slack/events` |

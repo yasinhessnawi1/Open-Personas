@@ -63,6 +63,12 @@ vi.mock("@/components/settings/preferences-card", () => ({
   PreferencesCard: () => null,
 }));
 
+// R9-284 T9: a client card reaching Clerk and the api; covered by its own suite. Stubbed
+// with a marker so the page's cloud-only gate can be asserted.
+vi.mock("@/components/settings/delete-account-card", () => ({
+  DeleteAccountCard: () => <div data-slot="delete-account-card-stub" />,
+}));
+
 /**
  * Drives the page's real reads with a given balance. Billing is on (cloud) by default;
  * "404" answers the config read as community does, "disabled" as a metered install
@@ -221,5 +227,24 @@ describe("billing entry point (R9-137)", () => {
     const nav = document.querySelector('nav a[href="/settings/billing"]');
     expect(nav).not.toBeNull();
     expect(nav?.textContent).toBe("Billing");
+  });
+});
+
+describe("account deletion (R9-284 T9)", () => {
+  it.each([
+    ["cloud", true],
+    ["community", false],
+  ] as const)("is offered on %s: %s", async (edition, offered) => {
+    build.edition = edition;
+    try {
+      serveBalance(500, false);
+      await renderPage();
+      expect(
+        document.querySelector('[data-slot="delete-account-card-stub"]') !==
+          null,
+      ).toBe(offered);
+    } finally {
+      build.edition = "cloud";
+    }
   });
 });

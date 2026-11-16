@@ -2215,6 +2215,9 @@ erasures = Table(
         sqlite_where=text("state <> 'complete'"),
     ),
     Index("idx_erasures_owner", "owner_id"),
+    # Every erasure of a subject, finished or not: the per-request account fence (R9-284 T9)
+    # asks whether an id was ever erased, so it must find complete rows too.
+    Index("idx_erasures_subject", "subject_kind", "subject_id"),
     # The sweep's read: what never finished. Partial, so finished history costs it nothing.
     Index(
         "idx_erasures_unfinished",
@@ -2222,4 +2225,40 @@ erasures = Table(
         postgresql_where=text("state <> 'complete'"),
         sqlite_where=text("state <> 'complete'"),
     ),
+)
+
+
+# Paid billing records of an erased account, kept for the legal retention period
+# (D-R9-284-account-erase). The user's own rows go with the account; this copy carries the
+# erasure id instead of the user id, and no foreign key, so it outlives the ``users`` row.
+# Platform only: RLS is forced with no policy, so ``persona_app`` reads and writes nothing.
+retained_billing_records = Table(
+    "retained_billing_records",
+    metadata,
+    Column("id", Text, primary_key=True, server_default=_uuid_pk),
+    Column("erasure_id", Text, nullable=False),
+    # Which live table the row was copied from, and its id there (a resumed copy adds nothing).
+    Column("source_table", Text, nullable=False),
+    Column("source_id", Text, nullable=False),
+    Column("reason", Text),
+    Column("credits", Integer),
+    Column("billing_key", Text),
+    Column("cost_cents", Float),
+    Column("stripe_customer_id", Text),
+    Column("stripe_subscription_id", Text),
+    Column("occurred_at", DateTime(timezone=True)),
+    Column("retained_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("retain_until", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "source_table IN ('credit_transactions', 'payg_grants', 'subscription')",
+        name="retained_billing_records_source_check",
+    ),
+    Index(
+        "uq_retained_billing_source",
+        "erasure_id",
+        "source_table",
+        "source_id",
+        unique=True,
+    ),
+    Index("idx_retained_billing_until", "retain_until"),
 )

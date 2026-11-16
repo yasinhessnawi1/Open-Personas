@@ -178,3 +178,38 @@ def test_webhook_404_when_billing_disabled() -> None:
     payload = _event()
     resp = _post(client, payload, sig=_sign(payload))
     assert resp.status_code == 404
+
+
+def test_the_route_hands_the_handlers_the_gateways_own_client() -> None:
+    """R9-284 T9 round 3 LOW-6 (the reviewer's M15): the erased-account guard needs it."""
+    handler = MagicMock()
+    client = _make_client(handler=handler)
+    payload = _event("evt_client")
+
+    _post(client, payload, sig=_sign(payload))
+
+    context = handler.call_args[0][1]
+    assert context.stripe_client is client.app.state.stripe_gateway.client
+
+
+def test_the_dispatch_runs_off_the_event_loop() -> None:
+    """R9-284 T9 round 3 LOW-7 (the reviewer's M14): the handlers read the database and may
+    call Stripe, so they run in the threadpool, where no event loop is running."""
+    import asyncio  # noqa: PLC0415
+
+    on_loop: list[bool] = []
+
+    def handler(_event: object, _context: object) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+
+    client = _make_client(handler=handler)  # type: ignore[arg-type]
+    payload = _event("evt_thread")
+
+    _post(client, payload, sig=_sign(payload))
+
+    assert on_loop == [False]

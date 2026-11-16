@@ -189,6 +189,28 @@ class ChainHeadIndexInvalidError(PersonaError):
     """
 
 
+class AccountEraseConfirmationError(PersonaError):
+    """The account delete's confirmation did not match the account (→ 422; R9-284 T9)."""
+
+
+class AccountErasureUnavailableError(PersonaError):
+    """This process cannot run an account erasure (no runner or platform engine) (→ 503)."""
+
+
+class ClerkWebhookRejectedError(PersonaError):
+    """A Clerk webhook delivery failed verification or could not be read (→ 400; R9-284 T9).
+
+    ``context`` carries a short ``reason`` code, never the body or a header value.
+    """
+
+
+class ClerkCallError(PersonaError):
+    """A call to Clerk's Backend API failed (R9-284 T9 account erasure).
+
+    ``context`` carries the HTTP ``status`` only: a response body may hold personal data.
+    """
+
+
 class ErasureRecordError(PersonaError):
     """The erasure ledger refused a write (R9-284).
 
@@ -275,6 +297,15 @@ class RunRecordEmptyError(PersonaError):
     A completed run always ends on its final step, so a stamp that finds no steps has a
     broken caller upstream, not a runtime condition; raising is what keeps the origination
     stamp from silently vanishing. ``context`` carries ``run_id`` / ``conversation_id``.
+    """
+
+
+class AccountErasedError(PersonaError):
+    """The account this request authenticates as was erased, or is being erased (→ 410).
+
+    D-R9-284-account-erase: an erased account's id is refused for good. Clerk never reuses a
+    user id, so a token issued before the erasure is the only way to arrive with one, and it
+    must not provision the account again. ``context`` is empty: the id is not echoed back.
     """
 
 
@@ -630,6 +661,44 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_body("run_not_found", exc.message or "run not found", exc.context),
+        )
+
+    @app.exception_handler(AccountEraseConfirmationError)
+    async def _account_erase_confirm_422(
+        _: Request, exc: AccountEraseConfirmationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_body(
+                "account_erase_unconfirmed",
+                exc.message or "the confirmation does not match",
+                {},
+            ),
+        )
+
+    @app.exception_handler(AccountErasureUnavailableError)
+    async def _account_erasure_503(_: Request, exc: AccountErasureUnavailableError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=_body(
+                "account_erasure_unavailable",
+                exc.message or "account deletion is not available",
+                {},
+            ),
+        )
+
+    @app.exception_handler(ClerkWebhookRejectedError)
+    async def _clerk_webhook_400(_: Request, exc: ClerkWebhookRejectedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=_body("webhook_rejected", exc.message or "the webhook was rejected", {}),
+        )
+
+    @app.exception_handler(AccountErasedError)
+    async def _account_erased_410(_: Request, exc: AccountErasedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_410_GONE,
+            content=_body("account_erased", exc.message or "this account was deleted", {}),
         )
 
     @app.exception_handler(MemoryNodeChangedError)

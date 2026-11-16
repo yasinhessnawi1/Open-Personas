@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 from persona.billing import PAYG_PACKS, all_plans, get_payg_pack, payg_pack_code
 from persona.logging import get_logger
 
@@ -26,6 +27,7 @@ from persona_api.billing.autotopup import (
     AUTO_TOPUP_AMOUNT_CREDITS,
     AUTO_TOPUP_THRESHOLD_CREDITS,
 )
+from persona_api.config import Edition
 from persona_api.errors import BillingProviderUnavailableError
 from persona_api.schemas import (
     BillingConfigResponse,
@@ -270,15 +272,24 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
     # RAW bytes, before any JSON parsing (the re-serialisation footgun).
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
+    stripe_client = gateway.client
+    if stripe_client is None and request.app.state.config.edition is Edition.cloud:
+        # R9-284 T9 (round 3 LOW-6): without it the erased-account guard cannot cancel a
+        # subscription made for an erased account's Customer.
+        _log.warning("stripe webhook: the gateway has no client; the erased-account guard is off")
     context = WebhookContext(
         rls_engine=request.app.state.rls_engine,
         # admin_engine is used ONLY for the read-only customer→user resolve (never a write).
         admin_engine=request.app.state.admin_engine,
         credits_policy=request.app.state.credits_policy,
         config=request.app.state.config,
+        stripe_client=stripe_client,
     )
     try:
-        verify_and_dispatch(
+        # In the threadpool: the handlers read the database and, for an erased account's
+        # Customer, call Stripe (R9-284 T9 review L-2); neither may block the event loop.
+        await run_in_threadpool(
+            verify_and_dispatch,
             gateway=gateway,
             dispatcher=request.app.state.webhook_dispatcher,
             payload=payload,

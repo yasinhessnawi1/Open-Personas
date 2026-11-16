@@ -12,7 +12,7 @@ a 4xx makes Stripe retry forever.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from persona.logging import get_logger
 
@@ -45,6 +45,9 @@ class WebhookContext:
     admin_engine: Engine
     credits_policy: CreditsPolicy
     config: APIConfig
+    # R9-284 T9 (review M4): the Stripe client, to cancel a subscription made for an erased
+    # account's Customer. ``None`` where a caller has none (it then only skips that guard).
+    stripe_client: Any = None
 
 
 # A handler applies one verified event: ``(event, context) -> None``. It reads

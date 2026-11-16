@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { useAuth } from "@/auth";
-import { createApiClient } from "./client";
+import { ACCOUNT_DELETED_PATH, createApiClient } from "./client";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
@@ -15,8 +15,10 @@ export function useApi() {
   const { getToken } = useAuth();
   return useMemo(
     () =>
-      createApiClient(() =>
-        getToken(TEMPLATE ? { template: TEMPLATE } : undefined),
+      createApiClient(
+        () => getToken(TEMPLATE ? { template: TEMPLATE } : undefined),
+        // R9-284 T9 (review L6): an erased account's session leaves for the goodbye page.
+        () => window.location.assign(ACCOUNT_DELETED_PATH),
       ),
     [getToken],
   );

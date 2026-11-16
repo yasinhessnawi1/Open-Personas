@@ -26,12 +26,16 @@ export function useAccount(): Account {
     email,
     imageUrl: user?.imageUrl ?? null,
     available: Boolean(user),
-    signOut: () => {
+    signOut: async (options?: { redirectUrl?: string }) => {
       // Persona portraits are held as object URLs for the life of the page
       // (lib/authed-image-cache). Drop them with the session so a shared
       // machine keeps nothing of the signed-out account in memory.
       clearAuthedImageCache();
-      void clerk.signOut();
+      // Returned, so a caller that must not move on before the session is gone
+      // (the account deletion, R9-284 T9 review L6) can await it.
+      await clerk.signOut(
+        options?.redirectUrl ? { redirectUrl: options.redirectUrl } : undefined,
+      );
     },
     manageAccount: () => clerk.openUserProfile(),
   };

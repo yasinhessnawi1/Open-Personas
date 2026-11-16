@@ -2,7 +2,7 @@ import "server-only";
 
 import { redirect } from "next/navigation";
 import { serverAuthToken } from "@/auth/server";
-import { createApiClient } from "./client";
+import { ACCOUNT_DELETED_PATH, createApiClient } from "./client";
 
 const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 
@@ -24,5 +24,9 @@ const TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE;
 export async function serverApi() {
   const { signedOut, token } = await serverAuthToken(TEMPLATE);
   if (signedOut) redirect("/sign-in");
-  return createApiClient(async () => token);
+  // R9-284 T9 (review L6): an erased account's request redirects to the goodbye page.
+  return createApiClient(
+    async () => token,
+    () => redirect(ACCOUNT_DELETED_PATH),
+  );
 }

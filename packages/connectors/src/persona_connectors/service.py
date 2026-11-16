@@ -62,6 +62,7 @@ from persona_api.services.task_origination_composition import (
     compose_task_origination_services,
 )
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
+from persona_api.services.user_service import account_erased
 from persona_api.services.verb_service_composition import build_conversational_verb_services
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
@@ -94,7 +95,11 @@ from persona_connectors.email.app import build_email_app
 from persona_connectors.email.connector import EmailConnector
 from persona_connectors.email.flow import EmailInboundFlow
 from persona_connectors.email.linking import EmailLinkingService
-from persona_connectors.errors import ConnectorError, IdentityNotLinkedError
+from persona_connectors.errors import (
+    AccountErasedTokenError,
+    ConnectorError,
+    IdentityNotLinkedError,
+)
 from persona_connectors.infra import PostgresConversationStateStore, PostgresLinkStore
 from persona_connectors.rls_guard import verify_rls_engine_role
 from persona_connectors.telegram import (
@@ -343,7 +348,29 @@ def _now() -> datetime:
 _JWKS_FETCH_TIMEOUT_SECONDS = 10.0  # short — the JWKS fetch sits on the request's auth path
 
 
+if TYPE_CHECKING:
+    #: Whether an id belongs to an erased account (R9-284 T9 review L6); blocking, in a thread.
+    AccountFence = Callable[[str], bool]
+
+
 def _build_connector_verifier(
+    config: ConnectorConfig, http: httpx.AsyncClient, fence: AccountFence | None = None
+) -> Callable[[str], Awaitable[AuthenticatedUser]]:
+    """The token verifier, refusing an erased account's still-valid token (review L6)."""
+    verify = _build_token_verifier(config, http)
+    if fence is None:
+        return verify
+
+    async def verify_unless_erased(token: str) -> AuthenticatedUser:
+        user = await verify(token)
+        if await asyncio.to_thread(fence, user.id):
+            raise AccountErasedTokenError("this account was deleted")
+        return user
+
+    return verify_unless_erased
+
+
+def _build_token_verifier(
     config: ConnectorConfig, http: httpx.AsyncClient
 ) -> Callable[[str], Awaitable[AuthenticatedUser]]:
     """Select the JWT verifier: JWKS (R9-062) when configured, else the static-key default.
@@ -379,6 +406,7 @@ async def _setup_telegram(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -424,7 +452,7 @@ async def _setup_telegram(
         webhook_secret=secret,
         on_update=flow.handle,
         issue_deep_link=issue_deep_link,
-        verify_jwt=_build_connector_verifier(config, http),
+        verify_jwt=_build_connector_verifier(config, http, fence),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -458,6 +486,7 @@ async def _setup_discord(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -536,7 +565,7 @@ async def _setup_discord(
     app = discord_adapter.build_discord_app(
         issue_authorize_url=issue_authorize_url,
         complete_oauth=complete_oauth,
-        verify_jwt=_build_connector_verifier(config, http),
+        verify_jwt=_build_connector_verifier(config, http, fence),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -548,6 +577,7 @@ async def _setup_slack(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -635,7 +665,7 @@ async def _setup_slack(
     app = slack_adapter.build_slack_app(
         issue_authorize_url=issue_authorize_url,
         complete_oauth=complete_oauth,
-        verify_jwt=_build_connector_verifier(config, http),
+        verify_jwt=_build_connector_verifier(config, http, fence),
         link_ttl=ttl,  # C6-D-8: the issue response's server-authoritative expires_at
         now=_now,
     )
@@ -708,6 +738,7 @@ async def _setup_whatsapp(
     config: ConnectorConfig,
     twilio_client: TwilioClient,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -766,6 +797,7 @@ async def _setup_whatsapp(
     return connector, _build_phone_app(
         config=config,
         http=http,
+        fence=fence,
         platform=whatsapp_adapter.PLATFORM,
         destination=config.twilio_whatsapp_from,
         phone_linking=phone_linking,
@@ -779,6 +811,7 @@ async def _setup_sms(
     config: ConnectorConfig,
     twilio_client: TwilioClient,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -839,6 +872,7 @@ async def _setup_sms(
     return connector, _build_phone_app(
         config=config,
         http=http,
+        fence=fence,
         platform=sms_adapter.PLATFORM,
         destination=config.twilio_sms_from,
         phone_linking=phone_linking,
@@ -852,6 +886,7 @@ async def _setup_email(
     config: ConnectorConfig,
     token: SecretStr,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     linking_service: LinkingService,
     resolver: InboundIdentityResolver,
     conversation_store: ConversationStateStore,
@@ -898,7 +933,7 @@ async def _setup_email(
         webhook_auth=webhook_auth,
         on_inbound=flow.handle,
         issue_code=issue_code,
-        verify_jwt=_build_connector_verifier(config, http),
+        verify_jwt=_build_connector_verifier(config, http, fence),
         # C6-D-7: the PUBLIC inbound address the reversed flow shows ("email the code to …");
         # C6-D-8: expires_at = issue_time + ttl (single-source, from config).
         destination=config.email_inbound_address,
@@ -912,6 +947,7 @@ def _build_phone_app(
     *,
     config: ConnectorConfig,
     http: httpx.AsyncClient,
+    fence: AccountFence | None = None,
     platform: str,
     destination: str,
     phone_linking: PhoneLinkingService,
@@ -935,7 +971,7 @@ def _build_phone_app(
         on_inbound=on_inbound,
         on_status=on_status,
         issue_code=issue_code,
-        verify_jwt=_build_connector_verifier(config, http),
+        verify_jwt=_build_connector_verifier(config, http, fence),
         destination=destination,
         link_ttl=ttl,
         now=_now,
@@ -1052,6 +1088,10 @@ async def build_connectors(
     """
     composition = ConnectorComposition(connector_config)
     config = connector_config
+    # R9-284 T9 (review L6): a still-valid token for an erased account is refused (410) on
+    # every connector route that authenticates a user. The dispatch engine (BYPASSRLS) can read
+    # the ledger row; the check is one index probe.
+    fence = functools.partial(account_erased, dispatch_engine)
     # R9-081: the worker side of the conversational verbs. The runtime emits them
     # unconditionally, so without these a persona confirmed a task over Telegram, said
     # "Done, I've set that up", and nothing was created. Reschedule and initiative come from
@@ -1133,6 +1173,7 @@ async def build_connectors(
             config=config,
             token=config.telegram_bot_token,
             http=http,
+            fence=fence,
             linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,
@@ -1149,6 +1190,7 @@ async def build_connectors(
             config=config,
             token=config.discord_bot_token,
             http=http,
+            fence=fence,
             linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,
@@ -1164,6 +1206,7 @@ async def build_connectors(
             config=config,
             token=config.slack_bot_token,
             http=http,
+            fence=fence,
             linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,
@@ -1185,6 +1228,7 @@ async def build_connectors(
                 config=config,
                 twilio_client=twilio_client,
                 http=http,
+                fence=fence,
                 linking_service=linking_service,
                 resolver=resolver,
                 conversation_store=conversation_store,
@@ -1200,6 +1244,7 @@ async def build_connectors(
                 config=config,
                 twilio_client=twilio_client,
                 http=http,
+                fence=fence,
                 linking_service=linking_service,
                 resolver=resolver,
                 conversation_store=conversation_store,
@@ -1220,6 +1265,7 @@ async def build_connectors(
             config=config,
             token=config.postmark_server_token,
             http=http,
+            fence=fence,
             linking_service=linking_service,
             resolver=resolver,
             conversation_store=conversation_store,

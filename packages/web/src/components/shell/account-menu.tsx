@@ -171,7 +171,16 @@ export function AccountMenu({
         {account.signOut ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={account.signOut}>
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => {
+                // A failed sign-out, rejected or thrown, must not surface as an unhandled
+                // error (R9-284 T9, round 4 LOW-5).
+                Promise.resolve()
+                  .then(() => account.signOut?.())
+                  .catch(() => undefined);
+              }}
+            >
               <LogOut />
               {t("signOut")}
             </DropdownMenuItem>

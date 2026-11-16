@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
+from persona_api.errors import AccountErasedError
+
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
@@ -83,6 +85,42 @@ def compose_display_name(first_name: str | None, last_name: str | None) -> str |
     return " ".join(parts) or None
 
 
+# The upsert and the account fence in one statement, so the fence costs no round trip (R9-284
+# T9, D-R9-284-account-erase). ``erased`` is one probe of ``idx_erasures_subject`` for any
+# account erasure of this id, finished or not; when there is one, the INSERT selects no row (so
+# neither inserts nor touches an existing row) and the statement answers true. A data-modifying
+# CTE runs exactly once whether or not the outer query reads it.
+_FENCED_UPSERT = text(
+    "WITH erased AS ("
+    "SELECT 1 FROM erasures WHERE subject_kind = 'account' AND subject_id = :id LIMIT 1"
+    "), upserted AS ("
+    "INSERT INTO users (id, email, first_name, last_name) "
+    "SELECT :id, :email, :first_name, :last_name WHERE NOT EXISTS (SELECT 1 FROM erased) "
+    "ON CONFLICT (id) DO UPDATE SET "
+    "first_name = COALESCE(users.first_name, EXCLUDED.first_name), "
+    "last_name = COALESCE(users.last_name, EXCLUDED.last_name) "
+    "WHERE users.first_name IS NULL OR users.last_name IS NULL"
+    ") SELECT EXISTS (SELECT 1 FROM erased)"
+)
+
+
+def account_erased(engine: Engine, user_id: str) -> bool:
+    """Whether this id has any account erasure, open or finished: one ``idx_erasures_subject``
+    probe. For callers that authenticate a user without the upsert (the connector service's
+    JWT path, review L6); needs an engine that can read the ledger row (BYPASSRLS)."""
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    "SELECT 1 FROM erasures WHERE subject_kind = 'account' "
+                    "AND subject_id = :id LIMIT 1"
+                ),
+                {"id": user_id},
+            ).first()
+            is not None
+        )
+
+
 def ensure_user(
     engine: Engine,
     *,
@@ -111,22 +149,17 @@ def ensure_user(
     seed_first = normalize_name(first_name)
     seed_last = normalize_name(last_name)
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO users (id, email, first_name, last_name) "
-                "VALUES (:id, :email, :first_name, :last_name) "
-                "ON CONFLICT (id) DO UPDATE SET "
-                "first_name = COALESCE(users.first_name, EXCLUDED.first_name), "
-                "last_name = COALESCE(users.last_name, EXCLUDED.last_name) "
-                "WHERE users.first_name IS NULL OR users.last_name IS NULL"
-            ),
+        erased = conn.execute(
+            _FENCED_UPSERT,
             {
                 "id": user_id,
                 "email": resolved_email,
                 "first_name": seed_first,
                 "last_name": seed_last,
             },
-        )
+        ).scalar_one()
+    if erased:
+        raise AccountErasedError("this account was deleted")
 
 
 def get_user_profile(engine: Engine, *, user_id: str) -> dict[str, object] | None:
