@@ -8,7 +8,9 @@ signatures (a secret being rotated), any one of which may match; and a timestamp
 minutes from now is refused, so a captured delivery cannot be replayed later. The unit tests
 check it against Svix's documented test vector.
 
-A delivery for a user we never provisioned, or one already erased, is acknowledged and changes
+A delivery for a user we never provisioned still claims an erasure (review L3): it holds no
+data, so the runner completes it at once, and the finished row fences the id for good, should a
+token issued before the deletion arrive later. One for an account already erased changes
 nothing. The payload is never logged: it carries the user's personal data.
 """
 
@@ -133,11 +135,12 @@ def handle_event(engine: Engine, body: bytes, runner: _Readiness) -> ClerkDeleti
     existing = ErasureLedger(engine).get(SubjectKind.ACCOUNT, user_id)
     if existing is not None and existing.state is not ErasureState.COMPLETE:
         return ClerkDeletion(existing, "running")
-    if not _known(engine, user_id):
-        # Never provisioned here, or already erased: nothing of theirs is left to erase.
-        return ClerkDeletion(None, "unknown")
+    known = _known(engine, user_id)
+    if existing is not None and not known:
+        return ClerkDeletion(None, "erased")  # erased already, and nothing came back since
     if runner.unready_reason(owner_id=user_id, origin=ORIGIN_CLERK) is not None:
         raise AccountErasureUnavailableError("account deletion is not available", context={})
     erasure = begin_account_erasure(engine, owner_id=user_id, origin=ORIGIN_CLERK)
     _log.info("clerk user.deleted started an account erasure erasure={eid}", eid=erasure.id)
-    return ClerkDeletion(erasure, "started")
+    # Never provisioned: nothing to erase, but the finished row fences the id (review L3).
+    return ClerkDeletion(erasure, "started" if known else "fenced")

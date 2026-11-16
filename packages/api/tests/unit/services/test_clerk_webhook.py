@@ -152,10 +152,30 @@ def test_another_event_type_changes_nothing(engine: Engine, claims: list[dict[st
     assert claims == []
 
 
-def test_a_user_never_provisioned_changes_nothing(
+def test_a_user_never_provisioned_is_still_fenced(
     engine: Engine, claims: list[dict[str, str]]
 ) -> None:
-    assert hook.handle_event(engine, _event(), _Ready()).outcome == "unknown"
+    """Review L3: the claimed erasure holds no data, the runner completes it, and the finished
+    row refuses the id for good."""
+    result = hook.handle_event(engine, _event(), _Ready())
+
+    assert result.outcome == "fenced"
+    assert result.erasure is not None
+    assert claims == [{"owner_id": "user_2abc", "origin": "clerk"}]
+
+
+def test_an_account_already_erased_changes_nothing(
+    engine: Engine, claims: list[dict[str, str]]
+) -> None:
+    done = ErasureLedger(engine).claim(
+        owner_id="user_2abc", subject_kind=SubjectKind.ACCOUNT, subject_id="user_2abc", captured={}
+    )
+    ErasureLedger(engine).complete(done.id)
+
+    result = hook.handle_event(engine, _event(), _Ready())
+
+    assert result.outcome == "erased"
+    assert result.erasure is None
     assert claims == []
 
 
