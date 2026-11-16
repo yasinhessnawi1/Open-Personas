@@ -373,3 +373,17 @@ def test_a_mirror_without_a_listed_source_falls_back_to_its_id() -> None:
     assert unsourced_mirrors(newer) == {"e2"}
     assert unsourced_mirrors(older) == {"e1", "e2"}
     assert unsourced_mirrors(whole) == set()
+
+
+def test_a_tie_between_readings_goes_to_the_one_naming_more_doomed_names() -> None:
+    """Round 5 LOW-2: known {a, b, "a,b"}; on a legacy row privacy wins."""
+    known = ["a", "b", "a,b"]
+    assert split_alias_list("a,b", known) == ["a,b"], "no doomed name: the fewest tokens"
+    assert split_alias_list("a,b", known, doomed=["a"]) == ["a", "b"]
+    assert split_alias_list("a,b", known, doomed=["a,b"]) == ["a,b"]
+
+    entry = {**_consolidation(), "reason": "consolidation:r1 aliases:a,b"}
+    assert without_alias_names([entry], ["a"], known=["b", "a,b"]) == [
+        {**entry, "reason": 'consolidation:r1 aliases:["b"]'}
+    ]
+    assert without_alias_names([entry], ["a,b"], known=["a", "b"]) == []

@@ -190,10 +190,11 @@ def unmerged(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, 
 _ALIASES_MARK = " aliases:"
 
 
-_Split = tuple[int, int, tuple[str, ...]]  # (unknown pieces, tokens, the tokens)
+# (unknown pieces, minus the doomed names it holds whole, tokens, the tokens)
+_Split = tuple[int, int, int, tuple[str, ...]]
 
 
-def split_alias_list(listed: str, known: Iterable[str]) -> list[str]:
+def split_alias_list(listed: str, known: Iterable[str], *, doomed: Iterable[str] = ()) -> list[str]:
     """The names in an alias list ``_accrete_aliases`` wrote (review HIGH-3).
 
     Since HIGH-3 the list is JSON. Before it, the names were joined by ",", and a name may hold
@@ -202,6 +203,11 @@ def split_alias_list(listed: str, known: Iterable[str]) -> list[str]:
     list is therefore tokenised against the names known to be in it (the doomed names and the
     canonical's alias list), preferring the reading with the fewest pieces no known name
     accounts for; such a piece runs to the next comma.
+
+    When two readings tie on that, the one holding more ``doomed`` names as whole tokens wins
+    (round 5 LOW-2): on a legacy row privacy wins. Known {a, b, "a,b"} with "a" doomed reads
+    "a,b" as a and b, so "a" goes. The ambiguity this leaves is inherent: had the list been a
+    survivor's single name "a,b", that survivor's name is cut to "b" in this reason.
     """
     if listed.startswith("["):
         try:
@@ -211,9 +217,10 @@ def split_alias_list(listed: str, known: Iterable[str]) -> list[str]:
         if isinstance(parsed, list) and all(isinstance(n, str) for n in parsed):
             return [n for n in parsed if n]
     names = sorted({k for k in known if k})
+    gone = set(doomed)
     end = len(listed)
     best: list[_Split | None] = [None] * (end + 2)
-    best[end] = best[end + 1] = (0, 0, ())
+    best[end] = best[end + 1] = (0, 0, 0, ())
     for i in range(end - 1, -1, -1):
         options: list[_Split] = []
         for name in names:
@@ -221,17 +228,18 @@ def split_alias_list(listed: str, known: Iterable[str]) -> list[str]:
             fits = listed.startswith(name, i) and (stop == end or listed[stop] == ",")
             rest = best[stop + 1] if fits else None
             if rest is not None:
-                options.append((rest[0], rest[1] + 1, (name, *rest[2])))
+                whole = 1 if name in gone else 0
+                options.append((rest[0], rest[1] - whole, rest[2] + 1, (name, *rest[3])))
         comma = listed.find(",", i)
         stop = end if comma < 0 else comma
         rest = best[stop + 1]
         if rest is not None and stop == i:
             options.append(rest)  # an empty piece: nothing to keep
         elif rest is not None:
-            options.append((rest[0] + 1, rest[1] + 1, (listed[i:stop], *rest[2])))
-        best[i] = min(options, key=lambda o: (o[0], o[1])) if options else None
+            options.append((rest[0] + 1, rest[1], rest[2] + 1, (listed[i:stop], *rest[3])))
+        best[i] = min(options, key=lambda o: (o[0], o[1], o[2])) if options else None
     found = best[0]
-    return list(found[2]) if found is not None else [n for n in listed.split(",") if n]
+    return list(found[3]) if found is not None else [n for n in listed.split(",") if n]
 
 
 def without_alias_names(
@@ -254,7 +262,7 @@ def without_alias_names(
             out.append(entry)
             continue
         head, _, listed = reason.partition(_ALIASES_MARK)
-        listed_names = split_alias_list(listed, vocabulary)
+        listed_names = split_alias_list(listed, vocabulary, doomed=gone)
         kept = [n for n in listed_names if n not in gone]
         if len(kept) == len(listed_names):
             out.append(entry)
