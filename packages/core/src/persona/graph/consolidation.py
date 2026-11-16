@@ -121,6 +121,7 @@ class _ConsolidationBackend(Protocol):
 
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]: ...
     def pending_merges(self, owner_id: str) -> list[str]: ...
+    def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]: ...
     def get_marker(self, owner_id: str) -> tuple[int, datetime | None]: ...
     def advance_marker(
         self, owner_id: str, *, epoch: int, watermark: datetime, last_run_at: datetime
@@ -467,15 +468,16 @@ class ConsolidationPass:
 
     def _plan_mirrors(
         self, owner_id: str, member: ConceptNode, canonical: ConceptNode, *, tag: str, now: datetime
-    ) -> tuple[list[TypedLink], dict[str, int], dict[str, str]]:
+    ) -> tuple[list[TypedLink], dict[str, list[int]], dict[str, str]]:
         """The mirrors of the member's open assertion edges onto the canonical, not yet written.
 
-        Also ``{mirror id: the source edge's edge_key}``, so an erasure of the persona that
-        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3),
+        Also ``{mirror id: [the source edge's edge_key]}``, so an erasure of the persona that
+        asserted the source can find its mirror by row, not by recomputing ids (R9-284 LOW-3);
+        a list, because members of one run can share a mirror (round 5 MEDIUM-2),
         and ``{mirror id: the source's asserting persona}``, held when the mirror is written.
         """
         mirrors: list[TypedLink] = []
-        sources: dict[str, int] = {}
+        sources: dict[str, list[int]] = {}
         asserters: dict[str, str] = {}
         keys = self._backend.open_assertion_edge_keys(owner_id, member.id)
         for edge in self._backend.open_assertion_edges(owner_id, member.id):
@@ -487,7 +489,7 @@ class ConsolidationPass:
                 continue
             mirror_id = make_edge_id(src, dst, edge.link_type)
             if edge.id in keys:
-                sources[mirror_id] = keys[edge.id]
+                sources[mirror_id] = [keys[edge.id]]
             if edge.provenance is not None and edge.provenance.persona_id:
                 asserters[mirror_id] = edge.provenance.persona_id
             mirrors.append(
@@ -523,7 +525,7 @@ class ConsolidationPass:
         mirrored: list[str],
         added: list[str],
         personas: Sequence[str] = (),
-        sources: dict[str, int] | None = None,
+        sources: dict[str, list[int]] | None = None,
         state: str = _DONE,
     ) -> None:
         record = {
@@ -534,8 +536,10 @@ class ConsolidationPass:
             "canonical": canonical.id,
             "mirrored_edges": mirrored,
             "added_entities": added,
-            # {mirror id: source edge_key} (R9-284 LOW-3); absent in records before it.
-            "mirror_sources": dict(sources or {}),
+            # {mirror id: [source edge_key]} (R9-284 LOW-3, round 5 MEDIUM-2): this member's
+            # sources of each mirror it made or shares. Absent in records before LOW-3; a
+            # single key in records before MEDIUM-2.
+            "mirror_sources": {m: list(k) for m, k in (sources or {}).items()},
         }
         new_meta = {**member.metadata, _MERGE_KEY: json.dumps(record, sort_keys=True)}
         # content byte-untouched → content_hash recomputes over the new metadata only.
@@ -622,10 +626,13 @@ class ConsolidationPass:
         run_id = record["run_id"]
         tag = f"consolidation:{run_id}"
 
+        shared = self._mirrors_shared_with(owner_id, node_id, record)
         for mirror_id in record.get("mirrored_edges", []):
             # Only while it is still this merge's mirror: the record may list one that was
-            # never made, if the merge stopped before narrowing it (R9-284 MEDIUM-1).
-            self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
+            # never made, if the merge stopped before narrowing it (R9-284 MEDIUM-1). A mirror
+            # another member of the same run still shares stays (round 5 MEDIUM-2).
+            if mirror_id not in shared:
+                self._backend.delete_open_mirror(owner_id, mirror_id, tag=tag)
         self._backend.remove_entity_associations(
             owner_id, record["canonical"], record.get("added_entities", [])
         )
@@ -649,6 +656,25 @@ class ConsolidationPass:
             metadata={"action": "consolidation_unmerge", "canonical": record["canonical"]},
         )
         return True
+
+    def _mirrors_shared_with(
+        self, owner_id: str, node_id: str, record: dict[str, object]
+    ) -> set[str]:
+        """Mirrors another member of the same run, still merged, also lists."""
+        shared: set[str] = set()
+        canonical = record.get("canonical")
+        if not isinstance(canonical, str):
+            return shared
+        for other_id, raw in self._backend.merge_records_into(owner_id, canonical).items():
+            if other_id == node_id:
+                continue
+            try:
+                other = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(other, dict) and other.get("run_id") == record.get("run_id"):
+                shared.update(str(m) for m in other.get("mirrored_edges", []))
+        return shared
 
     # ===== helpers ========================================================
 

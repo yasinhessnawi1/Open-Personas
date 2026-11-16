@@ -61,6 +61,13 @@ class _Backend:
                 out.append(node.id)
         return out
 
+    def merge_records_into(self, _owner: str, canonical_id: str) -> dict[str, str]:
+        return {
+            i: n.metadata["_k7_merge"]
+            for i, n in self.nodes.items()
+            if self.merged[i] == canonical_id and "_k7_merge" in n.metadata
+        }
+
     def get_marker(self, _owner: str) -> tuple[int, None]:
         return 0, None
 

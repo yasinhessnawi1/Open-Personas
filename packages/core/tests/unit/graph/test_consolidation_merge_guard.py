@@ -15,6 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from persona.audit import MemoryAuditLogger
 from persona.graph.config import GraphSettings
 from persona.graph.consolidation import ConsolidationPass
@@ -137,7 +138,7 @@ def test_the_merge_record_is_written_before_any_mirror_or_entity_link() -> None:
     assert backend.record is not None
     assert backend.record["mirrored_edges"] == ["k::causal::x"], "precomputed in the record"
     assert backend.record["added_entities"] == ["ent_m"]
-    assert backend.record["mirror_sources"] == {"k::causal::x": 7}, "the source row (LOW-3)"
+    assert backend.record["mirror_sources"] == {"k::causal::x": [7]}, "the source row (LOW-3)"
     assert names.index("mirror k::causal::x") > 0
     assert names.index("associate_entities ['ent_m']") > 0
 
@@ -160,6 +161,15 @@ def test_a_mirror_never_overwrites_an_edge_the_canonical_already_has() -> None:
 
     assert backend.records[0]["mirrored_edges"] == ["k::causal::x"], "planned first"
     assert backend.records[-1]["mirrored_edges"] == [], "narrowed to the mirrors made"
+    assert backend.records[-1]["mirror_sources"] == {}, "and to their sources (C8)"
+
+
+def test_narrowing_keeps_exactly_the_sources_of_the_mirrors_made() -> None:
+    """Reviewer's mutant C8 kept every planned source."""
+    backend = _merge()
+
+    assert backend.records[-1]["mirrored_edges"] == ["k::causal::x"]
+    assert backend.records[-1]["mirror_sources"] == {"k::causal::x": [7]}
 
 
 def test_the_record_is_pending_while_the_act_runs_and_done_at_its_end() -> None:
@@ -177,3 +187,67 @@ def test_the_accreted_alias_names_are_recorded_as_json() -> None:
     backend = _merge()
 
     assert backend.updated.provenance[-1].reason == 'consolidation:r1 aliases:["m"]'
+
+
+class _UnmergeBackend:
+    """Two members of run r1 merged into k; both list the mirror k::causal::x."""
+
+    def __init__(self, other_run: str) -> None:
+        def record(run: str) -> str:
+            return json.dumps(
+                {
+                    "state": "done",
+                    "run_id": run,
+                    "canonical": "k",
+                    "mirrored_edges": ["k::causal::x"],
+                    "added_entities": [],
+                    "mirror_sources": {"k::causal::x": [7]},
+                }
+            )
+
+        self.records = {"m": record("r1"), "n": record(other_run)}
+        self.deleted: list[str] = []
+
+    def get_node(self, _owner: str, node_id: str) -> ConceptNode:
+        node = _node(node_id, _P)
+        return node.model_copy(update={"metadata": {"_k7_merge": self.records[node_id]}})
+
+    def merge_records_into(self, _owner: str, _canonical: str) -> dict[str, str]:
+        return dict(self.records)
+
+    def delete_open_mirror(self, _owner: str, edge_id: str, **_k: Any) -> None:  # noqa: ANN401
+        self.deleted.append(edge_id)
+
+    def remove_entity_associations(self, *_a: Any) -> None:  # noqa: ANN401
+        return None
+
+    def reopen_edges_incident(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def set_merged_into(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        return None
+
+    def surrogate_for(self, *_a: Any) -> None:  # noqa: ANN401
+        return None
+
+    def get_embeddings(self, *_a: Any) -> dict[str, list[float]]:  # noqa: ANN401
+        return {}
+
+
+@pytest.mark.parametrize(("other_run", "deleted"), [("r1", []), ("r0", ["k::causal::x"])])
+def test_unmerge_keeps_a_mirror_another_member_of_the_run_shares(
+    other_run: str, deleted: list[str]
+) -> None:
+    """Round 5 MEDIUM-2: giving m back must not take n's share of the mirror."""
+    backend = _UnmergeBackend(other_run)
+    consolidation = ConsolidationPass(
+        backend=backend,  # type: ignore[arg-type]
+        index=_Index(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+
+    assert consolidation._unmerge("u1", "m") is True  # noqa: SLF001 - the inverse itself
+
+    assert backend.deleted == deleted

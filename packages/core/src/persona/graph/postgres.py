@@ -1212,11 +1212,13 @@ class PostgresGraphBackend:
     def insert_edge_if_absent(
         self, owner_id: str, link: TypedLink, *, guard_personas: Sequence[str] = ()
     ) -> bool:
-        """Open ``link`` unless an open edge with its id exists; return whether it was inserted.
+        """Open ``link`` unless an open edge with its id exists; return whether it is now ``link``.
 
         Consolidation's mirror (R9-284 review MEDIUM-1): an id is ``src::type::dst``, so an
         edge another persona (or the user) already asserted on the canonical has the mirror's
-        id, and upserting the mirror would overwrite it with SYSTEM provenance.
+        id, and upserting the mirror would overwrite it with SYSTEM provenance; that is ``False``.
+        An open edge that already is this merge's mirror (another member of the same run made
+        it, round 5 MEDIUM-2) is ``True``: the caller adds its own source to the mirror.
         """
         row = self._link_to_row(owner_id, link)
         stmt = (
@@ -1228,9 +1230,29 @@ class PostgresGraphBackend:
             .returning(graph_edges.c.id)
         )
         asserted_by = link.provenance.persona_id if link.provenance is not None else None
+        reason = link.provenance.reason if link.provenance is not None else None
+        same_mirror = select(graph_edges.c.id).where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.id == link.id,
+            graph_edges.c.invalid_at.is_(None),
+            cast(graph_edges.c.provenance, JSONB).contains({"source": "system", "reason": reason}),
+        )
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
-            return conn.execute(stmt).first() is not None
+            if conn.execute(stmt).first() is not None:
+                return True
+            return reason is not None and conn.execute(same_mirror).first() is not None
+
+    def merge_records_into(self, owner_id: str, canonical_id: str) -> dict[str, str]:
+        """``{member id: its raw merge record}`` for every member merged into ``canonical_id``."""
+        record = graph_nodes.c.metadata["_k7_merge"].astext
+        stmt = (
+            select(graph_nodes.c.id, record)
+            .where(graph_nodes.c.owner_id == owner_id, graph_nodes.c.merged_into == canonical_id)
+            .order_by(graph_nodes.c.id)
+        )
+        with self._engine.connect() as conn:
+            return {str(i): str(r) for i, r in conn.execute(stmt).all() if r is not None}
 
     def delete_open_mirror(self, owner_id: str, edge_id: str, *, tag: str) -> None:
         """Remove the OPEN row for ``edge_id`` only while it is still the merge's mirror."""

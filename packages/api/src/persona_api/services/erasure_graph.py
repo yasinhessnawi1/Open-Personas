@@ -62,6 +62,7 @@ __all__ = [
     "names_only_the_doomed_gave",
     "mirror_id_for",
     "mirrors_to_remove",
+    "source_keys",
     "split_alias_list",
     "plan_trails",
     "unmerged",
@@ -512,30 +513,50 @@ def mirror_id_for(
     return None if src == dst else make_edge_id(src, dst, LinkType(link_type))
 
 
+def source_keys(raw: object) -> list[int]:
+    """A record's sources for one mirror: a list since round 5 MEDIUM-2, one key before it."""
+    if isinstance(raw, bool):
+        return []
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, list):
+        return [k for k in raw if isinstance(k, int) and not isinstance(k, bool)]
+    return []
+
+
 def mirrors_to_remove(
-    asserted_keys: Iterable[int],
+    seed_keys: Iterable[int],
     mirror_sources: Iterable[tuple[str, str, int]],
     mirror_rows: Mapping[tuple[str, str], Iterable[int]],
+    existing: Iterable[int] | None = None,
 ) -> list[int]:
-    """The edge keys of every mirror row descended from the persona's edges (review LOW-3).
+    """The edge keys of every mirror row whose sources are all going (LOW-3, round 5 MEDIUM-2).
 
-    ``mirror_sources`` is each merge record's ``(mirror id, run id, source edge_key)``, and
-    ``mirror_rows`` the edge keys of each run's mirror rows, open or closed (a mirror on a
-    canonical that was itself merged later is closed, and is the source of the next mirror). A
-    mirror whose source is one of the persona's rows goes; so does a mirror whose source is
-    such a mirror's row, followed to the end of the chain.
+    ``mirror_sources`` is every merge record's ``(mirror id, run id, source edge_key)``; one
+    mirror can have several (members of one run that shared it), from several records.
+    ``mirror_rows`` is the edge keys of each run's mirror rows, open or closed (a mirror on a
+    canonical that was itself merged later is closed, and is the source of the next mirror).
+    ``existing`` is the edge keys that existed before this erasure (all, when ``None``).
+
+    A mirror goes once one of its sources is going (a seed, or a mirror row found going) and
+    none survives: each is going or was already gone. Followed to the end of the chain.
     """
-    keys = set(asserted_keys)
-    sources = list(mirror_sources)
+    going = set(seed_keys)
+    present = None if existing is None else set(existing)
+    by_mirror: dict[tuple[str, str], set[int]] = {}
+    for mirror_id, run_id, source_key in mirror_sources:
+        by_mirror.setdefault((mirror_id, run_id), set()).add(source_key)
     found: set[int] = set()
     grew = True
     while grew:
         grew = False
-        for mirror_id, run_id, source_key in sources:
-            rows = set(mirror_rows.get((mirror_id, run_id), ())) - found
-            if source_key in keys and rows:
+        for mirror, sources in by_mirror.items():
+            rows = set(mirror_rows.get(mirror, ())) - found
+            if not rows or not sources & going:
+                continue
+            if all(k in going or (present is not None and k not in present) for k in sources):
                 found |= rows
-                keys |= rows
+                going |= rows
                 grew = True
     return sorted(found)
 
@@ -570,6 +591,7 @@ class _Mirrors:
     sources: list[tuple[str, str, int]]
     legacy: dict[str, dict[str, Any]]
     asserted: list[Any]
+    existing: set[int]
 
 
 def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
@@ -589,16 +611,32 @@ def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
         )
     ).all()
     records = {m.id: merge_record(m.metadata) for m in merged}
+    sources = [
+        (str(mirror), str(record.get("run_id")), key)
+        for record in records.values()
+        if record is not None
+        for mirror, raw in (record.get("mirror_sources") or {}).items()
+        for key in source_keys(raw)
+    ]
+    named = sorted({key for _, _, key in sources})
+    existing = (
+        {
+            int(k)
+            for k in conn.execute(
+                select(graph_edges.c.edge_key).where(
+                    graph_edges.c.owner_id == owner_id, graph_edges.c.edge_key.in_(named)
+                )
+            ).scalars()
+        }
+        if named
+        else set()
+    )
     return _Mirrors(
         seeds={int(e.edge_key) for e in asserted},
-        sources=[
-            (str(mirror), str(record.get("run_id")), int(key))
-            for record in records.values()
-            if record is not None
-            for mirror, key in (record.get("mirror_sources") or {}).items()
-        ],
+        sources=sources,
         legacy={i: r for i, r in records.items() if r is not None and "mirror_sources" not in r},
         asserted=list(asserted),
+        existing=existing,
     )
 
 
@@ -623,7 +661,10 @@ def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
     older record is matched by recomputing the open mirror's id. Either way a row goes only
     while it carries the merge's provenance.
     """
-    keys = mirrors_to_remove(mirrors.seeds, mirrors.sources, _mirror_rows(conn, owner_id))
+    rows = _mirror_rows(conn, owner_id)
+    # A mirror row is an edge too: present before this erasure, unless it went with a node.
+    existing = mirrors.existing | {k for keys in rows.values() for k in keys}
+    keys = mirrors_to_remove(mirrors.seeds, mirrors.sources, rows, existing)
     deleted = 0
     if keys:
         deleted += conn.execute(

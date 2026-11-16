@@ -16,6 +16,7 @@ from persona_api.services.erasure_graph import (
     mirrors_to_remove,
     names_only_the_doomed_gave,
     plan_trails,
+    source_keys,
     split_alias_list,
     unmerged,
     without_alias_names,
@@ -341,3 +342,22 @@ def test_a_known_name_matches_only_where_it_stands_as_a_whole_name() -> None:
     assert without_alias_names([both], ["Anna"], known=["Bergen"]) == [
         {**both, "reason": 'consolidation:r1 aliases:["Annas", "Bergen"]'}
     ]
+
+
+def test_a_shared_mirror_goes_only_once_none_of_its_sources_survives() -> None:
+    """Round 5 MEDIUM-2: members A (P's edge, key 1) and B (Q's edge, key 2) share k->x."""
+    sources = [("k::causal::x", "r1", 1), ("k::causal::x", "r1", 2)]
+    rows = {("k::causal::x", "r1"): [9]}
+
+    assert mirrors_to_remove([1], sources, rows, existing={1, 2, 9}) == [], "B's source stays"
+    assert mirrors_to_remove([2], sources, rows, existing={2, 9}) == [9], "A's went before"
+    assert mirrors_to_remove([1, 2], sources, rows, existing={1, 2, 9}) == [9]
+    assert mirrors_to_remove([2], sources, rows, existing={1, 2, 9}) == [], "A's still there"
+
+
+def test_old_single_key_sources_read_as_one_element_lists() -> None:
+    assert source_keys(7) == [7]
+    assert source_keys([7, 8]) == [7, 8]
+    assert source_keys(None) == []
+    assert source_keys(True) == []
+    assert source_keys(["7", 8]) == [8]
