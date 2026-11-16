@@ -219,7 +219,7 @@ def test_a_second_run_claims_and_cleans_nothing(engine: Engine, root: Path) -> N
 
 def test_a_log_written_to_just_now_is_left_for_a_later_run(engine: Engine, root: Path) -> None:
     store, _ = _logs(root, _GONE, _OWNER)
-    os.utime(store, None)  # a persona being created: its log before its row commits
+    os.utime(store, None)  # written to just now: something live writes it
 
     counts = sweep_legacy_audit_files(engine, root)
 
@@ -539,3 +539,19 @@ def test_the_start_warns_only_when_the_sweep_did_something(
     legacy_audit_sweep.run_legacy_sweep_logged(None, None)  # type: ignore[arg-type]
 
     assert bool(said) is warned
+
+
+def test_a_tool_log_written_to_just_now_keeps_the_persona_for_a_later_run(
+    engine: Engine, root: Path
+) -> None:
+    """Review L6: the window looks at both logs; an old store log is not enough."""
+    store, tools = _logs(root, _GONE, _OWNER)
+    os.utime(tools, None)
+    before = store.read_bytes()
+
+    counts = sweep_legacy_audit_files(engine, root)
+
+    assert counts == LegacySweepCounts(kept_recent=1)
+    assert _erasures(engine) == []
+    assert tools.exists()
+    assert store.read_bytes() == before

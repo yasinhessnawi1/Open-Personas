@@ -5,8 +5,9 @@ A persona deleted before R9-284 left its ``{persona}.jsonl`` store log and its
 say so. This one-off sweep finds them and hands each to the existing erasure:
 
 * a persona id with neither a ``personas`` row nor an ``erasures`` row (in any state), whose
-  files have not been written to within :data:`QUIET_FOR` (a persona being created right now
-  has its log before its row commits), is a legacy leftover;
+  files have not been written to within :data:`QUIET_FOR`, is a legacy leftover. The window
+  is defence (review L6): a log something wrote to just now belongs to something live, even
+  if the database does not show it, so it waits for a later run;
 * its owner is read from its store log: the ``written_by`` of the events the owner wrote there
   (``source`` ``user``: the initial persona load, a tool consent), kept only where a ``users``
   row has that id. Exactly one such owner, and an OPEN persona erasure is claimed for it; the
@@ -65,7 +66,8 @@ __all__ = [
 
 _log = get_logger("api.erasure")
 
-#: A log written to more recently than this may belong to a persona whose row has not committed.
+#: A log written to within this is left for a later run: defence against acting on anything
+#: live that the database does not show (review L6), not a claim about write order.
 QUIET_FOR = 3600.0
 
 _TOOLS = ".tools.jsonl"
