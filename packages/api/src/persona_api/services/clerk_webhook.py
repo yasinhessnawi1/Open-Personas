@@ -80,7 +80,11 @@ def verify_signature(
     expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
     for part in signatures.split(" "):
         version, _, signature = part.partition(",")
-        if version == "v1" and hmac.compare_digest(signature, expected):
+        # As bytes (review L2): compare_digest refuses non-ASCII text with a TypeError, which
+        # would turn a junk header into a 500 instead of a rejection.
+        if version == "v1" and hmac.compare_digest(
+            signature.encode("utf-8", errors="surrogateescape"), expected.encode()
+        ):
             return
     raise _reject("bad_signature")
 

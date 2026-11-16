@@ -354,3 +354,22 @@ def test_a_deletion_this_process_cannot_finish_is_503_before_anything_is_claimed
 
     assert ready.asked == [("user_2abc", "clerk")]
     assert claims == []
+
+
+@pytest.mark.parametrize("junk", ["v1,été", "v1,☃", "é,abc"])
+def test_a_non_ascii_signature_is_rejected_not_an_error(junk: str) -> None:
+    """Review L2: compared as bytes, so junk in the header is a 400, never a 500."""
+    with pytest.raises(ClerkWebhookRejectedError):
+        _verify(signatures=junk)
+
+
+def test_a_non_ascii_signature_header_answers_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, handled = _client(monkeypatch)
+    body = _event()
+    # Raw UTF-8 bytes on the wire: the server sees non-ASCII characters in the header.
+    headers: dict[str, Any] = {**_signed(body), "svix-signature": "v1,été".encode()}
+
+    resp = client.post("/v1/webhooks/clerk", content=body, headers=headers)
+
+    assert resp.status_code == 400
+    assert handled == []
