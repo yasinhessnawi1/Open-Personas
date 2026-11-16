@@ -569,3 +569,26 @@ def test_a_supersede_versions_the_locked_row_not_the_incoming_node() -> None:
     assert stored == {
         k: row[k] for k in ("concept_name", "content", "metadata", "content_hash", "provenance")
     }, "the version is the locked row"
+
+
+def test_a_supersede_whose_trail_changed_under_a_matching_hash_writes_nothing() -> None:
+    """Round 12 LOW-1, the trail half of the CAS: the row's hash is the one read, its trail
+    is not (an erasure rewrote only the trail). Refused before the version insert."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+
+    engine = _Engine()
+    row = _node_row()
+
+    with pytest.raises(GraphStaleWriteError):
+        _backend(engine).supersede_node(
+            "u1",
+            _node(_P),
+            _VECTOR,
+            expected_content_hash=row["content_hash"],  # the hash matches
+            expected_provenance=(_by(_P), _by(_Q)),  # the trail read before the erasure
+            valid_at=_NOW,
+            invalid_at=_NOW,
+            invalidated_by="superseded",
+        )
+
+    assert [s for _, s in engine.statements if s.startswith(("INSERT", "UPDATE"))] == []

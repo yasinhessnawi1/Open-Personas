@@ -1667,20 +1667,17 @@ def test_a_superseded_canonicals_versions_lose_the_erased_personas_names(
         assert version.content_hash, "each version is still readable"
 
 
-def test_an_extend_read_before_a_trail_only_erasure_is_refused_and_redone(
+def _trail_only_erasure(
     migrated_engine: Engine,
     embedder: Any,  # noqa: ANN401
-) -> None:
-    """Round 10, the trail half of the node CAS: the erasure changes only C's trail.
+) -> tuple[PostgresGraphBackend, ConceptNode, list[float]]:
+    """C read before P's erasure, and the erasure changed only C's trail (round 10).
 
     C's consolidation entry names P's member ("t_pname"), but C's alias list does not (a
-    legacy row), so the erasure rewrites the trail and leaves the hash as it was. An extend
-    that read C before is refused on the trail, reads C afresh, and writes without the name.
+    legacy row), so the erasure rewrites the trail and leaves the hash as it was. Returns the
+    backend, the stale read of C, and the vector.
     """
     import json  # noqa: PLC0415
-
-    from persona.graph.merge import MergeEngine  # noqa: PLC0415
-    from persona.graph.protocol import KnowledgeCandidate  # noqa: PLC0415
 
     with migrated_engine.begin() as conn:
         conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
@@ -1728,6 +1725,23 @@ def test_an_extend_read_before_a_trail_only_erasure_is_refused_and_redone(
     assert after_erasure is not None
     assert after_erasure.content_hash == stale.content_hash, "the hash did not move"
     assert after_erasure.provenance != stale.provenance, "only the trail changed"
+    return backend, stale, vector
+
+
+def test_an_extend_read_before_a_trail_only_erasure_is_refused_and_redone(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 10, the trail half of the node CAS: the erasure changes only C's trail.
+
+    C's consolidation entry names P's member ("t_pname"), but C's alias list does not (a
+    legacy row), so the erasure rewrites the trail and leaves the hash as it was. An extend
+    that read C before is refused on the trail, reads C afresh, and writes without the name.
+    """
+    from persona.graph.merge import MergeEngine  # noqa: PLC0415
+    from persona.graph.protocol import KnowledgeCandidate  # noqa: PLC0415
+
+    backend, stale, vector = _trail_only_erasure(migrated_engine, embedder)
 
     writes: list[str] = []
     real_update = backend.update_node
@@ -1813,3 +1827,91 @@ def test_a_supersede_read_before_the_erasure_leaves_no_version_with_the_name(
     after = backend.get_node(_OWNER, "r_c")
     assert after is not None
     assert after.content != "the new account", "nothing was written"
+
+
+def test_a_supersede_read_before_a_trail_only_erasure_is_refused_and_redone(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 12 LOW-1, the trail half of the supersede CAS: the hash still matches, the trail
+    does not. The supersede is refused whole (no version of the stale row), reads C afresh,
+    and supersedes the row without P's member's name."""
+    from persona.graph.errors import GraphStaleWriteError  # noqa: PLC0415
+    from persona.graph.merge import MergeEngine  # noqa: PLC0415
+    from persona.graph.protocol import (  # noqa: PLC0415
+        KnowledgeCandidate,
+        MergeAction,
+        UpdateIntent,
+    )
+
+    backend, stale, vector = _trail_only_erasure(migrated_engine, embedder)
+    with pytest.raises(GraphStaleWriteError):
+        backend.supersede_node(
+            _OWNER,
+            stale.model_copy(update={"content": "refused"}),
+            vector,
+            expected_content_hash=stale.content_hash,
+            expected_provenance=stale.provenance,
+            valid_at=_NOW,
+            invalid_at=_NOW + timedelta(seconds=1),
+            invalidated_by="contradicted",
+        )
+    assert _versions_of(migrated_engine, "t_c") == [], "the refused supersede left no version"
+
+    tries: list[str] = []
+    real_supersede = backend.supersede_node
+    real_get = backend.get_node
+    reads: list[str] = []
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        tries.append("try")
+        return real_supersede(*args, **kwargs)
+
+    def _stale_first(owner_id: str, node_id: str) -> ConceptNode | None:
+        reads.append(node_id)
+        return (
+            stale if node_id == "t_c" and reads.count("t_c") == 1 else real_get(owner_id, node_id)
+        )
+
+    backend.supersede_node = _counting  # type: ignore[method-assign]
+    backend.get_node = _stale_first  # type: ignore[method-assign]
+    engine = MergeEngine(backend=backend, embedder=embedder)
+    later = NodeProvenance(
+        source=WriteSource.SYSTEM, persona_id=_OTHER, written_at=_NOW + timedelta(days=1)
+    )
+    out = engine.merge(
+        _OWNER,
+        KnowledgeCandidate(
+            concept_name="t_c",
+            content="the new account",
+            node_kind=NodeKind.FACT,
+            provenance=later,
+            update_intent=UpdateIntent.CONTRADICT,
+            target_node_id="t_c",
+        ),
+    )
+
+    assert tries == ["try", "try"], "refused on the stale trail, then redone on a fresh read"
+    assert out.action is MergeAction.EVOLVED
+    versions = _versions_of(migrated_engine, "t_c")
+    assert len(versions) == 1
+    assert "t_pname" not in versions[0], "the version is of the erased row"
+    current = real_get(_OWNER, "t_c")
+    assert current is not None
+    assert current.content == "the new account"
+    assert not [p for p in current.provenance if p.reason and "t_pname" in p.reason]
+
+
+def _versions_of(engine: Engine, node_id: str) -> list[str]:
+    """Each version row of the node, as text (its trail and metadata)."""
+    with engine.connect() as conn:
+        return [
+            str(r)
+            for r in conn.execute(
+                text(
+                    "SELECT provenance::text || metadata::text FROM graph_node_versions "
+                    "WHERE owner_id = :o AND node_id = :n"
+                ),
+                {"o": _OWNER, "n": node_id},
+            ).scalars()
+        ]
