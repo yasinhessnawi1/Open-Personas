@@ -180,6 +180,15 @@ def cancel_if_erased(
     erasure_id = str(metadata.get("user_id") or "")
     if not erasure_id.startswith(ERASED_PREFIX):
         return False
+    # Review L-2: read it first; an ended one (our own cancel's later events) is left alone.
+    try:
+        subscription = client.subscriptions.retrieve(subscription_id)
+    except Exception as exc:
+        if _already_done(exc):
+            return False
+        raise
+    if getattr(subscription, "status", None) in _ENDED:
+        return False
     try:
         client.subscriptions.cancel(
             subscription_id,

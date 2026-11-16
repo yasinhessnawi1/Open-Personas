@@ -173,8 +173,9 @@ def test_another_invalid_request_is_raised() -> None:
 
 
 class _Customers:
-    def __init__(self, metadata: dict[str, str] | None) -> None:
+    def __init__(self, metadata: dict[str, str] | None, *, status: str = "active") -> None:
         self.metadata = metadata
+        self.status = status
         self.cancelled: list[tuple[str, Any, Any]] = []
 
     def client(self) -> SimpleNamespace:
@@ -186,9 +187,12 @@ class _Customers:
         def cancel(sub_id: str, *, params: Any, options: Any) -> None:  # noqa: ANN401
             self.cancelled.append((sub_id, params, options))
 
+        def retrieve_subscription(sub_id: str) -> SimpleNamespace:
+            return SimpleNamespace(id=sub_id, status=self.status)
+
         return SimpleNamespace(
             customers=SimpleNamespace(retrieve=retrieve),
-            subscriptions=SimpleNamespace(cancel=cancel),
+            subscriptions=SimpleNamespace(cancel=cancel, retrieve=retrieve_subscription),
         )
 
 
@@ -318,3 +322,26 @@ def test_an_updated_subscription_for_an_erased_customer_is_cancelled(
     )
 
     assert [c[0] for c in fake.cancelled] == ["sub_upd"]
+
+
+@pytest.mark.parametrize("status", ["canceled", "incomplete_expired"])
+def test_an_ended_subscription_of_an_erased_customer_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """Review L-2: our own cancel's later events name an ended subscription; it is not
+    cancelled again, and nothing claims it was."""
+    from persona_api.billing import account_erasure  # noqa: PLC0415
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        account_erasure._log,
+        "warning",
+        lambda message, **_k: logged.append(message),  # noqa: SLF001
+    )
+    fake = _Customers({"user_id": _ERASURE}, status=status)
+
+    assert not account_erasure.cancel_if_erased(
+        fake.client(), customer_id="cus_1", subscription_id="sub_old"
+    )
+    assert fake.cancelled == []
+    assert logged == [], "no false 'cancelled' log"

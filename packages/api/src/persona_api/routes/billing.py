@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 from persona.billing import PAYG_PACKS, all_plans, get_payg_pack, payg_pack_code
 from persona.logging import get_logger
 
@@ -279,7 +280,10 @@ async def stripe_webhook(request: Request) -> dict[str, bool]:
         stripe_client=gateway.client,
     )
     try:
-        verify_and_dispatch(
+        # In the threadpool: the handlers read the database and, for an erased account's
+        # Customer, call Stripe (R9-284 T9 review L-2); neither may block the event loop.
+        await run_in_threadpool(
+            verify_and_dispatch,
             gateway=gateway,
             dispatcher=request.app.state.webhook_dispatcher,
             payload=payload,
