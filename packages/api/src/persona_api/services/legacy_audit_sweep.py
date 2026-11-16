@@ -325,14 +325,10 @@ def sweep_legacy_audit_files(
             )
     counts["claimed"] = len(claims)
     for pid in _erased_before(engine, ids):  # the R9-291 backlog (review L1)
+        # A tool log that reappeared after the erasure goes too (round 2 LOW-1, ruling 5):
+        # the same clean as a leftover's, without a re-key.
         changed = (
-            _store_log_has_content(audit_root, pid, {})
-            if dry_run
-            else bool(
-                scrub_persona_log_in_place(
-                    audit_root, persona_id=pid, content_keys=AUDIT_CONTENT_KEYS
-                )
-            )
+            _has_content(audit_root, pid, {}) if dry_run else _clean_in_place(audit_root, pid, {})
         )
         counts["scrubbed_backlog"] += int(changed)
     for pid, ambiguous, rekey in cleans:  # then the files

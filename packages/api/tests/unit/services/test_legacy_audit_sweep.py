@@ -152,13 +152,14 @@ def test_a_persona_the_ledger_knows_is_never_claimed_again(
     counts = sweep_legacy_audit_files(engine, root)
 
     assert len(_erasures(engine)) == 1, "never claimed again"
-    assert tools.exists(), "never cleaned as a leftover"
     if state is ErasureState.PENDING:
         assert counts == LegacySweepCounts(kept_known=1)
         assert store.read_bytes() == before, "its own files step will clean it"
-    else:  # complete: the R9-291 backlog (review L1) cleans the kept log, nothing else
+        assert tools.exists()
+    else:  # complete: the R9-291 backlog (review L1) cleans the kept log
         assert counts == LegacySweepCounts(kept_known=1, scrubbed_backlog=1)
         assert _SECRET not in store.read_text(encoding="utf-8")
+        assert not tools.exists(), "a tool log that reappeared goes (round 2 LOW-1)"
 
 
 def test_two_possible_owners_are_refused_and_the_files_cleaned_in_place(
