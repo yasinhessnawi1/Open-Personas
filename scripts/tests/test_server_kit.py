@@ -1031,3 +1031,13 @@ def test_every_compose_exec_and_run_in_deploy_reads_from_dev_null() -> None:
     ]
     assert len(calls) == 6, calls
     assert all("</dev/null" in c for c in calls), [c for c in calls if "</dev/null" not in c]
+
+
+def test_deploy_never_prunes_images_or_the_whole_system() -> None:
+    """R9-289 review L7: only the build cache goes. The rollback is an image (:previous) and
+    the database is a volume, which an image or system prune could take with it."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in deploy.splitlines() if not line.lstrip().startswith("#"))
+    assert "image prune" not in code
+    assert "system prune" not in code
+    assert "volume prune" not in code
