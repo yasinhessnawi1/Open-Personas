@@ -448,6 +448,11 @@ def test_the_store_audit_keeps_its_ids_and_loses_its_free_text(seeded: Seeded) -
     assert json.loads(own)["metadata"] == {"to_version": "2"}, "R9-291: content keys go"
     lines = [json.loads(line) for line in graph.splitlines()]
     assert {e["written_by"]: e["reason"] for e in lines} == {PERSONA: None, SIBLING: SECRET}
+    # Review L2: the persona's events in the owner's log lose their content keys too; the
+    # sibling's keep theirs.
+    meta = {e["written_by"]: e["metadata"] for e in lines}
+    assert meta[PERSONA] == {"action": "created"}
+    assert meta[SIBLING] == {"action": "created", "workspace_path": SECRET}
 
 
 def test_another_owners_audit_rows_are_never_scrubbed(seeded: Seeded) -> None:

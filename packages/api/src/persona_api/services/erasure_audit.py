@@ -12,12 +12,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from persona.audit import jsonl_file_lock
 from persona.tools._sandbox import require_path_segment
-from sqlalchemy import and_, or_, update
+from sqlalchemy import and_, or_, select, update
 
 from persona_api.db.models import store_audit_events as store_audit_t
 
@@ -39,12 +39,34 @@ FREE_TEXT_FIELDS = ("reason",)
 _FILE_ATTEMPTS = 3
 
 
-def scrub_store_audit_rows(conn: Connection, *, owner_id: str, persona_id: str) -> int:
-    """Clear free text from the persona's store-audit rows, and its graph events'."""
+def scrub_store_audit_rows(
+    conn: Connection,
+    *,
+    owner_id: str,
+    persona_id: str,
+    content_keys: frozenset[str] = frozenset(),
+) -> int:
+    """Clear free text from the persona's store-audit rows, and its graph events'.
+
+    Their ``metadata`` also loses ``content_keys`` (review L2): no writer puts those keys into
+    the store audit today, so this is defence, and the backlog of any that did.
+    """
     about_the_persona = or_(
         store_audit_t.c.persona_id == persona_id,
         and_(store_audit_t.c.persona_id == owner_id, store_audit_t.c.written_by == persona_id),
     )
+    if content_keys:
+        for audit_id, meta in conn.execute(
+            select(store_audit_t.c.id, store_audit_t.c.metadata)
+            .where(about_the_persona)
+            .order_by(store_audit_t.c.id)
+        ).all():
+            if isinstance(meta, Mapping) and content_keys & meta.keys():
+                conn.execute(
+                    update(store_audit_t)
+                    .where(store_audit_t.c.id == audit_id)
+                    .values(metadata={k: v for k, v in meta.items() if k not in content_keys})
+                )
     result = conn.execute(
         update(store_audit_t)
         .where(about_the_persona, store_audit_t.c.reason.is_not(None))
@@ -53,7 +75,9 @@ def scrub_store_audit_rows(conn: Connection, *, owner_id: str, persona_id: str) 
     return int(result.rowcount)
 
 
-def _scrubbed_line(line: str, *, owner_id: str, persona_id: str) -> str:
+def _scrubbed_line(
+    line: str, *, owner_id: str, persona_id: str, content_keys: frozenset[str] = frozenset()
+) -> str:
     try:
         event = json.loads(line)
     except ValueError:
@@ -63,14 +87,20 @@ def _scrubbed_line(line: str, *, owner_id: str, persona_id: str) -> str:
     ours = event.get("persona_id") == persona_id or (
         event.get("persona_id") == owner_id and event.get("written_by") == persona_id
     )
-    if not ours or all(event.get(f) is None for f in FREE_TEXT_FIELDS):
+    if not ours:
         return line
-    return json.dumps(
-        {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}, separators=(",", ":"), ensure_ascii=False
-    )
+    clean = {**event, **dict.fromkeys(FREE_TEXT_FIELDS)}
+    meta = event.get("metadata")
+    if isinstance(meta, dict):  # review L2, and only a dict (L3)
+        clean["metadata"] = {k: v for k, v in meta.items() if k not in content_keys}
+    if clean == event:
+        return line
+    return json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
 
 
-def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
+def _scrub_file(
+    path: Path, *, owner_id: str, persona_id: str, content_keys: frozenset[str] = frozenset()
+) -> int:
     """Rewrite one log without the persona's free text, holding the loggers' lock (review M-2).
 
     The lock keeps this process's appends out until the replace; the size check behind it is
@@ -79,7 +109,10 @@ def _scrub_file(path: Path, *, owner_id: str, persona_id: str) -> int:
     """
     with jsonl_file_lock(path):
         return _scrub_held_file(
-            path, lambda line: _scrubbed_line(line, owner_id=owner_id, persona_id=persona_id)
+            path,
+            lambda line: _scrubbed_line(
+                line, owner_id=owner_id, persona_id=persona_id, content_keys=content_keys
+            ),
         )
 
 
@@ -114,8 +147,15 @@ def _scrub_held_file(path: Path, clean_line: Callable[[str], str]) -> int:
     raise OSError(msg)
 
 
-def scrub_store_audit_files(audit_root: Path | None, *, owner_id: str, persona_id: str) -> int:
-    """Clear free text from the persona's JSONL store audit and its owner's graph events."""
+def scrub_store_audit_files(
+    audit_root: Path | None,
+    *,
+    owner_id: str,
+    persona_id: str,
+    content_keys: frozenset[str] = frozenset(),
+) -> int:
+    """Clear free text and ``content_keys`` from the persona's JSONL store audit, and from its
+    events in the owner's log (the graph's, ``written_by`` the persona; review L2)."""
     if audit_root is None:
         return 0
     return sum(
@@ -123,6 +163,7 @@ def scrub_store_audit_files(audit_root: Path | None, *, owner_id: str, persona_i
             audit_root / f"{require_path_segment(name, what='audit log')}.jsonl",
             owner_id=owner_id,
             persona_id=persona_id,
+            content_keys=content_keys,
         )
         for name in (persona_id, owner_id)
     )
