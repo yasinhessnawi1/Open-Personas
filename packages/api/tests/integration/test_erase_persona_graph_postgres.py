@@ -1455,3 +1455,42 @@ def test_a_dropped_merge_record_is_given_back_from_the_record_in_hand(
         ).scalar_one()
     assert left == 0
     assert backend.get_node(_OWNER, "r_m") is None
+
+
+def test_two_rows_of_a_fact_closed_under_one_tag_reopen_as_one(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 9 LOW-3: the fact was closed, reopened by a writer, and closed again, both times
+    under the same tag. The give back reopens only the newest row, and the index holds."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _OTHER, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    for node_id in ("t2_m", "t2_x"):
+        backend.insert_node(_OWNER, _node(node_id, _OTHER), vector)
+    tag = "consolidation:rt2"
+    close = text(
+        "UPDATE graph_edges SET invalid_at = now(), invalidated_by = :t, invalidated_at = now() "
+        "WHERE owner_id = :o AND id = 't2_m::causal::t2_x' AND invalid_at IS NULL"
+    )
+    for _ in range(2):
+        backend.upsert_edge(_OWNER, _edge("t2_m::causal::t2_x", "t2_m", "t2_x", _OTHER))
+        with migrated_engine.begin() as conn:
+            conn.execute(close, {"t": tag, "o": _OWNER})
+
+    backend.reopen_edges_incident(_OWNER, "t2_m", invalidated_by=tag)
+
+    with migrated_engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT edge_key, invalid_at IS NULL FROM graph_edges "
+                "WHERE owner_id = :o AND id = 't2_m::causal::t2_x' ORDER BY edge_key"
+            ),
+            {"o": _OWNER},
+        ).all()
+    assert [is_open for _, is_open in rows] == [False, True], "only the newest reopened"

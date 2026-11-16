@@ -307,6 +307,9 @@ def test_a_reopen_never_makes_a_second_open_row_for_an_id() -> None:
     assert "NOT (EXISTS (SELECT open_twin.id" in sql
     compiled = str(reopen_statement("u1", "m", "t").compile(dialect=postgresql.dialect()))
     assert "open_twin.id = graph_edges.id AND open_twin.invalid_at IS NULL" in compiled
+    # Round 9 LOW-3: only the newest row per id closed under the tag.
+    assert "graph_edges.edge_key = (SELECT max(newest.edge_key)" in compiled
+    assert "newest.invalidated_by = %(invalidated_by_2)s" in compiled
 
 
 def test_the_done_write_is_a_compare_and_set_that_rolls_the_links_back() -> None:

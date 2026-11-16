@@ -88,12 +88,23 @@ def reopen_statement(owner_id: str, node_id: str, invalidated_by: str) -> Any:  
     closed: the fact is open already. Shared by unmerge and the erasure's unmerge of members.
     """
     open_twin = graph_edges.alias("open_twin")
+    newest = graph_edges.alias("newest")
     return (
         update(graph_edges)
         .where(
             graph_edges.c.owner_id == owner_id,
             graph_edges.c.invalidated_by == invalidated_by,
             or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+            # Only the newest row per id closed under this tag (round 9 LOW-3): two rows of one
+            # fact closed under the same tag would otherwise both reopen, and break the index.
+            graph_edges.c.edge_key
+            == select(func.max(newest.c.edge_key))
+            .where(
+                newest.c.owner_id == owner_id,
+                newest.c.id == graph_edges.c.id,
+                newest.c.invalidated_by == invalidated_by,
+            )
+            .scalar_subquery(),
             ~select(open_twin.c.id)
             .where(
                 open_twin.c.owner_id == owner_id,
