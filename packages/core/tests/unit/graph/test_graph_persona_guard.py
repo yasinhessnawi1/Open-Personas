@@ -178,7 +178,9 @@ _WRITES = {
         "insert",
     ),
     "update_node": (
-        lambda b: b.update_node("u1", _node(None, _P), _VECTOR, expected_content_hash="h"),
+        lambda b: b.update_node(
+            "u1", _node(None, _P), _VECTOR, expected_content_hash="h", expected_provenance=()
+        ),
         "update",
     ),
     "upsert_edge": (lambda b: b.upsert_edge("u1", _edge(_P)), "insert"),
@@ -217,6 +219,7 @@ _WRITES = {
             member_id="m",
             merged_into="k",
             expected_content_hash="the pending hash",
+            expected_provenance=(),
             record=lambda added: ({"_k7_merge": str(added)}, "h"),
             guard_personas=[_P],
         ),
@@ -234,6 +237,7 @@ _WRITES = {
             metadata={},
             content_hash="h",
             expected_content_hash="h0",
+            expected_provenance=(),
             guard_personas=[_P],
         ),
         "update",
@@ -260,7 +264,12 @@ def test_the_hold_and_the_write_share_one_transaction_holds_first(name: str) -> 
     [
         lambda b: b.insert_node("u1", _node(_P), _VECTOR),
         lambda b: b.update_node(
-            "u1", _node(None), _VECTOR, expected_content_hash="h", guard_personas=[_P]
+            "u1",
+            _node(None),
+            _VECTOR,
+            expected_content_hash="h",
+            expected_provenance=(),
+            guard_personas=[_P],
         ),
         lambda b: b.upsert_edge("u1", _edge(None), guard_personas=[_P]),
         lambda b: b.add_alias("u1", "x", EntityAlias(surface="my doctor", persona_id=_P)),
@@ -279,7 +288,9 @@ def test_a_write_naming_an_erased_persona_writes_nothing(write: Any) -> None:  #
 def test_every_persona_a_trail_names_is_held_once() -> None:
     engine = _Engine()
 
-    _backend(engine).update_node("u1", _node(_Q, _P, _Q, None), _VECTOR, expected_content_hash="h")
+    _backend(engine).update_node(
+        "u1", _node(_Q, _P, _Q, None), _VECTOR, expected_content_hash="h", expected_provenance=()
+    )
 
     assert engine.entries()[:2] == [f"hold {_P}", f"hold {_Q}"]
 
@@ -338,6 +349,7 @@ def test_the_done_write_is_a_compare_and_set_that_rolls_the_links_back() -> None
             member_id="m",
             merged_into="k",
             expected_content_hash="the pending hash",
+            expected_provenance=(),
             record=lambda added: ({"_k7_merge": str(added)}, "h"),
             guard_personas=[_P],
         )
@@ -377,7 +389,9 @@ def _update_metadata(current: object, metadata: dict[str, str]) -> tuple[dict[st
         provenance=(_by(_P),),
         created_at=_NOW,
     )
-    _backend(_RowEngine()).update_node("u1", node, _VECTOR, expected_content_hash="h")
+    _backend(_RowEngine()).update_node(
+        "u1", node, _VECTOR, expected_content_hash="h", expected_provenance=()
+    )
     return captured["metadata"], captured["content_hash"]
 
 
@@ -397,9 +411,17 @@ def test_update_node_keeps_the_rows_merge_record() -> None:
 
 
 _CAS_WRITES = {
-    "update_node": lambda b: b.update_node("u1", _node(_P), _VECTOR, expected_content_hash="read"),
+    "update_node": lambda b: b.update_node(
+        "u1", _node(_P), _VECTOR, expected_content_hash="read", expected_provenance=()
+    ),
     "set_merged_into": lambda b: b.set_merged_into(
-        "u1", "n1", merged_into="k", metadata={}, content_hash="new", expected_content_hash="read"
+        "u1",
+        "n1",
+        merged_into="k",
+        metadata={},
+        content_hash="new",
+        expected_content_hash="read",
+        expected_provenance=(),
     ),
     "associate_entities_recording": lambda b: b.associate_entities_recording(
         "u1",
@@ -408,6 +430,7 @@ _CAS_WRITES = {
         member_id="n1",
         merged_into="k",
         expected_content_hash="read",
+        expected_provenance=(),
         record=lambda added: ({"_k7_merge": str(added)}, "new"),
     ),
 }
@@ -426,6 +449,8 @@ def test_every_node_write_is_a_compare_and_set_on_the_hash_read(name: str) -> No
 
     (update_sql,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE graph_nodes")]
     assert "graph_nodes.content_hash = :content_hash_1" in update_sql
+    # The trail half (the hash does not cover the trail), compared as jsonb.
+    assert "jsonb_strip_nulls(graph_nodes.provenance) = jsonb_strip_nulls(" in update_sql
 
 
 def test_a_stale_write_on_an_existing_row_is_a_stale_write_error() -> None:

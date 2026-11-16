@@ -73,6 +73,21 @@ _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
 
 
+def trail_is(expected: Sequence[NodeProvenance]) -> Any:  # noqa: ANN401 - SQL
+    """The row's trail is the one the writer read (D-R9-284-node-cas, the trail half).
+
+    The content hash spans name, content and metadata, not the trail, and the erasure can
+    rewrite a trail alone (a consolidation entry's alias names name no persona, so the write
+    guard does not see them). Compared as jsonb, so key order does not matter, with null
+    fields stripped on both sides: a row written before a field was added lacks the key that
+    the writer's parsed copy has as null.
+    """
+    read = [p.model_dump(mode="json", exclude_none=True) for p in expected]
+    return func.jsonb_strip_nulls(graph_nodes.c.provenance) == func.jsonb_strip_nulls(
+        literal(read, JSONB)
+    )
+
+
 def _refuse_if_stale(conn: Connection, owner_id: str, node_id: str, exists: bool | None) -> None:
     """A CAS that wrote nothing: raise if the row is there (it changed), else it is absent."""
     if exists is None:
@@ -227,6 +242,7 @@ class PostgresGraphBackend:
         embedding: Sequence[float],
         *,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
         guard_personas: Sequence[str] = (),
     ) -> int | None:
@@ -237,8 +253,9 @@ class PostgresGraphBackend:
         Returns the ``surrogate`` (for index replace) or ``None`` if absent.
 
         A compare-and-set (D-R9-284-node-cas): the row must still have
-        ``expected_content_hash``, the hash the caller read, or :class:`GraphStaleWriteError`
-        is raised and nothing is written; the caller re-reads and retries.
+        ``expected_content_hash`` and ``expected_provenance``, the hash and trail the caller
+        read, or :class:`GraphStaleWriteError` is raised and nothing is written; the caller
+        re-reads and retries. The trail is compared because the hash does not cover it.
 
         The merge record (``_k7_merge``) is lifecycle state, like ``merged_into``: the row's
         is written, whatever the caller's metadata says (round 9 MEDIUM-1). Under the CAS a
@@ -266,7 +283,10 @@ class PostgresGraphBackend:
             surrogate = conn.execute(
                 self._update_node_statement(
                     owner_id, node, embedding, embedding_model, metadata, content_hash
-                ).where(graph_nodes.c.content_hash == expected_content_hash)
+                ).where(
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
             ).scalar_one_or_none()
             if surrogate is None:
                 _refuse_if_stale(conn, owner_id, node.id, current is not None)
@@ -1105,6 +1125,7 @@ class PostgresGraphBackend:
         member_id: str,
         merged_into: str,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]:
@@ -1146,6 +1167,7 @@ class PostgresGraphBackend:
                     graph_nodes.c.owner_id == owner_id,
                     graph_nodes.c.merged_into == merged_into,
                     graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
                 )
                 .values(
                     merged_into=merged_into,
@@ -1552,6 +1574,7 @@ class PostgresGraphBackend:
         metadata: dict[str, str],
         content_hash: str,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         guard_personas: Sequence[str] = (),
     ) -> None:
         """Set/clear ``merged_into`` + bookkeeping ``metadata``/``content_hash`` (K7-D-4.4).
@@ -1570,6 +1593,7 @@ class PostgresGraphBackend:
                 graph_nodes.c.id == node_id,
                 graph_nodes.c.owner_id == owner_id,
                 graph_nodes.c.content_hash == expected_content_hash,
+                trail_is(expected_provenance),
             )
             .values(
                 merged_into=merged_into,

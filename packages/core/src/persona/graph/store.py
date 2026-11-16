@@ -95,6 +95,7 @@ class _StoreBackend(Protocol):
         embedding: Sequence[float],
         *,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
     ) -> int | None: ...
     def surrogates_for_owner(self, owner_id: str) -> list[int]: ...
     def surrogates_for_nodes(self, owner_id: str, node_ids: Sequence[str]) -> list[int]: ...
@@ -362,7 +363,11 @@ class PostgresGraphStore:
         )
         vector = self._embedder.encode([renamed.content])[0]
         surrogate = self._backend.update_node(
-            owner_id, renamed, vector, expected_content_hash=existing.content_hash
+            owner_id,
+            renamed,
+            vector,
+            expected_content_hash=existing.content_hash,
+            expected_provenance=existing.provenance,
         )
         if surrogate is None:  # pragma: no cover - existing was just read
             raise NodeMergeError("self node vanished before rename", context={"owner_id": owner_id})
@@ -498,7 +503,11 @@ class PostgresGraphStore:
             created_at=current.created_at,
         )
         surrogate = self._backend.update_node(
-            owner_id, restored, embedding, expected_content_hash=current.content_hash
+            owner_id,
+            restored,
+            embedding,
+            expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
         )
         if surrogate is None:  # pragma: no cover - current was just read
             raise NodeMergeError(

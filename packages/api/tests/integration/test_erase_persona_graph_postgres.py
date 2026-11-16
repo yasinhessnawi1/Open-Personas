@@ -106,6 +106,7 @@ def graph(migrated_engine: Engine, embedder: Any) -> Engine:  # noqa: ANN401
         _node("edited", _PERSONA, None),
         vector,
         expected_content_hash=_node("edited", _PERSONA).content_hash,
+        expected_provenance=_node("edited", _PERSONA).provenance,
     )
     backend.upsert_edge(_OWNER, _edge("e_only", "only", "theirs", _OTHER))
     backend.upsert_edge(_OWNER, _edge("e_mine", "shared", "theirs", _PERSONA))
@@ -823,7 +824,8 @@ def test_a_legacy_comma_reason_loses_only_the_doomed_name(
             merged_into="l_k",
             metadata=metadata,
             content_hash=_compute_node_hash(name, f"about {node_id}", metadata),
-            expected_content_hash=_node(node_id, persona).content_hash,  # as inserted
+            expected_content_hash=_node(node_id, persona).content_hash,
+            expected_provenance=_node(node_id, persona).provenance,  # as inserted
         )
     with migrated_engine.begin() as conn:
         conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
@@ -892,6 +894,7 @@ def test_a_co_members_stale_listing_does_not_keep_a_mirror(
         metadata=metadata,
         content_hash=_compute_node_hash(b.concept_name, b.content, metadata),
         expected_content_hash=b.content_hash,
+        expected_provenance=b.provenance,
     )
     assert _open_edges(migrated_engine, "s_c") == {"s_c::causal::s_x"}
 
@@ -1388,7 +1391,13 @@ def test_a_stale_whole_metadata_write_is_refused_and_the_merge_completes(
 
     def _stale_extend() -> None:
         try:
-            backend.update_node(_OWNER, stale, vector, expected_content_hash=stale.content_hash)
+            backend.update_node(
+                _OWNER,
+                stale,
+                vector,
+                expected_content_hash=stale.content_hash,
+                expected_provenance=stale.provenance,
+            )
         except GraphStaleWriteError:
             refused.append(True)
 
@@ -1541,7 +1550,13 @@ def test_a_content_edit_between_the_merge_writes_is_kept_and_given_back(
             provenance=(*fresh.provenance, _by(None)),
             created_at=fresh.created_at,
         )
-        backend.update_node(_OWNER, edited, vector, expected_content_hash=fresh.content_hash)
+        backend.update_node(
+            _OWNER,
+            edited,
+            vector,
+            expected_content_hash=fresh.content_hash,
+            expected_provenance=fresh.provenance,
+        )
 
     _during_the_act(backend, _correct_m)
     member = backend.get_node(_OWNER, "r_m")
@@ -1601,7 +1616,11 @@ def test_an_extend_planned_before_the_erasure_cannot_bring_names_back(
     )
     with pytest.raises(GraphStaleWriteError):
         backend.update_node(
-            _OWNER, extended, embedder.encode(["x"])[0], expected_content_hash=planned.content_hash
+            _OWNER,
+            extended,
+            embedder.encode(["x"])[0],
+            expected_content_hash=planned.content_hash,
+            expected_provenance=planned.provenance,
         )
 
     after = backend.get_node(_OWNER, "r_c")
@@ -1642,3 +1661,89 @@ def test_a_superseded_canonicals_versions_lose_the_erased_personas_names(
     assert holding == 0, "no version holds P's member's name"
     for version in backend.get_node_versions(_OWNER, "r_c"):
         assert version.content_hash, "each version is still readable"
+
+
+def test_an_extend_read_before_a_trail_only_erasure_is_refused_and_redone(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 10, the trail half of the node CAS: the erasure changes only C's trail.
+
+    C's consolidation entry names P's member ("t_pname"), but C's alias list does not (a
+    legacy row), so the erasure rewrites the trail and leaves the hash as it was. An extend
+    that read C before is refused on the trail, reads C afresh, and writes without the name.
+    """
+    import json  # noqa: PLC0415
+
+    from persona.graph.merge import MergeEngine  # noqa: PLC0415
+    from persona.graph.protocol import KnowledgeCandidate  # noqa: PLC0415
+
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    entry = NodeProvenance(
+        source=WriteSource.SYSTEM,
+        written_at=_NOW,
+        reason='consolidation:rt aliases:["t_pname"]',
+    )
+    canonical = ConceptNode(
+        id="t_c",
+        node_kind=NodeKind.FACT,
+        concept_name="t_c",
+        content="about t_c",
+        metadata={"_k7_aliases": json.dumps(["someone else"])},
+        provenance=(_by(_OTHER), entry),
+        created_at=_NOW,
+    )
+    backend.insert_node(_OWNER, canonical, vector)
+    member = _node("t_m", _PERSONA).model_copy(update={"concept_name": "t_pname"})
+    backend.insert_node(_OWNER, member, vector)
+    record = {"run_id": "rt", "canonical": "t_c", "mirrored_edges": [], "added_entities": []}
+    metadata = {"_k7_merge": json.dumps(record)}
+    backend.set_merged_into(
+        _OWNER,
+        "t_m",
+        merged_into="t_c",
+        metadata=metadata,
+        content_hash=_compute_node_hash("t_pname", "about t_m", metadata),
+        expected_content_hash=member.content_hash,
+        expected_provenance=member.provenance,
+    )
+    stale = backend.get_node(_OWNER, "t_c")
+    assert stale is not None
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+    erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+    after_erasure = backend.get_node(_OWNER, "t_c")
+    assert after_erasure is not None
+    assert after_erasure.content_hash == stale.content_hash, "the hash did not move"
+    assert after_erasure.provenance != stale.provenance, "only the trail changed"
+
+    writes: list[str] = []
+    real_update = backend.update_node
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        writes.append("try")
+        return real_update(*args, **kwargs)
+
+    backend.update_node = _counting  # type: ignore[method-assign]
+    engine = MergeEngine(backend=backend, embedder=embedder)
+    candidate = KnowledgeCandidate(
+        concept_name="t_c",
+        content="and something new",
+        node_kind=NodeKind.FACT,
+        provenance=_by(_OTHER),
+    )
+    engine._extend(_OWNER, stale, candidate, vector)  # noqa: SLF001 - the extend path
+
+    assert writes == ["try", "try"], "refused on the stale trail, then redone on a fresh read"
+    extended = backend.get_node(_OWNER, "t_c")
+    assert extended is not None
+    assert "and something new" in extended.content
+    assert not [p for p in extended.provenance if p.reason and "t_pname" in p.reason]

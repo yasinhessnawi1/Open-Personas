@@ -135,6 +135,7 @@ class _FakeBackend:
         embedding: list[float],
         *,
         expected_content_hash: str,
+        expected_provenance: object = (),
     ) -> int | None:
         if node.id not in self.nodes:
             return None
@@ -503,6 +504,7 @@ class _RacedBackend(_FakeBackend):
         embedding: list[float],
         *,
         expected_content_hash: str,
+        expected_provenance: object = (),
     ) -> int | None:
         self.writes += 1
         if self.races:
@@ -512,7 +514,11 @@ class _RacedBackend(_FakeBackend):
             raced["content"] = current.content + " (edited)"
             self.nodes[node.id] = (ConceptNode.model_validate(raced), vector)
         return super().update_node(
-            owner_id, node, embedding, expected_content_hash=expected_content_hash
+            owner_id,
+            node,
+            embedding,
+            expected_content_hash=expected_content_hash,
+            expected_provenance=expected_provenance,
         )
 
 

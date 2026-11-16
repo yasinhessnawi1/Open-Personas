@@ -177,6 +177,7 @@ class _ConsolidationBackend(Protocol):
         member_id: str,
         merged_into: str,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         record: Callable[[list[str]], tuple[dict[str, str], str]],
         guard_personas: Sequence[str] = (),
     ) -> list[str]: ...
@@ -193,6 +194,7 @@ class _ConsolidationBackend(Protocol):
         embedding: Sequence[float],
         *,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         guard_personas: Sequence[str] = (),
     ) -> int | None: ...
     def set_merged_into(
@@ -204,6 +206,7 @@ class _ConsolidationBackend(Protocol):
         metadata: dict[str, str],
         content_hash: str,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
         guard_personas: Sequence[str] = (),
     ) -> None: ...
     def surrogate_for(self, owner_id: str, node_id: str) -> int | None: ...
@@ -424,6 +427,7 @@ class ConsolidationPass:
                 metadata=metadata,
                 content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
                 expected_content_hash=current.content_hash,
+                expected_provenance=current.provenance,
             )
         except Exception as exc:  # noqa: BLE001 - counted again by the next run
             _log.warning(
@@ -482,6 +486,7 @@ class ConsolidationPass:
             metadata=metadata,
             content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
             expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
         )
 
     def _cluster_members(
@@ -566,6 +571,7 @@ class ConsolidationPass:
                     member_id=member.id,
                     merged_into=canonical.id,
                     expected_content_hash=pending_hash,
+                    expected_provenance=member.provenance,  # the pending write keeps the trail
                     record=functools.partial(
                         self._done_metadata,
                         member,
@@ -707,6 +713,7 @@ class ConsolidationPass:
             metadata=metadata,
             content_hash=content_hash,
             expected_content_hash=member.content_hash,
+            expected_provenance=member.provenance,
             guard_personas=personas,
         )
         return metadata[_MERGE_KEY], content_hash
@@ -831,6 +838,7 @@ class ConsolidationPass:
             rebuilt,
             emb,
             expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
             guard_personas=personas,
         )
 
@@ -918,6 +926,7 @@ class ConsolidationPass:
                 metadata=metadata,
                 content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
                 expected_content_hash=current.content_hash,
+                expected_provenance=current.provenance,
             )
         except Exception as again:  # noqa: BLE001 - the operator is told
             _log.error(
@@ -960,6 +969,7 @@ class ConsolidationPass:
             metadata=orig_meta,
             content_hash=_compute_node_hash(member.concept_name, member.content, orig_meta),
             expected_content_hash=member.content_hash,
+            expected_provenance=member.provenance,
         )
         surrogate = self._backend.surrogate_for(owner_id, node_id)
         emb = self._backend.get_embeddings(owner_id, [node_id]).get(node_id)
@@ -1011,6 +1021,7 @@ class ConsolidationPass:
             metadata=metadata,
             content_hash=_compute_node_hash(current.concept_name, current.content, metadata),
             expected_content_hash=current.content_hash,
+            expected_provenance=current.provenance,
         )
 
     def _mirrors_shared_with(

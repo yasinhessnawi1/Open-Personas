@@ -385,6 +385,7 @@ def test_pending_merges_names_only_records_still_pending(
             metadata={"_k7_merge": raw},
             content_hash="h",
             expected_content_hash=_node(node_id, node_id).content_hash,
+            expected_provenance=_node(node_id, node_id).provenance,
         )
 
     assert backend.pending_merges("u1") == ["u1::node::00000001"]

@@ -110,6 +110,7 @@ class _MergeBackend(Protocol):
         embedding: Sequence[float],
         *,
         expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
     ) -> int | None: ...
     def snapshot_node_version(
         self,
@@ -284,7 +285,11 @@ class MergeEngine:
         )
         new_vec = self._embedder.encode([new_content])[0]
         self._backend.update_node(
-            owner_id, node, new_vec, expected_content_hash=target.content_hash
+            owner_id,
+            node,
+            new_vec,
+            expected_content_hash=target.content_hash,
+            expected_provenance=target.provenance,
         )
         # Half-edge fix (K5-D-7): clear EVERY incident semantic edge — inbound ones a
         # neighbour scored against the OLD embedding too, not just outgoing — then
@@ -358,7 +363,11 @@ class MergeEngine:
         node = self._rebuilt(target, content=new_content, candidate=candidate)
         new_vec = self._embedder.encode([new_content])[0]
         self._backend.update_node(
-            owner_id, node, new_vec, expected_content_hash=target.content_hash
+            owner_id,
+            node,
+            new_vec,
+            expected_content_hash=target.content_hash,
+            expected_provenance=target.provenance,
         )
         link_ids = self._form_semantic_links(owner_id, node, new_vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
@@ -449,7 +458,13 @@ class MergeEngine:
         node = self._rebuilt(
             target, content=candidate.content, candidate=candidate, superseded=target.content
         )
-        self._backend.update_node(owner_id, node, vec, expected_content_hash=target.content_hash)
+        self._backend.update_node(
+            owner_id,
+            node,
+            vec,
+            expected_content_hash=target.content_hash,
+            expected_provenance=target.provenance,
+        )
         link_ids = self._form_semantic_links(owner_id, node, vec, re_eval=True)
         link_ids += self._attach_typed(owner_id, node.id, candidate)
         return MergeOutcome(
