@@ -88,3 +88,26 @@ def test_the_downgrade_drops_an_empty_table(monkeypatch: object) -> None:
     _downgrade_on(engine, monkeypatch)
 
     assert not inspect(engine).has_table("retained_billing_records")
+
+
+def test_the_downgrade_refuses_a_role_that_cannot_see_through_rls(monkeypatch: object) -> None:
+    """Review L-3: a role under RLS would see the retained table empty and drop its records."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    import pytest  # noqa: PLC0415
+
+    module = _module()
+    asked: list[str] = []
+
+    def execute(statement: object) -> SimpleNamespace:
+        asked.append(str(statement))
+        return SimpleNamespace(scalar=lambda: False)
+
+    bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"), execute=execute)
+    monkeypatch.setattr(module, "op", SimpleNamespace(get_bind=lambda: bind))  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="does not bypass row level security"):
+        module.downgrade()
+
+    assert asked == [module.ROLE_SEES_ALL], "checked first, before anything is read or dropped"
+    assert "rolsuper OR rolbypassrls" in module.ROLE_SEES_ALL
