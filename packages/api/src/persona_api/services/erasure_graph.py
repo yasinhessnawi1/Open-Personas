@@ -418,7 +418,11 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
         .where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, persona_id))
         # Locked until the rewrite commits: a concurrent extend (synthesis, consolidation)
         # waits, instead of appending to a trail this is about to overwrite (review L1). In id
-        # order, so two transactions locking overlapping rows cannot deadlock.
+        # order, so two erasures locking overlapping rows take them in the same order. Other
+        # writers (a guarded write holds a persona row, then a node or edge) lock in their own
+        # order, so a deadlock or serialization failure is still possible: Postgres aborts one
+        # side, and the erasure is retried (the job with backoff, the sweep on its next pass;
+        # test_persona_erase_job.py and test_persona_erase_sweep.py pin both).
         .order_by(nodes_t.c.id)
         .with_for_update()
     ).all()

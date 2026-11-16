@@ -182,3 +182,36 @@ def test_a_backstop_failure_does_not_skip_the_stall_alerts(
 def test_the_backstop_looks_at_nothing_without_a_graph(engine: Engine) -> None:
     """The legacy edition (SQLite) has no graph tables to ask."""
     assert persona_erase.erased_personas_in_graph(engine) == []
+
+
+@pytest.mark.parametrize("sqlstate", ["40P01", "40001"])
+def test_a_backstop_aborted_by_postgres_is_tried_again_next_sweep(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, sqlstate: str
+) -> None:
+    """Review LOW-2: a deadlock (40P01) or serialization failure (40001) is not final."""
+    import psycopg.errors  # noqa: PLC0415 - only this test builds driver errors
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    left = {(_OWNER, _persona("a"))}
+    tries: list[str] = []
+
+    def _erase(_engine: Engine, *, owner_id: str, persona_id: str) -> dict[str, int]:
+        tries.append(persona_id)
+        if len(tries) == 1:
+            raise OperationalError("DELETE", {}, psycopg.errors.lookup(sqlstate)("aborted"))
+        left.discard((owner_id, persona_id))
+        return {"nodes_deleted": 1}
+
+    monkeypatch.setattr(persona_erase, "erase_persona_graph", _erase)
+    sweep = PersonaEraseSweep(
+        engine=engine,
+        grace=timedelta(0),
+        run=lambda _e, _t: None,
+        find_leftovers=lambda _engine: sorted(left),
+    )
+
+    sweep()
+    sweep()
+
+    assert tries == [_persona("a"), _persona("a")]
+    assert left == set()

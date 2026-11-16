@@ -335,3 +335,46 @@ def test_a_route_finding_the_erasure_locked_leaves_the_row_to_the_holder(seeded:
     again = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
     assert again is not None
     assert again.counts == {}, "the route recorded nothing while another run held the lock"
+
+
+def _aborted(kind: str) -> Exception:
+    """A Postgres abort as SQLAlchemy raises it: 40P01 or 40001 under an OperationalError."""
+    import psycopg.errors  # noqa: PLC0415 - only these tests build driver errors
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
+
+    orig = {
+        "deadlock": psycopg.errors.DeadlockDetected("deadlock detected"),
+        "serialization": psycopg.errors.SerializationFailure("could not serialize access"),
+    }[kind]
+    return OperationalError("UPDATE graph_nodes", {}, orig)
+
+
+@pytest.mark.parametrize("kind", ["deadlock", "serialization"])
+def test_a_deadlocked_or_unserializable_step_is_retried_not_refused(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Review LOW-2: Postgres aborting the graph step is transient.
+
+    The handler lets it through as an ordinary exception (the executor retries those with
+    backoff; only PermanentJobError is terminal), and the ledger's code is one the resume
+    sweep re-enqueues once the job is spent.
+    """
+    erasure = _claim(seeded)
+
+    def _graph(_deps: object, _erasure: object) -> dict[str, int]:
+        raise _aborted(kind)
+
+    monkeypatch.setattr(erasure_service, "STEPS", (("graph", _graph),))
+
+    with pytest.raises(Exception) as raised:  # noqa: PT011 - the driver error, whatever wraps it
+        asyncio.run(_handler(seeded).handle(_payload(erasure), _Context(OWNER)))  # type: ignore[arg-type]
+
+    assert not isinstance(raised.value, PermanentJobError)
+    found = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, PERSONA)
+    assert found is not None
+    assert found.state is ErasureState.FAILED
+    assert found.error_code == "graph_failed"
+    resumed = resume_persona_erasures(
+        engine=seeded.engine, grace=timedelta(0), run=lambda _e, _t: None
+    )
+    assert resumed == 1
