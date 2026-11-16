@@ -1087,3 +1087,62 @@ def test_a_refused_done_write_leaves_no_entity_link_on_the_canonical(
             text("SELECT node_id FROM graph_node_entities WHERE owner_id = :o"), {"o": _OWNER}
         ).all()
     assert links == []
+
+
+def test_a_reopened_fact_does_not_block_the_erasure(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Round 8 MEDIUM-B: M's edge was closed by the merge, then a writer opened it again.
+
+    Erasing the canonical's persona unmerges M and reopens its closed edges; the closed row
+    whose id is open again is left closed, so the step completes and the id stays single.
+    """
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'a@x.test')"), {"o": _OWNER})
+        for pid in (_PERSONA, _OTHER):
+            conn.execute(
+                text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+                {"p": pid, "o": _OWNER},
+            )
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=True)
+    vector = embedder.encode(["x"])[0]
+    backend.insert_node(_OWNER, _node("d_k", _PERSONA), vector)
+    backend.insert_node(_OWNER, _node("d_m", _OTHER), vector)
+    backend.insert_node(_OWNER, _node("d_x", _OTHER), vector)
+    backend.upsert_edge(_OWNER, _edge("d_m::causal::d_x", "d_m", "d_x", _OTHER))
+    ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )._merge_cluster(  # noqa: SLF001 - the merge act itself
+        _OWNER,
+        backend.get_node(_OWNER, "d_k"),
+        [backend.get_node(_OWNER, "d_m")],
+        run_id="rd",
+        now=_NOW,
+        epoch=1,
+    )
+    backend.upsert_edge(_OWNER, _edge("d_m::causal::d_x", "d_m", "d_x", _OTHER))  # reopened
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM personas WHERE id = :p"), {"p": _PERSONA})
+
+    counts = erase_persona_graph(migrated_engine, owner_id=_OWNER, persona_id=_PERSONA)
+
+    assert counts["members_unmerged"] == 1
+    assert backend.get_node(_OWNER, "d_k") is None
+    with migrated_engine.connect() as conn:
+        open_rows = conn.execute(
+            text(
+                "SELECT count(*) FROM graph_edges WHERE owner_id = :o "
+                "AND id = 'd_m::causal::d_x' AND invalid_at IS NULL"
+            ),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert open_rows == 1

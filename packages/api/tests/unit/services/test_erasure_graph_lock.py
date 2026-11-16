@@ -139,3 +139,31 @@ def test_the_graph_step_ends_with_the_orphan_prune() -> None:
 
     assert counts["orphan_mirrors_deleted"] == 0
     assert counts["merge_records_pruned"] == 0
+
+
+def test_the_erasures_unmerge_of_members_never_makes_a_second_open_row() -> None:
+    """Round 8 MEDIUM-B: the same guarded reopen as consolidation's unmerge."""
+    import json  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from persona_api.services import erasure_graph  # noqa: PLC0415
+
+    record = {"run_id": "r1", "canonical": "k", "mirrored_edges": [], "added_entities": []}
+    member = SimpleNamespace(
+        id="m", concept_name="m", content="c", metadata={"_k7_merge": json.dumps(record)}
+    )
+    log: list[tuple[str, Any]] = []
+
+    class _Members(_EmptyResult):
+        def all(self) -> list[object]:
+            return [member]
+
+    class _MemberConn(_Conn):
+        def execute(self, stmt: Any, params: Any = None) -> _EmptyResult:  # noqa: ANN401
+            log.append((str(stmt), params))
+            return _Members() if len(log) == 1 else _EmptyResult()
+
+    assert erasure_graph._unmerge_members_of(_MemberConn(log), "u1", ["k"]) == 1  # noqa: SLF001
+
+    reopen = next(sql for sql, _ in log if sql.startswith("UPDATE graph_edges"))
+    assert "NOT (EXISTS (SELECT open_twin.id" in reopen

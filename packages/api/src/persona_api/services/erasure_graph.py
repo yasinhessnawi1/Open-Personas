@@ -45,6 +45,7 @@ from persona.graph.maintenance_lock import (
     try_graph_maintenance_lock,
 )
 from persona.graph.models import LinkType, _compute_node_hash, make_edge_id, make_self_node_id
+from persona.graph.postgres import reopen_statement
 from sqlalchemy import (
     BigInteger,
     Text,
@@ -337,18 +338,9 @@ def _unmerge_members_of(conn: Connection, owner_id: str, doomed: list[str]) -> i
     for member in members:
         tag, metadata = unmerged(member.metadata)
         if tag is not None:
-            conn.execute(
-                update(graph_edges)
-                .where(
-                    graph_edges.c.owner_id == owner_id,
-                    graph_edges.c.invalidated_by == tag,
-                    or_(
-                        graph_edges.c.src_node_id == member.id,
-                        graph_edges.c.dst_node_id == member.id,
-                    ),
-                )
-                .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
-            )
+            # Never a second open row for an id: a writer may have reopened the fact since
+            # (round 8 MEDIUM-B), and the unique index would fail the whole step on every retry.
+            conn.execute(reopen_statement(owner_id, member.id, tag))
         _set_metadata(conn, owner_id, member, metadata)
         conn.execute(
             update(nodes_t)

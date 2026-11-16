@@ -288,3 +288,17 @@ def test_add_alias_appends_in_one_statement_in_the_held_transaction() -> None:
     (append,) = [sql for _, sql in engine.statements if sql.startswith("UPDATE")]
     assert "graph_entities.aliases ||" in append, "appended in SQL, not rewritten from a read"
     assert "NOT (graph_entities.aliases @>" in append, "an alias already there is not repeated"
+
+
+def test_a_reopen_never_makes_a_second_open_row_for_an_id() -> None:
+    """Round 8 MEDIUM-B: a closed member edge is reopened only if no open row has its id."""
+    from persona.graph.postgres import reopen_statement  # noqa: PLC0415
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    engine = _Engine()
+    _backend(engine).reopen_edges_incident("u1", "m", invalidated_by="consolidation:r1")
+
+    (sql,) = [s for _, s in engine.statements if s.startswith("UPDATE")]
+    assert "NOT (EXISTS (SELECT open_twin.id" in sql
+    compiled = str(reopen_statement("u1", "m", "t").compile(dialect=postgresql.dialect()))
+    assert "open_twin.id = graph_edges.id AND open_twin.invalid_at IS NULL" in compiled

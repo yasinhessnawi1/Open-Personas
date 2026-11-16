@@ -67,6 +67,33 @@ _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
 
 
+def reopen_statement(owner_id: str, node_id: str, invalidated_by: str) -> Any:  # noqa: ANN401
+    """Re-open the node's edges closed under ``invalidated_by``, but never a second open row.
+
+    A writer may have opened a new row with the same id since (K2's typed links do not look at
+    merged endpoints); re-opening the old one too would break the one-open-row-per-id index
+    and fail the whole statement, every time (R9-284 round 8 MEDIUM-B). That row is left
+    closed: the fact is open already. Shared by unmerge and the erasure's unmerge of members.
+    """
+    open_twin = graph_edges.alias("open_twin")
+    return (
+        update(graph_edges)
+        .where(
+            graph_edges.c.owner_id == owner_id,
+            graph_edges.c.invalidated_by == invalidated_by,
+            or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
+            ~select(open_twin.c.id)
+            .where(
+                open_twin.c.owner_id == owner_id,
+                open_twin.c.id == graph_edges.c.id,
+                open_twin.c.invalid_at.is_(None),
+            )
+            .exists(),
+        )
+        .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
+    )
+
+
 class PostgresGraphBackend:
     """Transport over a Postgres + pgvector engine for the graph (D-K0-3).
 
@@ -1234,17 +1261,8 @@ class PostgresGraphBackend:
 
     def reopen_edges_incident(self, owner_id: str, node_id: str, *, invalidated_by: str) -> None:
         """Re-open the edges incident to ``node_id`` closed under ``invalidated_by`` (unmerge)."""
-        stmt = (
-            update(graph_edges)
-            .where(
-                graph_edges.c.owner_id == owner_id,
-                graph_edges.c.invalidated_by == invalidated_by,
-                or_(graph_edges.c.src_node_id == node_id, graph_edges.c.dst_node_id == node_id),
-            )
-            .values(invalid_at=None, invalidated_by=None, invalidated_at=None)
-        )
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            conn.execute(reopen_statement(owner_id, node_id, invalidated_by))
 
     def maintenance_lock(self, owner_id: str) -> AbstractContextManager[None]:
         """The owner's graph maintenance lock, held on its own session (D-R9-284-graph-mutex)."""
