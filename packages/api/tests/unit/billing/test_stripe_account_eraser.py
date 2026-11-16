@@ -249,3 +249,19 @@ def test_a_known_customer_costs_no_stripe_call(monkeypatch: pytest.MonkeyPatch) 
         {"customer": "cus_live"},
         "sub_1",
     )
+
+
+def test_a_payment_method_already_detached_counts_as_done() -> None:
+    """Reviewer's survivor M24: Stripe answers payment_method_unexpected_state for a method
+    detached meanwhile (a second run, or the user in the portal); that is done, not a failure."""
+    detached = stripe.InvalidRequestError(
+        "The payment method is not attached to a customer",
+        param="payment_method",
+        code="payment_method_unexpected_state",
+    )
+    fake = _Fake(methods=["pm_1", "pm_2"], fail={"detach": detached})
+
+    counts = StripeAccountEraser(fake).erase_customer("cus_1", erasure_id=_ERASURE)
+
+    assert counts["payment_methods_detached"] == 0
+    assert counts["customers_relabelled"] == 1, "the erasure carried on past it"
