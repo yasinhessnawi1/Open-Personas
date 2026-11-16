@@ -218,3 +218,153 @@ def test_forgetting_a_node_never_merged_is_the_plain_delete(
     # was (the all-sources rule); M1's mirror stays.
     assert _open_edges_from_canonical(migrated_engine) == {"f_x"}
     assert _entities_of_canonical(migrated_engine) == {"f_shared", "f_own"}
+
+
+# ===== D-R9-287-forget-canonical: what was merged into the node goes with it =====
+
+
+def _nodes(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        return set(
+            conn.execute(
+                text("SELECT id FROM graph_nodes WHERE owner_id = :o"), {"o": _OWNER}
+            ).scalars()
+        )
+
+
+def _open(engine: Engine, src: str, dst: str) -> bool:
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    "SELECT 1 FROM graph_edges WHERE owner_id = :o AND src_node_id = :s "
+                    "AND dst_node_id = :d AND invalid_at IS NULL"
+                ),
+                {"o": _OWNER, "s": src, "d": dst},
+            ).first()
+            is not None
+        )
+
+
+def _listed_anywhere(engine: Engine) -> set[str]:
+    return {
+        str(mirror)
+        for record in _records(engine)
+        for mirror in [*record.get("mirrored_edges", []), *(record.get("mirror_sources") or {})]
+    }
+
+
+def test_forgetting_a_canonical_takes_its_members_with_it(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    backend = _merged(migrated_engine, embedder)
+
+    assert backend.delete_node(_OWNER, "f_c") is not None
+
+    assert _nodes(migrated_engine) == {"f_x", "f_y"}, "the canonical and both members are gone"
+    assert _records(migrated_engine) == []
+
+
+def test_forgetting_a_canonical_with_a_pending_member_leaves_nothing_to_resurrect(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """A pending member would be given back to life by the next run; it goes instead."""
+    from persona.graph.models import _compute_node_hash  # noqa: PLC0415
+
+    backend = _merged(migrated_engine, embedder)
+    m2 = backend.get_node(_OWNER, "f_m2")
+    assert m2 is not None
+    crashed = {**json.loads(m2.metadata["_k7_merge"]), "state": "pending"}
+    metadata = {**m2.metadata, "_k7_merge": json.dumps(crashed, sort_keys=True)}
+    backend.set_merged_into(
+        _OWNER,
+        "f_m2",
+        merged_into="f_c",
+        metadata=metadata,
+        content_hash=_compute_node_hash(m2.concept_name, m2.content, metadata),
+        expected_content_hash=m2.content_hash,
+        expected_provenance=m2.provenance,
+    )
+    assert backend.pending_merges(_OWNER) == ["f_m2"]
+
+    backend.delete_node(_OWNER, "f_c")
+
+    assert "f_m2" not in _nodes(migrated_engine)
+    assert backend.pending_merges(_OWNER) == []
+
+
+def test_forgetting_the_middle_of_a_chain_takes_everything_below_and_nothing_else(
+    migrated_engine: Engine,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """A merged into B, B merged into C; forget B. A and B go; C, X and Z stay, and so do the
+    edges among what stays. C's mirror of A's edge (copied through B) goes, and no record lists
+    it."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("INSERT INTO users (id, email) VALUES (:o, 'f@x.test')"), {"o": _OWNER})
+        conn.execute(
+            text("INSERT INTO personas (id, owner_id, yaml) VALUES (:p, :o, 'x: 1')"),
+            {"p": _PERSONA, "o": _OWNER},
+        )
+    backend = PostgresGraphBackend(
+        engine=migrated_engine, persona_guard=True, node_releaser=ForgetReleaser()
+    )
+    vector = embedder.encode(["x"])[0]
+    for node_id, name in (
+        ("ch_a", "a name"),
+        ("ch_b", "b name"),
+        ("ch_c", "c name"),
+        ("ch_x", "x"),
+        ("ch_z", "z"),
+    ):
+        backend.insert_node(_OWNER, _node(node_id, name), vector)
+    backend.upsert_edge(_OWNER, _edge("ch_a", "ch_x"))
+    backend.upsert_edge(_OWNER, _edge("ch_z", "ch_x"))
+    backend.upsert_edge(_OWNER, _edge("ch_c", "ch_z"))
+    consolidation = ConsolidationPass(
+        backend=backend,
+        index=make_graph_index(
+            settings=GraphSettings(),
+            engine=migrated_engine,
+            float32_fetch=backend.embeddings_by_surrogate,
+        ),
+        embedder=embedder,
+        audit_logger=MemoryAuditLogger(),
+        settings=GraphSettings(),
+    )
+    for run, canonical, member in (("cr1", "ch_b", "ch_a"), ("cr2", "ch_c", "ch_b")):
+        consolidation._merge_cluster(  # noqa: SLF001 - the merge act itself
+            _OWNER,
+            backend.get_node(_OWNER, canonical),
+            [backend.get_node(_OWNER, member)],
+            run_id=run,
+            now=_NOW,
+            epoch=1,
+        )
+    assert _open(migrated_engine, "ch_c", "ch_x"), "A's edge reached C through B"
+    with migrated_engine.connect() as conn:
+        mirror_on_c = str(
+            conn.execute(
+                text(
+                    "SELECT id FROM graph_edges WHERE owner_id = :o "
+                    "AND src_node_id = 'ch_c' AND dst_node_id = 'ch_x'"
+                ),
+                {"o": _OWNER},
+            ).scalar_one()
+        )
+
+    assert backend.delete_node(_OWNER, "ch_b") is not None
+
+    assert _nodes(migrated_engine) == {"ch_c", "ch_x", "ch_z"}
+    assert not _open(migrated_engine, "ch_c", "ch_x"), "the mirror copied through B is gone"
+    assert mirror_on_c not in _listed_anywhere(migrated_engine)
+    assert _open(migrated_engine, "ch_z", "ch_x"), "an edge it never contained stays"
+    assert _open(migrated_engine, "ch_c", "ch_z"), "the canonical's own edge stays"
+    with migrated_engine.connect() as conn:
+        meta = conn.execute(
+            text("SELECT metadata FROM graph_nodes WHERE owner_id = :o AND id = 'ch_c'"),
+            {"o": _OWNER},
+        ).scalar_one()
+    assert "b name" not in json.loads((meta or {}).get("_k7_aliases", "[]"))

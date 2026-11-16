@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -69,7 +70,13 @@ if TYPE_CHECKING:
 
     from sqlalchemy import Connection, Engine
 
-__all__ = ["DELETE_LOCK_TIMEOUT", "NodeReleaser", "PostgresGraphBackend", "RefuseNodeDeletes"]
+__all__ = [
+    "DELETE_LOCK_TIMEOUT",
+    "NodeRelease",
+    "NodeReleaser",
+    "PostgresGraphBackend",
+    "RefuseNodeDeletes",
+]
 
 #: How long a node delete waits for a running consolidation's graph lock (R9-287).
 DELETE_LOCK_TIMEOUT = "15s"
@@ -80,15 +87,31 @@ _BUSY_SQLSTATES = frozenset({"55P03", "40P01"})
 _LOCK_TIMEOUT_SHAPE = re.compile(r"[1-9][0-9]{0,5}(ms|s)")
 
 
+def _nothing_after() -> None:
+    return None
+
+
+@dataclass(frozen=True)
+class NodeRelease:
+    """What a node delete takes with it, as its releaser decided (R9-287).
+
+    ``members`` are the nodes merged into the deleted one, directly or down a chain
+    (D-R9-287-forget-canonical): duplicates of the fact the user forgets, deleted in the same
+    statement. ``after`` runs once they are gone (their edges by cascade).
+    """
+
+    members: tuple[str, ...] = ()
+    after: Callable[[], object] = _nothing_after
+
+
 class NodeReleaser(Protocol):
     """What a node delete releases besides the node: what consolidation copied from it (R9-287).
 
-    Called inside the delete's transaction, after the owner's graph maintenance lock is held:
-    ``release`` before the row goes, and the callable it returns after (the row and its edges
-    gone by cascade). The api supplies it; the graph's own tests pass ``None``.
+    Called inside the delete's transaction, after the owner's graph maintenance lock is held,
+    before any row goes. The api supplies it; the graph's own tests pass ``None``.
     """
 
-    def release(self, conn: Connection, owner_id: str, node_id: str) -> Callable[[], object]: ...
+    def release(self, conn: Connection, owner_id: str, node_id: str) -> NodeRelease: ...
 
 
 class RefuseNodeDeletes:
@@ -98,7 +121,7 @@ class RefuseNodeDeletes:
     removed, rather than deleting a node and leaving what consolidation copied from it.
     """
 
-    def release(self, conn: Connection, owner_id: str, node_id: str) -> Callable[[], object]:
+    def release(self, conn: Connection, owner_id: str, node_id: str) -> NodeRelease:
         del conn, owner_id
         msg = "this process does not delete graph nodes"
         raise GraphError(msg, context={"node_id": node_id})
@@ -484,15 +507,13 @@ class PostgresGraphBackend:
         waiting at most :data:`DELETE_LOCK_TIMEOUT` for a running consolidation
         (:class:`GraphNodeBusyError` after that), and releases what consolidation copied from
         the node (its mirrors, entity links and names on the canonical) in the same transaction.
+        Every node merged into it, directly or down a chain, goes in the same statement
+        (D-R9-287-forget-canonical). The returned surrogate is the node's own; a member left
+        the dense index when it was merged, and a stale entry is benign.
         """
-        stmt = (
-            delete(graph_nodes)
-            .where(graph_nodes.c.id == node_id, graph_nodes.c.owner_id == owner_id)
-            .returning(graph_nodes.c.surrogate)
-        )
         try:
             with self._engine.begin() as conn:
-                after: Callable[[], object] | None = None
+                release = NodeRelease()
                 if self._node_releaser is not None:
                     if conn.dialect.name == "postgresql":
                         # The shape is checked in __init__: digits and a unit, nothing else.
@@ -500,10 +521,18 @@ class PostgresGraphBackend:
                             text(f"SET LOCAL lock_timeout = '{self._delete_lock_timeout}'")
                         )
                     take_graph_maintenance_lock(conn, owner_id)
-                    after = self._node_releaser.release(conn, owner_id, node_id)
-                surrogate = conn.execute(stmt).scalar_one_or_none()
-                if after is not None:
-                    after()
+                    release = self._node_releaser.release(conn, owner_id, node_id)
+                ids = [node_id, *(m for m in release.members if m != node_id)]
+                gone: dict[str, int] = {
+                    str(row[0]): int(row[1])
+                    for row in conn.execute(
+                        delete(graph_nodes)
+                        .where(graph_nodes.c.owner_id == owner_id, graph_nodes.c.id.in_(ids))
+                        .returning(graph_nodes.c.id, graph_nodes.c.surrogate)
+                    ).all()
+                }
+                surrogate = gone.get(node_id)
+                release.after()
         except OperationalError as exc:
             if getattr(exc.orig, "sqlstate", None) not in _BUSY_SQLSTATES:
                 raise

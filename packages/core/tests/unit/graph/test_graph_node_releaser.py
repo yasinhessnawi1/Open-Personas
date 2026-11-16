@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.graph.errors import GraphError, GraphNodeBusyError
-from persona.graph.postgres import DELETE_LOCK_TIMEOUT, PostgresGraphBackend, RefuseNodeDeletes
+from persona.graph.postgres import (
+    DELETE_LOCK_TIMEOUT,
+    NodeRelease,
+    PostgresGraphBackend,
+    RefuseNodeDeletes,
+)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 
@@ -21,8 +26,11 @@ if TYPE_CHECKING:
 
 
 class _Result:
-    def scalar_one_or_none(self) -> int:
-        return 7
+    def __init__(self, ids: list[str] | None = None) -> None:
+        self.ids = ids or []
+
+    def all(self) -> list[tuple[str, int]]:
+        return [(node_id, 7 + i) for i, node_id in enumerate(self.ids)]
 
 
 class _Conn:
@@ -41,7 +49,9 @@ class _Conn:
         elif sql.startswith("SET LOCAL lock_timeout"):
             self.log.append(sql)
         elif sql.startswith("DELETE FROM graph_nodes"):
-            self.log.append("delete")
+            ids = [str(i) for i in stmt.compile().params.get("id_1", [])]
+            self.log.append("delete " + ",".join(ids) if len(ids) > 1 else "delete")
+            return _Result(ids)
         return _Result()
 
 
@@ -56,12 +66,13 @@ class _Engine:
 
 
 class _Releaser:
-    def __init__(self, log: list[str]) -> None:
+    def __init__(self, log: list[str], members: tuple[str, ...] = ()) -> None:
         self.log = log
+        self.members = members
 
-    def release(self, conn: Any, owner_id: str, node_id: str) -> Any:  # noqa: ANN401, ARG002
+    def release(self, conn: Any, owner_id: str, node_id: str) -> NodeRelease:  # noqa: ANN401, ARG002
         self.log.append(f"release {node_id}")
-        return lambda: self.log.append("after")
+        return NodeRelease(members=self.members, after=lambda: self.log.append("after"))
 
 
 def _backend(
@@ -147,3 +158,17 @@ def test_a_process_that_refuses_node_deletes_deletes_nothing() -> None:
         backend.delete_node("u1", "n1")
 
     assert "delete" not in log
+
+
+def test_the_members_go_in_the_same_statement_and_the_node_keeps_its_surrogate() -> None:
+    """D-R9-287-forget-canonical: what was merged into the node goes with it."""
+    log: list[str] = []
+    backend = PostgresGraphBackend(
+        engine=_Engine(log),  # type: ignore[arg-type]
+        persona_guard=False,
+        node_releaser=_Releaser(log, members=("m1", "m2")),
+    )
+
+    assert backend.delete_node("u1", "n1") == 7
+
+    assert log[-2:] == ["delete n1,m1,m2", "after"]
