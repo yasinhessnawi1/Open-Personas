@@ -53,7 +53,7 @@ from persona_runtime.initiative.specifics import (
     unsupported_specifics,
     vague_hedges,
 )
-from persona_runtime.routing.model_selection import resolve_served_model
+from persona_runtime.routing.model_selection import served_identity as _served_pair
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -202,7 +202,7 @@ class GroundingVerdict(BaseModel):
     #: held notice, so the flush can tell whether anything the judge read has changed.
     fingerprint: str | None = None
     #: The chain member that served the judge call, as ``"provider/model"``, read from
-    #: the chain's attempt ledger (:func:`served_identity`); ``None`` when no model
+    #: the call's own served trace (:func:`served_identity`); ``None`` when no model
     #: answered (a mechanical layer decided, an earlier admission stood, the call
     #: failed) or the served member is unclear. The pipeline stores it with the
     #: fingerprint: a YES from any member but the head of the chain is never kept.
@@ -570,14 +570,16 @@ def served_identity(chain: ChatBackend, response: ChatResponse) -> str | None:
     """The chain member that served ``response``, as ``"provider/model"`` (fifth review
     LOW-1).
 
-    Read from the chain's attempt ledger (:func:`resolve_served_model`: the primary
-    served when the walk recorded no failed attempt), so a fallback to the same model on
-    another provider is not the head. The response's own echo can only demote: when it
-    names another member (the ledger is shared by concurrent calls on one chain, a
-    registered gap), the member is unclear and ``None`` is returned, so the YES is
-    judged again at the flush rather than kept on a guess.
+    Read from the response's own trace (``response.served``, R9-223), which names the
+    chain member that answered THIS call, so a fallback to the same model on another
+    provider is not the head and a concurrent call on the shared chain cannot change
+    it. A bare judge has no trace and is its own identity; there the response's echo
+    can still demote: when it names another model, the member is unclear and ``None``
+    is returned, so the YES is judged again at the flush rather than kept on a guess.
     """
-    provider, model = resolve_served_model(chain)
+    if response.served is not None:
+        return f"{response.served.provider}/{response.served.model}"
+    provider, model = _served_pair(chain, None)
     if (response.provider, response.model) != (provider, model):
         _logger.warning("judge's served model is unclear; its YES will not be kept")
         return None

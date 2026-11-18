@@ -22,12 +22,13 @@ from persona.backends.multi_model import MultiModelChatBackend
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
+    from persona.backends.types import ServedCall
 
 __all__ = [
     "canonical_model_id",
     "first_token_sample_model",
     "reorder_primary",
-    "resolve_served_model",
+    "served_identity",
 ]
 
 
@@ -43,74 +44,55 @@ def canonical_model_id(provider: str, model: str) -> str:
     return model if "/" in model else f"{provider}/{model}"
 
 
-def resolve_served_model(backend: ChatBackend) -> tuple[str, str]:
-    """Return the ``(provider, model)`` that actually served ``backend``'s latest call.
+def served_identity(backend: ChatBackend, served: ServedCall | None) -> tuple[str, str]:
+    """The ``(provider, model)`` that served ONE call, from that call's own result.
 
-    A :class:`MultiModelChatBackend` reports its PRIMARY through ``provider_name`` /
-    ``model_name`` by contract, even when a fallback answered. On a text-only request
-    every backend before the winner leaves one record in the wrapper's
-    ``last_attempts`` ledger, so the winner is ``backends[len(last_attempts)]``. This
-    is the one resolution the text loop's TurnLog attribution (Spec M2, D-M2-2) and the
-    voice turn log (R9-214) share.
-
-    Known gap, unchanged here: on an image-bearing request the wrapper walks only its
-    vision-capable backends (``_vision_aware_candidates``) and skips the others without
-    recording them, so the ledger length no longer indexes the full chain and the pair
-    returned can name the wrong backend whenever a non-vision backend precedes the
-    winner. This is registered in the R9 register.
-
-    A bare backend has no ledger and no chain, so its own identity is returned. So is
-    the wrapper's, defensively, when the ledger is as long as the chain (every backend
-    failed, which callers do not reach because the wrapper raised instead).
+    ``served`` is the :class:`~persona.backends.types.ServedCall` a multi-model chain
+    stamps on its response and on every chunk it yields (R9-223): the identity travels
+    with the call, so a concurrent call on the same shared chain cannot change it, and
+    an image request whose walk skipped a backend still names the one that answered
+    (R9-227). ``None`` means a bare backend, which is its own served identity. (A chain
+    reports its PRIMARY through ``provider_name`` / ``model_name`` by contract, which is
+    why the served identity must come from the call.)
 
     Args:
-        backend: The backend the call went through; usually a tier's wrapper.
+        backend: The backend the call went through.
+        served: The call's ``served`` field (``ChatResponse.served`` or
+            ``StreamChunk.served``).
 
     Returns:
         The served ``(provider, model)`` pair.
     """
-    attempts = getattr(backend, "last_attempts", None) or []
-    chain = getattr(backend, "backends", None)
-    if chain is not None and 0 <= len(attempts) < len(chain):
-        winner = chain[len(attempts)]
-        return winner.provider_name, winner.model_name
+    if served is not None:
+        return served.provider, served.model
     return backend.provider_name, backend.model_name
 
 
-def first_token_sample_model(backend: ChatBackend) -> str | None:
+def first_token_sample_model(backend: ChatBackend, served: ServedCall | None) -> str | None:
     """The model a first-token latency sample for this call belongs to, or ``None``.
 
-    Call it once the call has produced its first reply text, when a chain has
-    committed to the backend that is answering.
+    Call it once the call has produced its first reply text, with that chunk's
+    ``served`` field. A sample only when the call was answered with no failed try
+    before it (D-R9-226 option ii):
 
-    What it excludes (R9-226): a FALLBACK call, one where an earlier backend in the
-    chain failed and a later one answered. The time measured includes every earlier
-    backend's failure, and the chain records no per-attempt timing to take that out,
-    so such a call yields no sample at all. The failure is not recorded against the
-    backend that failed either: time to a 429 or a timeout is not first-token latency,
-    and would make a fast-failing model look like the fastest one to the router's
-    latency score.
-
-    What it does NOT exclude: a same-backend RETRY. The chain retries a transient
-    failure on the same backend (once, by default) and, when the retry succeeds,
-    leaves nothing in ``last_attempts``, so that sample is attributed to the right
-    model but includes the failed attempt and the retry wait. Registered alongside
-    R9-223, whose per-call served identity is where per-attempt timing belongs.
-
-    Also inherits the known gaps of :func:`resolve_served_model`: the shared ledger
-    (R9-223) and, on an image request, a non-vision primary the chain skipped without
-    recording it (R9-227).
+    * not a FALLBACK call (R9-226): the time includes every earlier backend's failure.
+      Nor is the failure recorded against the backend that failed: time to a 429 or a
+      timeout is not first-token latency, and would make a fast-failing model look
+      like the fastest one to the router's latency score;
+    * not a same-backend RETRY (R9-229): the time includes the failed try and the
+      retry wait.
 
     Args:
-        backend: The backend the call went through; usually a tier's wrapper.
+        backend: The backend the call went through; usually a tier's chain.
+        served: The call's ``served`` field; ``None`` for a bare backend.
 
     Returns:
-        The model name the latency tracker keys on, or ``None`` when an earlier
-        backend in the chain failed before the one that answered.
+        The model name the latency tracker keys on, or ``None`` when a failed try
+        preceded the answer.
     """
-    if getattr(backend, "last_attempts", None):
-        return None
-    return resolve_served_model(backend)[1]
+    if served is None:
+        return backend.model_name
+    return served.model if served.first_attempt else None
 
 
 def reorder_primary(backend: ChatBackend, chosen_model_id: str) -> ChatBackend:

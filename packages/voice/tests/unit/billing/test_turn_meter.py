@@ -259,7 +259,9 @@ class TestBillTurn:
         # ``compute_turn_cost`` with the accumulator's empty provider/model — that
         # logs a spurious ``no pricing metadata; turn recorded unpriced provider=
         # model=`` warning on every LLM-less turn (and prices 0 anyway).
-        from persona_voice.billing import turn_meter as tm
+        # The meter prices through persona_runtime.cost.price_rounds (R9-246), which
+        # calls that module's compute_turn_cost: spy on it there.
+        from persona_runtime import cost as tm
 
         seen: list[dict[str, object]] = []
         real = tm.compute_turn_cost
@@ -617,3 +619,28 @@ def test_rounds_that_sum_to_whole_cents_never_ceil_to_an_extra_credit() -> None:
     (charge,) = ledger.calls
     assert charge["cost_cents"] == 3.0
     assert charge["amount"] == 3
+
+
+def test_a_rounds_failed_tries_ride_to_pricing_to_be_logged_not_charged() -> None:
+    """D1 (D-ORCH-11-18-h): the accumulator keeps a round's unrecovered tries for the log."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    wasted = BackendAttempt(
+        index=0,
+        provider="nvidia",
+        model="primary-model",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=700, completion_tokens=0, total_tokens=700),
+    )
+    acc = VoiceTurnAccumulator(streamed_seconds_reader=lambda: 0.0)
+    acc.note_llm_usage(
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=None,
+        provider="anthropic",
+        model="fallback-model",
+        unrecovered=(wasted,),
+    )
+    (llm_round,) = acc.take_turn().llm_rounds
+    assert llm_round.unrecovered == (wasted,)
+    assert (llm_round.prompt_tokens, llm_round.model) == (10, "fallback-model")

@@ -10,11 +10,11 @@ property read through the plan wrapper would be another plan read.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.backends.multi_model import MultiModelChatBackend
-from persona.backends.types import ChatResponse, TokenUsage
+from persona.backends.types import ChatResponse, StreamChunk, TokenUsage
 from persona.initiative import (
     CandidateSource,
     CitationKind,
@@ -27,10 +27,12 @@ from persona.initiative import (
 from persona.schema.conversation import ConversationMessage
 from persona.tools.categories import ActionCategory
 from persona_api.services import model_tiers
-from persona_api.services.llm_usage_collector import UsageCollectingBackend
+from persona_api.services.llm_usage_collector import UsageCollectingBackend, collect_llm_usage
 from persona_api.services.model_tiers import PlanScopedChatBackend
 from persona_runtime.initiative.grounding import GroundingChecker, excerpts_fingerprint
-from persona_runtime.routing.model_selection import resolve_served_model
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 _EXCERPT = "The user's car insurance renews automatically on 4 October 2026."
 _YES = '{"entailed": true, "quote": "car insurance renews automatically"}'
@@ -54,6 +56,16 @@ class _Member:
             provider=self.provider_name,
             usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             latency_ms=1.0,
+        )
+
+    async def chat_stream(self, messages: Any, **_: Any) -> AsyncIterator[StreamChunk]:  # noqa: ANN401, ARG002
+        self.calls += 1
+        if self.content:
+            yield StreamChunk(delta=self.content)
+        yield StreamChunk(
+            delta="",
+            is_final=True,
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
         )
 
 
@@ -129,9 +141,41 @@ async def test_a_fallback_is_visible_through_both_wrappers(
     spare = _Member("groq", "openai/gpt-oss-120b", "an answer")
     chain = MultiModelChatBackend([head, spare], max_retries_per_backend=0)  # type: ignore[list-item]
     wrapper, _ = _wrapped(chain, monkeypatch)
-    await wrapper.chat(_MESSAGES)
+    response = await wrapper.chat(_MESSAGES)
     assert wrapper.resolve_chain() is chain
-    assert resolve_served_model(wrapper.resolve_chain()) == ("groq", "openai/gpt-oss-120b")
+    # R9-223: the served identity rides the response through both wrappers.
+    assert response.served is not None
+    assert (response.served.provider, response.served.model) == ("groq", "openai/gpt-oss-120b")
+
+
+@pytest.mark.asyncio
+async def test_the_usage_sink_records_the_model_that_served_each_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-296: the collector recorded the chain's PRIMARY, so every background op whose
+    call a fallback served was billed at the primary's rate."""
+    head = _Member("openrouter", "openai/gpt-oss-120b", "")  # empty: falls through
+    spare = _Member("groq", "openai/gpt-oss-120b", "an answer")
+    chain = MultiModelChatBackend([head, spare], max_retries_per_backend=0)  # type: ignore[list-item]
+    wrapper, _ = _wrapped(chain, monkeypatch)
+    with collect_llm_usage() as sink:
+        await wrapper.chat(_MESSAGES)
+    totals = sink.totals()
+    assert (totals.provider, totals.model) == ("groq", "openai/gpt-oss-120b")
+    assert (totals.prompt_tokens, totals.completion_tokens) == (1, 1)  # the answer only
+
+
+@pytest.mark.asyncio
+async def test_the_usage_sink_records_the_served_model_of_a_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = _Member("openrouter", "openai/gpt-oss-120b", "")
+    spare = _Member("groq", "openai/gpt-oss-120b", "an answer")
+    chain = MultiModelChatBackend([head, spare], max_retries_per_backend=0)  # type: ignore[list-item]
+    wrapper, _ = _wrapped(chain, monkeypatch)
+    with collect_llm_usage() as sink:
+        _ = [chunk async for chunk in wrapper.chat_stream(_MESSAGES)]
+    assert (sink.provider, sink.model) == ("groq", "openai/gpt-oss-120b")
 
 
 def test_a_bare_backend_is_its_own_chain() -> None:

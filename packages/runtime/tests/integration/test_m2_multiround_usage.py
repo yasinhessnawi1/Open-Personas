@@ -15,8 +15,10 @@ arms end to end, through the REAL tool sub-loop (no hand-forced state):
   actual is their SUM, basis stays ``actual_openrouter``;
 * the MIXED arm: round 1 serves cleanly, round 2 genuinely falls back
   mid-turn (a REAL :class:`MultiModelChatBackend` fallback, not a scripted
-  stand-in) to a model that reports no cost -> the partial actual is
-  DROPPED (never summed as if the missing round were free) and logged once;
+  stand-in) to an OpenRouter model that reports a cost -> since R9-246 each
+  round is priced on its own (the estimate for round 1, the actual for
+  round 2), the turn is labelled by its least certain round (never as an
+  actual), and the mixed report is logged once;
 * single-round turns are byte-identical (the pre-fix shape, unpinned by any
   ``usage=`` override in this file).
 
@@ -322,7 +324,7 @@ async def test_all_actuals_sum_to_the_turns_actual(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_mixed_round_actuals_are_dropped_and_logged_once(
+async def test_mixed_round_actuals_are_priced_per_round_and_logged_once(
     loguru_capture: list[str],
 ) -> None:
     """Genuine mid-turn fallback via a REAL :class:`MultiModelChatBackend`:
@@ -331,10 +333,9 @@ async def test_mixed_round_actuals_are_dropped_and_logged_once(
     the wrapper falls back — for real, no hand-forced state — to an
     OpenRouter secondary that DOES report a ``cost_usd``.
 
-    The served (last-round) pair is OpenRouter, so the M1 review's
-    actual-arm provider gate alone would NOT have blocked an actual here —
-    only the mixed-round honesty rule does: the partial actual is dropped,
-    never summed as if the missing round were free.
+    Pre-R9-246 the partial actual was dropped and the summed tokens were
+    priced at the last round's model (catalog-only here, so 0.0 unpriced: the
+    turn was charged the floor). Each round is now priced at its own model.
     """
     primary = _DegradingPrimary()
     secondary = _openrouter_secondary(cost_usd=0.0004)
@@ -358,14 +359,12 @@ async def test_mixed_round_actuals_are_dropped_and_logged_once(
     # Tokens ALWAYS sum across both rounds regardless of the cost outcome.
     assert log.prompt_tokens == 60 + 45
     assert log.completion_tokens == 15 + 12
-    # The partial actual (secondary's 0.0004) is DROPPED, not summed/kept as
-    # if the missing round were free — basis falls to the honest estimate
-    # path. z-ai/glm-4.6 is a catalog-only slug the bare loop's static-only
-    # chain cannot resolve (mirrors the sibling "absent actual degrades
-    # honestly" test), so this lands deterministically on unpriced rather
-    # than a hand-computed static estimate.
-    assert log.cost_basis == "unpriced"
-    assert log.cost_cents == 0.0
+    # R9-246: round 0 at claude-sonnet-4-6's static rate (60 in at 0.30 and
+    # 15 out at 1.50 per 1k = 0.0405 cents) plus round 1's own OpenRouter
+    # actual (0.0004 USD = 0.04 cents). Labelled by the least certain round
+    # (D3): an estimate, never the partial actual.
+    assert log.cost_basis == "estimate_static"
+    assert log.cost_cents == pytest.approx(0.0805)
 
     warnings = [m for m in loguru_capture if "mixed cost_usd report" in m]
     assert len(warnings) == 1

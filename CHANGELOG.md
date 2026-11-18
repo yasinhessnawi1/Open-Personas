@@ -130,6 +130,18 @@ Per-spec entries are added by the close-out phase of each spec.
   with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **A turn is billed at the model that answered it, every time.** Each tier's model chain
+  is shared by every conversation on it, and which model answered a call was read back
+  afterwards from that shared chain. When two conversations used the chain at once, one
+  could be billed at the other's model: too little when it fell back to a dearer model,
+  too much the other way. An image message was billed at the first model in the chain
+  even when that model cannot read images and never saw it. A chat turn with tool use
+  priced all of its model calls at the last call's model, so a cheap tool call followed
+  by a dearer answer cost almost twice what it should. Agentic runs, task steps and
+  background work were priced at the chain's first model whenever another one answered.
+  Each call now carries the model that served it, and every model call of a turn is
+  priced at its own model, the way voice already did. A same-model retry no longer
+  counts as a clean first answer when the router measures how fast a model replies.
 - **A forget that lands while a memory is being written now stays forgotten.** A versioned
   write read its memory, decided, and then wrote the previous version back with its link
   moved, so a forget that landed in between was undone and the deleted text came back. A

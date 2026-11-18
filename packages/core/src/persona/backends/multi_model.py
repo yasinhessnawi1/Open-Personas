@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -47,6 +48,7 @@ from persona.backends.errors import (
     ProviderError,
     RateLimitError,
 )
+from persona.backends.types import BackendAttempt, ServedCall
 from persona.errors import PersonaError
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
@@ -55,7 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from persona.backends.protocol import ChatBackend
-    from persona.backends.types import ChatResponse, StreamChunk, ToolSpec
+    from persona.backends.types import ChatResponse, StreamChunk, TokenUsage, ToolSpec
     from persona.schema.conversation import ConversationMessage
 
 __all__ = ["AllModelsFailedError", "AttemptRecord", "MultiModelChatBackend"]
@@ -128,6 +130,17 @@ def _is_overloaded_error(exc: ProviderError) -> bool:
     return any(marker in message for marker in _OVERLOADED_MARKERS)
 
 
+def _status_code(exc: Exception) -> int | None:
+    """The HTTP status a :class:`PersonaError`'s context carries, parsed best-effort."""
+    if not isinstance(exc, PersonaError):
+        return None
+    raw = exc.context.get("status_code", "")
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
 def _is_retired_model_error(exc: ProviderError) -> bool:
     """Whether ``exc`` says the model itself is gone (404/410, or a retirement body)."""
     status_raw = exc.context.get("status_code", "")
@@ -196,14 +209,11 @@ class MultiModelChatBackend:
         self._backends: list[ChatBackend] = backends
         self._tier_name: str | None = tier_name
         self._max_retries: int = max_retries_per_backend
-        # Spec 20 T19 (D-20-9) — per-call attempt ledger surfaced to the
-        # ConversationLoop write-site so TurnLog can capture which backends
-        # fell through to reach the successful winner. RESET at the START of
-        # every chat() / chat_stream() call so concurrent / sequential calls
-        # never bleed state. Class-name-only privacy is enforced by
-        # ``_record_attempt`` which captures ``type(exc).__name__`` (never the
-        # exception message).
-        self._last_attempts: list[AttemptRecord] = []
+        # R9-223: NO per-call state lives here. One chain serves every conversation
+        # on its tier, so an attempt ledger stored on it (removed in R9-223) could be
+        # reset by a concurrent call before the first call read it. Each call's
+        # served identity and attempt history ride its own result instead
+        # (``ServedCall`` on the response and on every chunk).
 
     # ------------------------------------------------------------------ #
     # ChatBackend Protocol properties — delegate to PRIMARY backend.
@@ -222,24 +232,6 @@ class MultiModelChatBackend:
     def backends(self) -> list[ChatBackend]:
         """Composed backends in fallback order (read-only view)."""
         return self._backends
-
-    @property
-    def last_attempts(self) -> list[AttemptRecord]:
-        """Per-call attempt ledger from the most recent chat / chat_stream call.
-
-        Read by the ConversationLoop write-site (Spec 20 T19; D-20-9) to
-        populate the TurnLog ``tier_fallback_*`` fields. Returns the live
-        list (callers MUST NOT mutate — copy via ``list(...)`` if needed).
-
-        On a clean primary-success call the ledger is empty (no fallback
-        engaged). On a successful fallback the ledger holds one
-        :class:`AttemptRecord` per backend that fell through. On
-        :class:`AllModelsFailedError` the ledger holds one record per
-        backend tried (all failed).
-
-        Cleared at the START of every chat / chat_stream call.
-        """
-        return self._last_attempts
 
     @property
     def provider_name(self) -> str:
@@ -312,15 +304,16 @@ class MultiModelChatBackend:
             AllModelsFailedError: every backend exhausted its per-bucket path.
             Any SURFACE-bucket exception: short-circuits the walk.
         """
-        # T19 — reset per-call ledger so :attr:`last_attempts` reflects only
-        # this invocation (the ConversationLoop reads it post-call).
-        self._last_attempts = []
-        attempts: list[AttemptRecord] = self._last_attempts
+        # The per-backend records for this call's AllModelsFailedError (local: R9-223).
+        attempts: list[AttemptRecord] = []
         # Image-workspace cascade: when the request carries an ImageContent
         # block, restrict + order the candidate walk to vision-capable
         # backends. Raises NoVisionCapableModelError if none qualify (honest
         # failure — never a silent text-only dispatch).
         candidates = self._vision_aware_candidates(messages)
+        # R9-229: this call's own history of every try, retries included. Local to the
+        # call, so a concurrent call on this shared object cannot touch it.
+        history: list[BackendAttempt] = []
         for backend in candidates:
             outcome = await self._try_backend_chat(
                 backend,
@@ -332,9 +325,13 @@ class MultiModelChatBackend:
                 top_p=top_p,
                 top_k=top_k,
                 attempts=attempts,
+                history=history,
             )
             if outcome is not None:
-                return outcome
+                # R9-223 / R9-227: the served identity rides the response itself. It
+                # names the sub-backend that answered, so neither a concurrent call on
+                # this shared object nor a vision walk that skipped a backend can move it.
+                return outcome.model_copy(update={"served": self._served_by(backend, history)})
         raise self._build_exhausted_error(attempts)
 
     # ------------------------------------------------------------------ #
@@ -387,16 +384,20 @@ class MultiModelChatBackend:
         top_p: float | None = None,
         top_k: int | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        # T19 — reset per-call ledger (see chat() for rationale).
-        self._last_attempts = []
-        attempts: list[AttemptRecord] = self._last_attempts
+        # The per-backend records for this call's AllModelsFailedError (local: R9-223).
+        attempts: list[AttemptRecord] = []
         # Image-workspace cascade — same vision-aware candidate restriction as
         # chat(); raises NoVisionCapableModelError BEFORE any stream opens.
         candidates = self._vision_aware_candidates(messages)
+        # R9-229: this call's own history of every try (see chat()).
+        history: list[BackendAttempt] = []
         for backend in candidates:
+            index = self._chain_index(backend)
             retries_left = self._max_retries
             retried = False
             while True:
+                started = time.perf_counter()
+                is_retry = retried
                 # R9-033: commitment is now keyed on the first PAYLOAD chunk
                 # (non-whitespace delta or a tool-call delta), not on the first
                 # chunk of any kind. Payload-less chunks (usage-only finals,
@@ -407,6 +408,8 @@ class MultiModelChatBackend:
                 # path as any other transient ProviderError (the held-back
                 # chunks are discarded: they carried no user-visible reply).
                 committed = False
+                # R9-223: set at commit, stamped on every chunk yielded from then on.
+                served: ServedCall | None = None
                 pending: list[StreamChunk] = []
                 # R9-090: the streamed half of the repetition guard. Once text has
                 # been yielded it cannot be taken back, so unlike the non-streaming
@@ -434,10 +437,14 @@ class MultiModelChatBackend:
                                 pending.append(chunk)
                                 continue
                             committed = True
+                            history.append(
+                                self._attempt(index, backend, None, retry=is_retry, started=started)
+                            )
+                            served = self._served_by(backend, history)
                             for held in pending:
-                                yield held
+                                yield held.model_copy(update={"served": served})
                             pending.clear()
-                        yield chunk
+                        yield chunk.model_copy(update={"served": served})
                         if chunk.delta:
                             seen.append(chunk.delta)
                             # The check is O(words), so it runs on a cadence rather
@@ -474,6 +481,16 @@ class MultiModelChatBackend:
                         # Past the point of no return — surface verbatim.
                         self._record_attempt(backend, exc, retried, attempts)
                         raise
+                    history.append(
+                        self._attempt(
+                            index,
+                            backend,
+                            exc,
+                            retry=is_retry,
+                            started=started,
+                            usage=self._held_usage(pending),
+                        )
+                    )
                     action = self._classify(exc)
                     if action == _SURFACE:
                         self._record_attempt(backend, exc, retried, attempts)
@@ -487,6 +504,50 @@ class MultiModelChatBackend:
                     self._record_attempt(backend, exc, retried, attempts)
                     break  # advance to next backend
         raise self._build_exhausted_error(attempts)
+
+    @staticmethod
+    def _served_by(backend: ChatBackend, history: list[BackendAttempt]) -> ServedCall:
+        """The served identity of ``backend`` for one call (R9-223), with its history.
+
+        The configured ``provider_name`` / ``model_name`` of the sub-backend that
+        answered, which is what the price tables key on. A chain is never nested inside
+        another chain (the tier registry composes sub-backends only), so the identity
+        of the answering sub-backend is the identity of the call.
+        """
+        return ServedCall(
+            provider=backend.provider_name, model=backend.model_name, attempts=tuple(history)
+        )
+
+    def _chain_index(self, backend: ChatBackend) -> int:
+        """``backend``'s position in the configured chain (by identity, not the walk)."""
+        return next(i for i, member in enumerate(self._backends) if member is backend)
+
+    @staticmethod
+    def _attempt(
+        index: int,
+        backend: ChatBackend,
+        exc: Exception | None,
+        *,
+        retry: bool,
+        started: float,
+        usage: TokenUsage | None = None,
+    ) -> BackendAttempt:
+        """One try's record (R9-229): class name only, never the message (D-20-9)."""
+        return BackendAttempt(
+            index=index,
+            provider=backend.provider_name,
+            model=backend.model_name,
+            error_class=None if exc is None else type(exc).__name__,
+            status_code=None if exc is None else _status_code(exc),
+            retry=retry,
+            elapsed_ms=max(0.0, (time.perf_counter() - started) * 1000.0),
+            usage=usage,
+        )
+
+    @staticmethod
+    def _held_usage(pending: list[StreamChunk]) -> TokenUsage | None:
+        """The usage a stream reported before failing uncommitted (an empty completion)."""
+        return next((c.usage for c in reversed(pending) if c.usage is not None), None)
 
     @staticmethod
     def _chunk_has_payload(chunk: StreamChunk) -> bool:
@@ -512,6 +573,7 @@ class MultiModelChatBackend:
         max_tokens: int,
         stop: list[str] | None,
         attempts: list[AttemptRecord],
+        history: list[BackendAttempt],
         top_p: float | None = None,
         top_k: int | None = None,
     ) -> ChatResponse | None:
@@ -525,9 +587,14 @@ class MultiModelChatBackend:
             The original exception: when the classifier bucketed it as
                 SURFACE (no more backends tried).
         """
+        index = self._chain_index(backend)
         retries_left = self._max_retries
         retried = False
         while True:
+            started = time.perf_counter()
+            is_retry = retried
+            # Usage a completion reported before it was rejected as empty or degenerate.
+            failed_usage: TokenUsage | None = None
             try:
                 response = await backend.chat(
                     messages,
@@ -543,6 +610,7 @@ class MultiModelChatBackend:
                 # raise into the classifier below so it walks the same
                 # retry-then-fallback path as any other transient ProviderError.
                 if not response.content.strip() and not response.tool_calls:
+                    failed_usage = response.usage
                     raise EmptyCompletionError(
                         "backend returned a completion with no content and no tool calls",
                         context={
@@ -558,6 +626,7 @@ class MultiModelChatBackend:
                 # chain answers instead.
                 if is_degenerate_repetition(response.content):
                     words = response.content.split()
+                    failed_usage = response.usage
                     raise DegenerateCompletionError(
                         "backend returned a completion that collapsed into repetition",
                         context={
@@ -567,8 +636,14 @@ class MultiModelChatBackend:
                             "distinct_words": str(len(set(words))),
                         },
                     )
+                history.append(self._attempt(index, backend, None, retry=is_retry, started=started))
                 return response
             except Exception as exc:  # noqa: BLE001 — classifier branches below
+                history.append(
+                    self._attempt(
+                        index, backend, exc, retry=is_retry, started=started, usage=failed_usage
+                    )
+                )
                 action = self._classify(exc)
                 if action == _SURFACE:
                     self._record_attempt(backend, exc, retried, attempts)
@@ -778,14 +853,7 @@ class MultiModelChatBackend:
         attempts: list[AttemptRecord],
     ) -> None:
         """Append a frozen :class:`AttemptRecord` summarising this backend's outcome."""
-        status: int | None = None
-        if isinstance(exc, PersonaError):
-            raw = exc.context.get("status_code", "")
-            if raw:
-                try:
-                    status = int(raw)
-                except ValueError:
-                    status = None
+        status = _status_code(exc)
         attempts.append(
             AttemptRecord(
                 provider=backend.provider_name,
