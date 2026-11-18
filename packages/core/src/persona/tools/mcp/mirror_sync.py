@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from persona.child_env import git_env
 from persona.logging import get_logger
 from persona.tools.mcp.catalog import (
     MCPRiskLevel,
@@ -202,6 +203,7 @@ def _clone_registry(repo: str, dest: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
+        env=git_env(),  # R9-258: never the api's DSNs, keys or tokens
     )
 
 

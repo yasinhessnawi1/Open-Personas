@@ -28,7 +28,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["BASE_CHILD_ENV", "OUTBOUND_HTTPS_ENV", "build_child_env"]
+__all__ = [
+    "BASE_CHILD_ENV",
+    "GIT_CHILD_ENV",
+    "OUTBOUND_HTTPS_ENV",
+    "build_child_env",
+    "git_env",
+]
 
 #: POSIX process basics. USER and LOGNAME matter: the data uid has no passwd entry
 #: in the image, so getpass.getuser() needs them (R9-292).
@@ -126,6 +132,17 @@ OUTBOUND_HTTPS_ENV: frozenset[str] = frozenset(
     }
 )
 
+#: What ``git clone`` over https needs beyond the base: the outbound names, git's own
+#: CA settings, and where it finds the operator's git config (HOME is in the base).
+#: No credential: every clone here is anonymous https, and the only place a
+#: credential could travel is the clone URL itself (argv), which callers pass as is.
+GIT_CHILD_ENV: frozenset[str] = OUTBOUND_HTTPS_ENV | frozenset(
+    {"GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "XDG_CONFIG_HOME"}
+)
+
+#: Set on every git run: there is no tty, so a credential prompt could only hang.
+_GIT_OVERRIDES = {"GIT_TERMINAL_PROMPT": "0"}
+
 #: Windows env names are case-insensitive, so there a name matches whatever its case.
 _FOLD_CASE = sys.platform == "win32"
 
@@ -153,3 +170,15 @@ def build_child_env(
         if name in allowed or (_FOLD_CASE and name.upper() in allowed)
     }
     return {**env, **(overrides or {})}
+
+
+def git_env(parent: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The env to run ``git`` with: the base, :data:`GIT_CHILD_ENV`, and no prompt.
+
+    Args:
+        parent: The api env; defaults to ``os.environ``. It is not changed.
+    """
+    import os
+
+    source = os.environ if parent is None else parent
+    return build_child_env(GIT_CHILD_ENV, source, _GIT_OVERRIDES)
