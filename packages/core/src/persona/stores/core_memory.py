@@ -133,8 +133,9 @@ class CoreMemoryStore(TypedStore):
         The transport compares the chain with that read before it rewrites anything, and refuses
         a plan the chain has moved past, so this reads again and plans afresh, a bounded number
         of times. On Postgres the comparison is inside the transaction, so it is exact. On
-        Chroma it is just before, so a writer landing inside the rewrite can still leave a hole
-        (documented in ``backend.py``).
+        Chroma it runs under the folder's lock, which every write in the process takes, so it is
+        exact within one process; a writer in another process on the same folder can still land
+        inside the rewrite and leave a hole (documented in ``backend.py``).
         """
         forgotten = set(forgotten_ids)
         return self._excise_bounded(
@@ -225,6 +226,16 @@ class CoreMemoryStore(TypedStore):
         """
         cited = sorted({s for c in self._chain(persona_id) for s in cited_sources(c)})
         return self.missing_sources(persona_id, cited)
+
+    def _rollback_requires(self, target: PersonaChunk) -> tuple[str, ...]:
+        """A rollback requires what the target cites, on every attempt (R9-271).
+
+        The check in :meth:`_check_rollback_target` runs once, before the write. A forget of the
+        evidence can land after it, take the target with it and renumber the chain, and the
+        rollback's write then loses its race and goes round again. Without this the second round
+        appended the target's text, a summary of what was just forgotten, as the current block.
+        """
+        return cited_sources(target)
 
     def _check_rollback_target(self, persona_id: str, target: PersonaChunk) -> None:
         """Refuse to bring back a summary of evidence that has been forgotten."""

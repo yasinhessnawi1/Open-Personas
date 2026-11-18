@@ -168,10 +168,11 @@ class ForgottenEvidenceError(PersonaError):
 
     A write that names the memories it was built from (a core block, a gist) lands only if they
     are all still there, and nothing of it is written otherwise (R9-271): the text was written
-    during a model call, and a forget can land inside it. A rollback is refused the same way
-    when its target cites evidence that has gone, which restored data can still hold (R9-209).
-    Either way the summary of deleted evidence would go back in the prompt. ``context`` carries
-    counts and never the text.
+    during a model call, and a forget can land inside it. A rollback to a core block is refused
+    the same way when its target cites evidence that has gone: checked before the write, which
+    catches restored data (R9-209), and required by the write itself on every attempt, which
+    catches a forget landing while the rollback retries a lost race. Either way the summary of
+    deleted evidence would go back in the prompt. ``context`` carries counts and never the text.
     """
 
 

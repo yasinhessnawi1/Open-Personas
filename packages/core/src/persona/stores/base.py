@@ -659,6 +659,8 @@ class TypedStore:
             persona_id=persona_id,
         )
 
+        # The check above ran once, before a forget could land. The write itself requires the
+        # same evidence, so a retry after a lost race checks it again (R9-271, PR #39 review).
         prepared = self._append_with_retry(
             persona_id,
             [new_head],
@@ -666,6 +668,7 @@ class TypedStore:
             source=source,
             written_by=written_by,
             reason=recorded_reason,
+            requires=self._rollback_requires(target),
         )
         if not prepared:
             return  # another writer already made this text current, so nothing happened
@@ -683,6 +686,15 @@ class TypedStore:
 
     def _check_rollback_target(self, persona_id: str, target: PersonaChunk) -> None:
         """A store's own reason to refuse this rollback target. Nothing, by default."""
+
+    def _rollback_requires(self, target: PersonaChunk) -> tuple[str, ...]:
+        """What a rollback to ``target`` must still find when it lands. Nothing, by default.
+
+        A store whose memories are built from other memories names the target's evidence here,
+        and the write then lands only if all of it is still there (R9-271).
+        """
+        _ = target
+        return ()
 
     # ----- diagnose / repair (Spec K13, T3) ---------------------------------
 
