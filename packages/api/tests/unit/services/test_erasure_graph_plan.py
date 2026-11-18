@@ -403,12 +403,17 @@ def test_a_long_legacy_list_is_tokenised_fast() -> None:
     listed = ",".join(names)
     assert 40_000 < len(listed) < 50_000
 
-    started = time.perf_counter()
-    found = split_alias_list(listed, names, doomed=names[:10])
-    elapsed = time.perf_counter() - started
+    # The best of three runs, in CPU time: a busy CI runner stretches wall time and one run
+    # (R9-307: 1.14 s and 1.26 s against a 1.0 s bound). Locally the scan takes about 0.02 s
+    # of CPU, so 2 s still catches the quadratic scan this guards against.
+    timings = []
+    for _ in range(3):
+        started = time.process_time()
+        found = split_alias_list(listed, names, doomed=names[:10])
+        timings.append(time.process_time() - started)
+        assert found == names
 
-    assert found == names
-    assert elapsed < 1.0, f"took {elapsed:.2f}s"
+    assert min(timings) < 2.0, f"took {min(timings):.2f}s of CPU at best"
 
 
 @pytest.mark.parametrize("order", list(itertools.permutations(range(4))))
