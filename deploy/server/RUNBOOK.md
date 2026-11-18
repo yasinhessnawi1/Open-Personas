@@ -270,6 +270,7 @@ containerd's root under running containers is not safe. Expect about 6 minutes o
 for about 10 GB of images.
 
 ```bash
+# on the host, as ubuntu
 # 1. a fresh backup first; it must end Result=success
 sudo systemctl start open-persona-backup.service
 systemctl show -p Result open-persona-backup.service
@@ -332,6 +333,7 @@ sudo rm -rf /var/lib/containerd.old
 `live-restore` would otherwise keep containers running on the new root while it is put back.
 
 ```bash
+# on the host, as ubuntu
 cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
 sudo docker ps -q                  # must print nothing; stop any container it lists first
 sudo systemctl stop docker.socket docker containerd
