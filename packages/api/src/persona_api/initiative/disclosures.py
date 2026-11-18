@@ -254,7 +254,10 @@ class PgDisclosureStore:
         except IntegrityError:
             _log.info("release refused: its persona is gone persona_id={pid}", pid=persona_id)
             return ReleaseOutcome.GONE
-        _log.info("conversation released interaction_id={iid}", iid=interaction_id)
+        # PR #44 review LOW-5: the conversation id would mark a disclosure in the logs.
+        _log.info(
+            "conversation released owner_id={oid} persona_id={pid}", oid=owner_id, pid=persona_id
+        )
         return ReleaseOutcome.CHANGED
 
     def hold(self, owner_id: str, persona_id: str, interaction_id: str) -> ReleaseOutcome:
@@ -269,5 +272,9 @@ class PgDisclosureStore:
             if conn.execute(stmt).first() is None:
                 return ReleaseOutcome.UNCHANGED
             conn.execute(_audit(owner_id, persona_id, interaction_id))
-        _log.info("conversation held back again interaction_id={iid}", iid=interaction_id)
+        _log.info(
+            "conversation held back again owner_id={oid} persona_id={pid}",
+            oid=owner_id,
+            pid=persona_id,
+        )
         return ReleaseOutcome.CHANGED

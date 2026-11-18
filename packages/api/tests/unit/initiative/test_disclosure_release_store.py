@@ -276,3 +276,33 @@ def test_a_release_is_in_force_only_for_the_disclosures_it_covers(
 ) -> None:
     state = DisclosureState(disclosure_seq=seq, released_seq=released, released_at=at)
     assert state.release_in_force is in_force
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, dict[str, Any]]] = []
+
+    def info(self, message: str, **fields: Any) -> None:  # noqa: ANN401
+        self.lines.append((message, fields))
+
+
+@pytest.mark.parametrize("change", ["release", "hold"])
+def test_the_change_logs_name_the_owner_and_persona_never_the_conversation(
+    monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """PR #44 review LOW-5: a released or re-held conversation id marks a disclosure."""
+    log = _Log()
+    monkeypatch.setattr(disclosures, "_log", log)
+    if change == "release":
+        _scripted(monkeypatch, _PERSONA, [_Row(disclosure_seq=1, released_seq=None)])
+        _store().release("u", "pers", "conv-secret", version=1, at=_AT)
+    else:
+        _scripted(monkeypatch, [_Row(interaction_id="conv-secret")])
+        _store().hold("u", "pers", "conv-secret")
+    assert log.lines, "the change is logged"
+    for message, fields in log.lines:
+        assert "conv-secret" not in message
+        assert "conv-secret" not in fields.values()
+        assert "interaction_id" not in fields
+        assert fields.get("oid") == "u"
+        assert fields.get("pid") == "pers"
