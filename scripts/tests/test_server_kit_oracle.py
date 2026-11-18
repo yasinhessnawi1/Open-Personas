@@ -968,11 +968,15 @@ def test_preflight_fails_an_empty_or_other_root(tmp_path: Path, dump: str) -> No
 @pytest.mark.parametrize(
     ("failing", "stuck", "calls"),
     [
+        # Round 3 LOW-4: the drop-in's directory; on the live host's state the config's own
+        # `install -d` of the same directory never runs, so only the drop-in's can fail here.
+        ((("install", "/etc"),), False, []),
         ((), True, []),  # the drop-in's printf
+        ((("chmod", "dropin.conf.tmp"),), False, []),  # round 3 LOW-4
         ((("mv", "dropin.conf.tmp"),), False, []),  # the drop-in's mv
         ((("systemctl", "daemon-reload"),), False, []),
     ],
-    ids=["drop-in printf", "drop-in mv", "daemon-reload"],
+    ids=["drop-in install", "drop-in printf", "drop-in chmod", "drop-in mv", "daemon-reload"],
 )
 def test_a_failing_drop_in_step_fails_the_whole(
     tmp_path: Path,
