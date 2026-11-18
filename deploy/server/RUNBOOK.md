@@ -269,6 +269,9 @@ stopping Docker alone leaves the containers running on the old snapshot mounts, 
 containerd's root under running containers is not safe. Expect about 6 minutes of downtime
 for about 10 GB of images.
 
+Paste the numbered steps one at a time, never a block whole, and read what each prints
+before the next: several must print nothing, and step 6 can print STOP.
+
 ```bash
 # on the host, as ubuntu
 # 1. a fresh backup first; it must end Result=success
@@ -288,19 +291,30 @@ sudo rsync -aHAX --numeric-ids --delete /var/lib/containerd/ /srv/containerd/
 
 # 5. the copy is exact: this dry run must print nothing; stop here (and roll back) if it does
 sudo rsync -aHAXn --numeric-ids --delete -i /var/lib/containerd/ /srv/containerd/
+```
 
-# 6. only when no root is set yet (a root already set is not this procedure's: STOP), back
-#    up the config (an earlier backup is never overwritten) and prepend the root. Safe to
-#    paste twice: the second time it stops. Not `cp -n`: coreutils 9.2 to 9.4 (Ubuntu 24.04)
+Step 6 sets the root, and says so when a paste before already did: then go on to step 7.
+When it prints STOP, the config sets a root this procedure did not, so do not go on: roll
+back (below), skipping its `cp` line, since step 6 changed nothing.
+
+```bash
+# on the host, as ubuntu
+# 6. only when no root is set yet, back up the config (an earlier backup is never
+#    overwritten) and prepend the root. Not `cp -n`: coreutils 9.2 to 9.4 (Ubuntu 24.04)
 #    make it fail when it skips, so a redo after a rollback would never set the root.
-if sudo grep -qE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml; then
-  echo "STOP: containerd's config already sets a root"
+if sudo grep -qx 'root = "/srv/containerd"' /etc/containerd/config.toml; then
+  echo "step 6 already done, go on to step 7"
+elif sudo grep -qE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml; then
+  echo "STOP: containerd's config sets another root; do not go on"
 else
   { sudo test -e /etc/containerd/config.toml.bak-r9289 \
       || sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289; } \
     && sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
 fi
+```
 
+```bash
+# on the host, as ubuntu
 # 7. keep the old root aside; do not delete it yet
 sudo mv /var/lib/containerd /var/lib/containerd.old
 

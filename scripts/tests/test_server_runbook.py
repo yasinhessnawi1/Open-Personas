@@ -10,7 +10,11 @@ what it says must match what the kit does.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 KIT = ROOT / "deploy" / "server"
@@ -152,17 +156,22 @@ CONTAINERD_CONFIG = "/etc/containerd/config.toml"
 CONTAINERD_BAK = "/etc/containerd/config.toml.bak-r9289"
 
 
-def _containerd_step(number: int) -> str:
-    """Step <number> of the containerd move, as code: comments and fences dropped,
-    continued lines joined, whitespace collapsed."""
+def _containerd_script(number: int) -> str:
+    """Step <number> of the containerd move as pasted: up to the next step or the fence."""
     found = re.search(
-        rf"^# {number}\. .*?(?=^# {number + 1}\. )", CONTAINERD_MOVE, re.S | re.M
+        rf"^# {number}\. .*?(?=^# {number + 1}\. |^```)", CONTAINERD_MOVE, re.S | re.M
     )
     assert found, f"step {number}"
+    return found.group(0)
+
+
+def _containerd_step(number: int) -> str:
+    """Step <number> of the containerd move, as code: comments dropped, continued lines
+    joined, whitespace collapsed."""
     code = "\n".join(
         line
-        for line in found.group(0).splitlines()
-        if not line.lstrip().startswith(("#", "```"))
+        for line in _containerd_script(number).splitlines()
+        if not line.lstrip().startswith("#")
     )
     return " ".join(code.replace("\\\n", " ").split())
 
@@ -179,3 +188,70 @@ def test_the_containerd_moves_backup_is_not_cp_n() -> None:
     )
     assert backup in step
     assert not re.search(r"\bcp\s+-[a-zA-Z]*n[a-zA-Z]*\s[^&]*&&", step), "cp -n ... &&"
+
+
+BASH = shutil.which("bash")
+PACKAGE_CONFIG = 'disabled_plugins = ["cri"]\n\n#root = "/var/lib/containerd"\n'
+MOVED_LINE = 'root = "/srv/containerd"\n'
+
+
+@pytest.mark.skipif(BASH is None, reason="bash unavailable")
+@pytest.mark.parametrize(
+    ("config", "bak", "said", "config_after", "bak_after"),
+    [
+        (PACKAGE_CONFIG, None, "", MOVED_LINE + PACKAGE_CONFIG, PACKAGE_CONFIG),
+        # A redo after a rollback: the first move's backup is kept, the root set again.
+        (PACKAGE_CONFIG, "earlier", "", MOVED_LINE + PACKAGE_CONFIG, "earlier"),
+        (
+            MOVED_LINE + PACKAGE_CONFIG,
+            PACKAGE_CONFIG,
+            "step 6 already done, go on to step 7",
+            MOVED_LINE + PACKAGE_CONFIG,
+            PACKAGE_CONFIG,
+        ),
+        (
+            'root = "/var/lib/other"\n' + PACKAGE_CONFIG,
+            None,
+            "STOP: containerd's config sets another root; do not go on",
+            'root = "/var/lib/other"\n' + PACKAGE_CONFIG,
+            None,
+        ),
+    ],
+    ids=["first move", "redo after a rollback", "pasted twice", "another root"],
+)
+def test_the_containerd_moves_step_6_says_what_it_found(
+    tmp_path: Path,
+    config: str,
+    bak: str | None,
+    said: str,
+    config_after: str,
+    bak_after: str | None,
+) -> None:
+    """R9-289 round 3 LOW-1: step 6 run as pasted, on a config under tmp_path. A second
+    paste says it is done and goes on; only a root this procedure did not set says STOP."""
+    target = tmp_path / "config.toml"
+    target.write_text(config, encoding="utf-8", newline="\n")
+    backup = tmp_path / "config.toml.bak-r9289"
+    if bak is not None:
+        backup.write_text(bak, encoding="utf-8", newline="\n")
+    script = _containerd_script(6).replace(CONTAINERD_CONFIG, target.as_posix())
+    assert BASH is not None
+    result = subprocess.run(
+        [BASH, "-c", 'sudo() { "$@"; }\nset -u\n' + script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == said
+    assert target.read_text(encoding="utf-8") == config_after
+    assert (backup.read_text(encoding="utf-8") if backup.exists() else None) == bak_after
+
+
+def test_the_containerd_move_is_pasted_one_step_at_a_time() -> None:
+    """R9-289 round 3 LOW-1: step 6 can print STOP, so it is never pasted inside a block
+    with the steps after it: it has a block of its own, and the text says so."""
+    assert "Paste the numbered steps one at a time, never a block whole" in CONTAINERD_MOVE
+    blocks = re.findall(r"```bash\n(.*?)```", CONTAINERD_MOVE, re.S)
+    step_6 = next(block for block in blocks if re.search(r"^# 6\. ", block, re.M))
+    assert re.findall(r"^# (\d+)\. ", step_6, re.M) == ["6"]
