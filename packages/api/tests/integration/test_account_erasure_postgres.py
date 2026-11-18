@@ -14,7 +14,18 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from _erase_seed import OTHER_OWNER, OWNER, PERSONA, SIBLING, STRANGER, Seeded, row, seed_into
+from _erase_seed import (
+    OTHER_OWNER,
+    OWNER,
+    PERSONA,
+    SIBLING,
+    STRANGER,
+    Seeded,
+    released_facts,
+    row,
+    seed_into,
+    setting_changes,
+)
 from persona.stores.postgres import PostgresBackend
 from persona_api.db.models import metadata
 from persona_api.errors import AccountErasedError
@@ -247,11 +258,13 @@ def test_nothing_of_the_account_remains_and_the_neighbour_keeps_all(
 ) -> None:
     bob_before = _naming(seeded.engine, OTHER_OWNER)
     stripe, clerk = _Stripe(), _Clerk()
+    assert released_facts(seeded.engine, PERSONA) == 1, "a released fact (D-ORCH-11-18-u)"
     erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
 
     ae.erase_account(_deps(seeded, platform, embedder, stripe=stripe, clerk=clerk), erasure)
 
     assert _naming(seeded.engine, OWNER) == {}, "nothing names the erased account"
+    assert released_facts(seeded.engine, PERSONA) == 0
     assert _anywhere(seeded.engine, OWNER) == {}, "the id is nowhere, not even inside a value"
     assert _naming(seeded.engine, OTHER_OWNER) == bob_before, "the neighbour keeps all"
     ledger = ErasureLedger(seeded.engine)
@@ -300,6 +313,18 @@ def test_audit_rows_are_rekeyed_and_scrubbed(
     platform: Engine,
     embedder: Any,  # noqa: ANN401
 ) -> None:
+    with seeded.engine.begin() as conn:
+        # A control row naming no persona this erasure still erases (one deleted long ago):
+        # only the account step's own strip can reach it (PR #44 review MEDIUM-2).
+        row(
+            conn,
+            "audit_log",
+            id="setorphan",
+            user_id=OWNER,
+            action="conversation.setting_changed",
+            target="conv_long_gone",
+            metadata={"persona_id": "persona_long_gone"},
+        )
     erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
 
     ae.erase_account(_deps(seeded, platform, embedder), erasure)
@@ -315,6 +340,28 @@ def test_audit_rows_are_rekeyed_and_scrubbed(
     assert mine.user_id == erasure.id
     assert mine.metadata == {"kept": "label"}
     assert completion == 1
+    # PR #44 review MEDIUM-2: the control's audit is stripped to its action and time, then
+    # re-keyed with the rest.
+    for pid in (PERSONA, SIBLING):
+        assert setting_changes(seeded.engine, pid) == [
+            ("conversation.setting_changed", "", {}),
+            ("conversation.setting_changed", "", {}),
+        ]
+    assert setting_changes(seeded.engine, STRANGER)[0][2] == {"persona_id": STRANGER}
+    mine_ids = [
+        "setorphan",
+        *(f"{kind}_{pid[-6:]}" for kind in ("setting", "setgone") for pid in (PERSONA, SIBLING)),
+    ]
+    with seeded.engine.connect() as conn:
+        orphan = conn.execute(
+            text("SELECT action, target, metadata FROM audit_log WHERE id = 'setorphan'")
+        ).one()
+    assert tuple(orphan) == ("conversation.setting_changed", "", {})
+    with seeded.engine.connect() as conn:
+        owners = conn.execute(
+            text("SELECT DISTINCT user_id FROM audit_log WHERE id = ANY(:ids)"), {"ids": mine_ids}
+        ).all()
+    assert [str(r[0]) for r in owners] == [erasure.id]
 
 
 def test_the_erased_id_is_fenced_for_good(

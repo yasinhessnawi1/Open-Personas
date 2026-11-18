@@ -128,6 +128,9 @@ class ApiEventWellbeingCheck:
         # serves the task-origin read (a task-grounded event); without it a task ref is
         # judged by its id alone. R9-253: the gate also reads the durable disclosure fact (over
         # ``engine``, or ``disclosures`` in tests), so a forgotten tagged node still gates.
+        # D-ORCH-11-18-u: the door never honours a release. A conversation grounding hands the
+        # producer the raw transcript, which holds the disclosure, and a task's goal text is
+        # never checked against tags.
         self._gate = ConversationWellbeingGate(store, engine, disclosures=disclosures)
         self._engine = engine
 

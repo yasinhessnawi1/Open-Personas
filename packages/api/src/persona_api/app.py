@@ -94,6 +94,7 @@ from persona_api.routes import (
     documents,
     health,
     imagegen,
+    initiative_hold,
     mcp_servers,
     me,
     memory,
@@ -1345,6 +1346,7 @@ def _register_routers(app: FastAPI) -> None:
     """Include all route modules. Extended task-by-task in Phase 5."""
     app.include_router(personas.router)
     app.include_router(conversations.router)
+    app.include_router(initiative_hold.router)  # D-ORCH-11-18-u: "fine to bring this up"
     app.include_router(calls.router)  # spec V9: voice-call history
     app.include_router(runs.router)
     app.include_router(me.router)
