@@ -139,7 +139,10 @@ class ChromaBackend:
         """One ``collection.upsert``, after checking under the lock what the write read (R9-271).
 
         The superseded versions go into the same call with their links moved, as whole rows,
-        because a link moved by a second call would tear the chain on a crash (Spec K13).
+        because a link moved by a second call would tear the chain on a crash (Spec K13). Only
+        the check and that call run under the lock. The new chunks are embedded before it is
+        taken, so a slow embedder never holds off a forget, and a superseded version is written
+        back with the vector already stored for it rather than embedded again.
         """
         if not chunks and not supersedes:
             return
@@ -147,6 +150,7 @@ class ChromaBackend:
         # Before the embedder: a stale chunk must not be paid for, and must not land (R9-210).
         for chunk in chunks:
             verify_content_hash(chunk)
+        fresh = self.embedder.encode([c.text for c in chunks]) if chunks else []
         with _persona_lock(self.persist_path, persona_id):
             batch = guarded_batch(
                 lambda kind, ids: self.get_by_ids(persona_id=persona_id, store_kind=kind, ids=ids),
@@ -158,13 +162,30 @@ class ChromaBackend:
                 requires_kinds=requires_kinds,
             )
             collection = self._collection(persona_id, store_kind)
-            embeddings = self.embedder.encode([c.text for c in batch])
+            linked = batch[: len(batch) - len(chunks)]
+            embeddings = [*self._stored_vectors(collection, linked), *fresh]
             collection.upsert(
                 ids=[c.id for c in batch],
                 documents=[c.text for c in batch],
                 embeddings=embeddings,
                 metadatas=[_chunk_to_metadata(c) for c in batch],
             )
+
+    @staticmethod
+    def _stored_vectors(collection: Any, rows: list[PersonaChunk]) -> list[list[float]]:  # noqa: ANN401 - Chroma's API
+        """The vectors already stored for ``rows``, in their order. Read under the caller's lock."""
+        if not rows:
+            return []
+        raw = collection.get(ids=[c.id for c in rows], include=["embeddings"])
+        stored = {
+            str(chunk_id): [float(x) for x in vector]
+            for chunk_id, vector in zip(raw.get("ids") or [], raw["embeddings"], strict=True)
+        }
+        missing = [c.id for c in rows if c.id not in stored]
+        if missing:
+            msg = "the version this write replaces has gone since it was checked"
+            raise ChainConflictError(msg, context={"store": "chroma", "missing": str(len(missing))})
+        return [stored[c.id] for c in rows]
 
     def reinforce(
         self,
