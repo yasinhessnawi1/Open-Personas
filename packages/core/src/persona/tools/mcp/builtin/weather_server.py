@@ -24,7 +24,28 @@ import httpx
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
-__all__ = ["build", "fetch_weather"]
+__all__ = ["CHILD_ENV", "build", "fetch_weather"]
+
+#: Env names this server needs beyond the shared base (R9-258). It is the one
+#: built-in that calls out (HTTPS to open-meteo through httpx, which trusts the
+#: env): the CA bundle names, and the proxy names so it still reaches open-meteo
+#: where the operator routes egress through a proxy. A proxy URL can carry proxy
+#: credentials; that is the one secret-bearing value allowed, because the
+#: outbound call needs it. SSLKEYLOGFILE is deliberately left out.
+CHILD_ENV: frozenset[str] = frozenset(
+    {
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    }
+)
 
 _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"

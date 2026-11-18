@@ -75,3 +75,28 @@ async def test_dead_server_is_respawned_on_next_resolution() -> None:
         assert url2 != url1  # fresh port on re-spawn
     finally:
         await sup.aclose()
+
+
+async def test_spawned_child_cannot_see_a_parent_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R9-258 end to end: read the real child's environment from the OS, not the dict
+    # the supervisor built, and prove a sentinel secret in the api env is not there.
+    psutil = pytest.importorskip("psutil")
+    sentinels = {
+        "DATABASE_URL": "postgres://su:r9-258-sentinel@db/persona",
+        "STRIPE_SECRET_KEY": "sk_live_r9-258-sentinel",
+        "OPENAI_API_KEY": "sk-r9-258-sentinel",
+    }
+    for name, value in sentinels.items():
+        monkeypatch.setenv(name, value)
+    sup = BuiltinMCPSupervisor(("calculator",))
+    try:
+        assert await sup.ensure("calculator") is not None  # the child still boots
+        proc = sup._states["calculator"].proc
+        assert proc is not None
+        child_env = psutil.Process(proc.pid).environ()
+        upper = {name.upper() for name in child_env}
+        assert not upper & set(sentinels)
+        assert not any("r9-258-sentinel" in value for value in child_env.values())
+        assert "PATH" in upper
+    finally:
+        await sup.aclose()

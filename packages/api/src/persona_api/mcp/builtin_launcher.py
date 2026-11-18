@@ -15,6 +15,8 @@ proportional to the servers actually used, not the servers enabled.
 Security (D-27-12): servers bind ``127.0.0.1`` ONLY (never off-box); when an
 operator sets a privilege-drop uid the spawned children ``setuid``/``setgid`` to
 it (otherwise children inherit the API process user — uid 1000 in production).
+Every child starts with an allow-listed environment (R9-258): the shared base plus
+the names its own server declares, never the api's DSNs, keys or tokens.
 
 Shutdown reaps every spawned subprocess (SIGTERM → bounded wait → SIGKILL),
 mirroring ``LocalDockerSandbox.aclose``.
@@ -34,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from persona.logging import get_logger
-from persona.tools.mcp.builtin import DEFAULT_BIND_HOST
+from persona.tools.mcp.builtin import DEFAULT_BIND_HOST, child_env
 from persona.tools.mcp.catalog import authored_server_names
 from persona.tools.mcp.naming import referenced_server_name
 
@@ -246,19 +248,19 @@ class BuiltinMCPSupervisor:
             if state is None:
                 state = _ServerState()
                 self._fs_states[key] = state
-            # Thread the pre-resolved scope in; scrub it when unscoped so the child
-            # cannot inherit a stray value from the parent and must fail closed.
-            env = dict(os.environ)
-            if scope_root is not None:
-                env[_FILESYSTEM_SCOPE_ROOT_ENV] = str(scope_root)
-            else:
-                env.pop(_FILESYSTEM_SCOPE_ROOT_ENV, None)
-            return await self._spawn(_FILESYSTEM, state, env=env)
+            # Thread the pre-resolved scope in. When unscoped there is no override,
+            # and the allow-listed child env never carries the parent's value, so
+            # the child cannot inherit a stray scope and must fail closed.
+            overrides = {} if scope_root is None else {_FILESYSTEM_SCOPE_ROOT_ENV: str(scope_root)}
+            return await self._spawn(_FILESYSTEM, state, overrides=overrides)
 
     async def _spawn(
-        self, name: str, state: _ServerState, *, env: dict[str, str] | None = None
+        self, name: str, state: _ServerState, *, overrides: dict[str, str] | None = None
     ) -> str | None:
         port = _free_port()
+        # R9-258: never the whole api env. Only the names this server needs, plus
+        # this spawn's own overrides.
+        env = child_env(name, os.environ, overrides)
         argv = [
             self._python,
             "-m",
@@ -275,7 +277,7 @@ class BuiltinMCPSupervisor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 preexec_fn=self._preexec(),  # noqa: PLW1509 — intentional privilege drop (POSIX)
-                env=env,  # None ⇒ inherit parent env (singletons); dict ⇒ scoped child
+                env=env,
             )
         except OSError as exc:
             _logger.warning("built-in MCP server spawn failed", server=name, error=str(exc))
