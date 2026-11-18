@@ -24,6 +24,7 @@ scripts' text the way test_server_kit.py does.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -456,6 +457,13 @@ def test_the_api_healthcheck_probe_carries_no_container_env() -> None:
     runtime = dockerfile.split("AS runtime", 1)[1]
     assert re.search(r"apt-get install[^&]*\bcurl\b", runtime)
     assert "FROM python:3.12-slim@" in dockerfile
+    # The image's own HEALTHCHECK (used by a `docker run` without this compose file):
+    # the same cleared-env probe, in exec form, so no shell holds the env either.
+    image_check = re.search(r"^HEALTHCHECK (.*?)\n(?!\s)", dockerfile, re.M | re.S)
+    assert image_check is not None
+    probe = re.search(r"\bCMD (\[.*?\])", image_check.group(1), re.S)
+    assert probe is not None
+    assert json.loads(probe.group(1)) == check["test"][1:]
 
 
 def test_restore_unpacks_as_the_profiles_data_uid() -> None:
