@@ -107,6 +107,13 @@ class _FakeQueue:
         first), so the answer is always none, and the key carries no suffix."""
         return 0
 
+    def retire_queued(self, **_: object) -> int:
+        """R9-239: a reply retires a stale queued Revived; this fake holds none."""
+        return 0
+
+    def count_live_attempts(self, **_: object) -> int:
+        return 0
+
     def enqueue(self, **kwargs: object) -> None:
         self.enqueued.append(kwargs)
 
