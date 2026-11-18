@@ -306,17 +306,21 @@ def test_the_control_reads_and_changes_only_the_owners_conversation(
     assert _as(_OWNER, lambda: service.read(_OWNER, "conv-d")).state == "not_held"
     _as(_OWNER, lambda: PgDisclosureStore(app_engine).record(_OWNER, _PERSONA, "conv-d"))
     held = _as(_OWNER, lambda: service.read(_OWNER, "conv-d"))
-    assert (held.state, held.version) == ("held", 1)
+    assert held.state == "held"
+    assert held.version.startswith("v1."), "an opaque token, never the count (LOW-1)"
 
     with pytest.raises(ConversationNotFoundError):
         _as(_OTHER, lambda: service.read(_OTHER, "conv-d"))
     with pytest.raises(ConversationNotFoundError):
         _as(
             _OTHER,
-            lambda: service.change(_OTHER, "conv-d", released=True, version=1, at=_AT),
+            lambda: service.change(_OTHER, "conv-d", released=True, version=held.version, at=_AT),
         )
 
-    done = _as(_OWNER, lambda: service.change(_OWNER, "conv-d", released=True, version=1, at=_AT))
+    done = _as(
+        _OWNER,
+        lambda: service.change(_OWNER, "conv-d", released=True, version=held.version, at=_AT),
+    )
     assert (done.state, done.released_at) == ("released", _AT)
     undone = _as(
         _OWNER, lambda: service.change(_OWNER, "conv-d", released=False, version=None, at=_AT)

@@ -65,6 +65,8 @@ class DisclosureState:
     disclosure_seq: int
     released_seq: int | None
     released_at: datetime | None
+    #: When the fact was first recorded. Never shown: it keys the control's opaque version.
+    created_at: datetime | None = None
 
     @property
     def release_in_force(self) -> bool:
@@ -176,9 +178,9 @@ class PgDisclosureStore:
         wanted = sorted(set(refs))
         if not wanted:
             return {}
-        stmt = select(_T.interaction_id, _T.disclosure_seq, _T.released_seq, _T.released_at).where(
-            _T.owner_id == owner_id, _T.interaction_id.in_(wanted)
-        )
+        stmt = select(
+            _T.interaction_id, _T.disclosure_seq, _T.released_seq, _T.released_at, _T.created_at
+        ).where(_T.owner_id == owner_id, _T.interaction_id.in_(wanted))
         with rls_connection(self._engine, owner_id) as conn:
             rows = conn.execute(stmt).all()
         return {
@@ -186,6 +188,7 @@ class PgDisclosureStore:
                 disclosure_seq=int(row.disclosure_seq),
                 released_seq=None if row.released_seq is None else int(row.released_seq),
                 released_at=row.released_at,
+                created_at=row.created_at,
             )
             for row in rows
         }

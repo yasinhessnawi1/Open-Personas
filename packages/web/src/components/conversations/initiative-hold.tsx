@@ -32,7 +32,8 @@ export const INITIATIVE_HOLD_PATH =
 export interface PendingRelease {
   conversationId: string;
   personaName: string;
-  version: number;
+  /** The opaque version the menu read (it names no count). */
+  version: string;
 }
 
 export function InitiativeHoldMenuItem({
@@ -107,7 +108,7 @@ export function useInitiativeHoldActions() {
 
   async function send(
     conversationId: string,
-    body: { released: boolean; version?: number },
+    body: { released: boolean; version?: string },
   ) {
     const result = await api.PUT(INITIATIVE_HOLD_PATH, {
       params: { path: { conversation_id: conversationId } },

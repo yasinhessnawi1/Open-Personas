@@ -7127,7 +7127,7 @@
             "title": "Released At"
           },
           "version": {
-            "type": "integer",
+            "type": "string",
             "title": "Version"
           }
         },
@@ -7135,7 +7135,7 @@
         "type": "object",
         "required": ["state", "released_at", "version"],
         "title": "InitiativeHoldResponse",
-        "description": "A conversation's \"fine to bring this up\" control (D-ORCH-11-18-u).\n\n``held``: a disclosure keeps the conversation out of the persona's unprompted\ninitiative. ``released``: the user said it may be drawn on again (``released_at``).\n``not_held``: nothing keeps it out. ``version`` goes back with a release."
+        "description": "A conversation's \"fine to bring this up\" control (D-ORCH-11-18-u).\n\n``held``: a disclosure keeps the conversation out of the persona's unprompted\ninitiative. ``released``: the user said it may be drawn on again (``released_at``).\n``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a\nrelease (it names no count)."
       },
       "JsonValue": {},
       "LedgerEntry": {
@@ -9699,8 +9699,8 @@
           "version": {
             "anyOf": [
               {
-                "type": "integer",
-                "minimum": 0.0
+                "type": "string",
+                "pattern": "^v1\\.[0-9a-f]{32}$"
               },
               {
                 "type": "null"
@@ -9713,7 +9713,7 @@
         "type": "object",
         "required": ["released"],
         "title": "SetInitiativeHoldRequest",
-        "description": "Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).\n\n``released`` true says the persona may draw on what it learned in the conversation when it\nreaches out unprompted; false undoes that. A release carries ``version``, the count the\nuser saw in the control's read, so a disclosure recorded since is never released unseen."
+        "description": "Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).\n\n``released`` true says the persona may draw on what it learned in the conversation when it\nreaches out unprompted; false undoes that. A release carries ``version``, the opaque token\nthe control's read returned, so a disclosure recorded since is never released unseen."
       },
       "SetSkillConsentRequest": {
         "properties": {

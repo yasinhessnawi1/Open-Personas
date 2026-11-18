@@ -556,12 +556,12 @@ class SetInitiativeHoldRequest(_Input):
     """Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).
 
     ``released`` true says the persona may draw on what it learned in the conversation when it
-    reaches out unprompted; false undoes that. A release carries ``version``, the count the
-    user saw in the control's read, so a disclosure recorded since is never released unseen.
+    reaches out unprompted; false undoes that. A release carries ``version``, the opaque token
+    the control's read returned, so a disclosure recorded since is never released unseen.
     """
 
     released: bool
-    version: int | None = Field(default=None, ge=0)
+    version: str | None = Field(default=None, pattern=r"^v1\.[0-9a-f]{32}$")
 
     @model_validator(mode="after")
     def _a_release_names_what_was_seen(self) -> SetInitiativeHoldRequest:

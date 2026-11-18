@@ -4130,7 +4130,8 @@ export interface components {
      *
      *     ``held``: a disclosure keeps the conversation out of the persona's unprompted
      *     initiative. ``released``: the user said it may be drawn on again (``released_at``).
-     *     ``not_held``: nothing keeps it out. ``version`` goes back with a release.
+     *     ``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a
+     *     release (it names no count).
      */
     InitiativeHoldResponse: {
       /**
@@ -4141,7 +4142,7 @@ export interface components {
       /** Released At */
       released_at: string | null;
       /** Version */
-      version: number;
+      version: string;
     };
     JsonValue: unknown;
     /**
@@ -5633,14 +5634,14 @@ export interface components {
      * @description Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).
      *
      *     ``released`` true says the persona may draw on what it learned in the conversation when it
-     *     reaches out unprompted; false undoes that. A release carries ``version``, the count the
-     *     user saw in the control's read, so a disclosure recorded since is never released unseen.
+     *     reaches out unprompted; false undoes that. A release carries ``version``, the opaque token
+     *     the control's read returned, so a disclosure recorded since is never released unseen.
      */
     SetInitiativeHoldRequest: {
       /** Released */
       released: boolean;
       /** Version */
-      version?: number | null;
+      version?: string | null;
     };
     /**
      * SetSkillConsentRequest

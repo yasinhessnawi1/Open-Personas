@@ -21,7 +21,7 @@ const h = vi.hoisted(() => ({
   // D-ORCH-11-18-u: the row menu reads the initiative-hold control on open;
   // nothing holds these rows, so it offers no item.
   get: vi.fn(async () => ({
-    data: { state: "not_held", released_at: null, version: 0 },
+    data: { state: "not_held", released_at: null, version: "" },
     response: new Response(null, { status: 200 }),
   })),
   notify: vi.fn(),

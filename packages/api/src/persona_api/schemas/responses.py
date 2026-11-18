@@ -1714,9 +1714,10 @@ class InitiativeHoldResponse(_Output):
 
     ``held``: a disclosure keeps the conversation out of the persona's unprompted
     initiative. ``released``: the user said it may be drawn on again (``released_at``).
-    ``not_held``: nothing keeps it out. ``version`` goes back with a release.
+    ``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a
+    release (it names no count).
     """
 
     state: Literal["held", "released", "not_held"]
     released_at: datetime | None
-    version: int
+    version: str

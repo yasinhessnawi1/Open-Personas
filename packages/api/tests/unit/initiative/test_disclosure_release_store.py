@@ -236,16 +236,28 @@ def test_the_states_read_one_select_and_no_refs_touch_nothing(
     script = _scripted(
         monkeypatch,
         [
-            _Row(interaction_id="a", disclosure_seq=2, released_seq=2, released_at=_AT),
-            _Row(interaction_id="b", disclosure_seq=3, released_seq=2, released_at=_AT),
+            _Row(
+                interaction_id="a",
+                disclosure_seq=2,
+                released_seq=2,
+                released_at=_AT,
+                created_at=_AT,
+            ),
+            _Row(
+                interaction_id="b",
+                disclosure_seq=3,
+                released_seq=2,
+                released_at=_AT,
+                created_at=_AT,
+            ),
         ],
     )
     assert _store().states("u", []) == {}
     assert script.statements == []
     got = _store().states("u", ["b", "a", "a"])
     assert got == {
-        "a": DisclosureState(disclosure_seq=2, released_seq=2, released_at=_AT),
-        "b": DisclosureState(disclosure_seq=3, released_seq=2, released_at=_AT),
+        "a": DisclosureState(disclosure_seq=2, released_seq=2, released_at=_AT, created_at=_AT),
+        "b": DisclosureState(disclosure_seq=3, released_seq=2, released_at=_AT, created_at=_AT),
     }
     assert len(script.statements) == 1
 

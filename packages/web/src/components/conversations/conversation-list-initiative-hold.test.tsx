@@ -48,7 +48,10 @@ function ok(data: unknown) {
   return { data, response: new Response(null, { status: 200 }) };
 }
 
-function hold(state: "held" | "released" | "not_held", version = 2) {
+const TOKEN = `v1.${"ab".repeat(16)}`;
+const OTHER_TOKEN = `v1.${"cd".repeat(16)}`;
+
+function hold(state: "held" | "released" | "not_held", version = TOKEN) {
   return ok({
     state,
     released_at: state === "released" ? "2026-11-18T12:00:00Z" : null,
@@ -103,7 +106,7 @@ describe("ConversationList: the fine to bring this up control", () => {
   });
 
   it("shows no item for a conversation nothing holds", async () => {
-    h.get.mockResolvedValue(hold("not_held", 0));
+    h.get.mockResolvedValue(hold("not_held", ""));
     renderList();
     openMenu();
     await screen.findByRole("menuitem", { name: /Delete/ });
@@ -117,7 +120,7 @@ describe("ConversationList: the fine to bring this up control", () => {
   });
 
   it("releases only after the confirm explains it, for the version read", async () => {
-    h.get.mockResolvedValue(hold("held", 3));
+    h.get.mockResolvedValue(hold("held", OTHER_TOKEN));
     renderList();
     openMenu();
     fireEvent.click(
@@ -141,7 +144,7 @@ describe("ConversationList: the fine to bring this up control", () => {
     await waitFor(() =>
       expect(h.put).toHaveBeenCalledWith(PATH, {
         params: { path: { conversation_id: "conv1" } },
-        body: { released: true, version: 3 },
+        body: { released: true, version: OTHER_TOKEN },
       }),
     );
     await waitFor(() =>
