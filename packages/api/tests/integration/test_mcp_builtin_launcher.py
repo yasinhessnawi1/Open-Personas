@@ -81,9 +81,9 @@ async def test_dead_server_is_respawned_on_next_resolution() -> None:
 
 
 _SENTINELS = {
-    "DATABASE_URL": "postgres://su:r9-258-sentinel@db/persona",
-    "STRIPE_SECRET_KEY": "sk_live_r9-258-sentinel",
-    "OPENAI_API_KEY": "sk-r9-258-sentinel",
+    "DATABASE_URL": "r9-258-sentinel-database-url",
+    "STRIPE_SECRET_KEY": "r9-258-sentinel-stripe",
+    "OPENAI_API_KEY": "r9-258-sentinel-openai",
 }
 
 

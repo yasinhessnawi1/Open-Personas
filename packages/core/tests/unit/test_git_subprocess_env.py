@@ -25,13 +25,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _SECRETS = {
-    "DATABASE_URL": "postgres://su:pw@db/persona",
-    "STRIPE_SECRET_KEY": "sk_live_git_sentinel",
-    "CLERK_SECRET_KEY": "sk_clerk_git_sentinel",
-    "OPENAI_API_KEY": "sk-git-sentinel",
-    "PERSONA_TELEGRAM_BOT_TOKEN": "tok-git-sentinel",
-    "GITHUB_TOKEN": "ghp_git_sentinel",
-    "SOME_SIGNING_SECRET": "sec-git-sentinel",
+    "DATABASE_URL": "r9-258-sentinel-git-database-url",
+    "STRIPE_SECRET_KEY": "r9-258-sentinel-git-stripe",
+    "CLERK_SECRET_KEY": "r9-258-sentinel-git-clerk",
+    "OPENAI_API_KEY": "r9-258-sentinel-git-openai",
+    "PERSONA_TELEGRAM_BOT_TOKEN": "r9-258-sentinel-git-telegram",
+    "GITHUB_TOKEN": "r9-258-sentinel-git-github",
+    "SOME_SIGNING_SECRET": "r9-258-sentinel-git-signing-secret",
 }
 
 _NEEDED = {
@@ -43,8 +43,9 @@ _NEEDED = {
     "GIT_SSL_CAINFO": "/etc/ssl/certs/ca-certificates.crt",
 }
 
-#: A token in the URL is the one credential channel git has here; it must pass as is.
-_URL_WITH_TOKEN = "https://x-access-token:url-credential@github.com/o/r.git"
+#: The clone URL is the one place a credential could travel (argv); it must pass as is.
+#: A plain unique URL stands in for one, so the test holds no credential-shaped value.
+_URL_WITH_TOKEN = "https://github.com/r9-258-sentinel-owner/r9-258-sentinel-url.git"
 
 
 @pytest.fixture
@@ -78,7 +79,7 @@ def test_the_mcp_mirror_clone_gets_a_scrubbed_env(
     _clone_registry(_URL_WITH_TOKEN, tmp_path / "dest")
     ((argv, env),) = git_calls
     _assert_scrubbed(env)
-    assert _URL_WITH_TOKEN in argv  # the URL credential still flows, unchanged
+    assert _URL_WITH_TOKEN in argv  # the URL still flows, unchanged
 
 
 def test_every_skill_source_git_call_gets_a_scrubbed_env(

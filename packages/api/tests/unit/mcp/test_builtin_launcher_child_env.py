@@ -20,15 +20,15 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _SECRETS = {
-    "DATABASE_URL": "postgres://su:pw@db/persona",
-    "STRIPE_SECRET_KEY": "sk_live_sentinel",
-    "CLERK_SECRET_KEY": "sk_clerk_sentinel",
-    "ANTHROPIC_API_KEY": "sk-ant-sentinel",
-    "OPENAI_API_KEY": "sk-openai-sentinel",
-    "SOME_CONNECTOR_TOKEN": "tok-sentinel",
-    "SOME_SIGNING_SECRET": "sec-sentinel",
-    "SENTRY_DSN": "https://dsn-sentinel@example.invalid/1",
-    "ANY_VENDOR_KEY": "key-sentinel",
+    "DATABASE_URL": "r9-258-sentinel-database-url",
+    "STRIPE_SECRET_KEY": "r9-258-sentinel-stripe",
+    "CLERK_SECRET_KEY": "r9-258-sentinel-clerk",
+    "ANTHROPIC_API_KEY": "r9-258-sentinel-anthropic",
+    "OPENAI_API_KEY": "r9-258-sentinel-openai",
+    "SOME_CONNECTOR_TOKEN": "r9-258-sentinel-connector-token",
+    "SOME_SIGNING_SECRET": "r9-258-sentinel-signing-secret",
+    "SENTRY_DSN": "r9-258-sentinel-sentry-dsn",
+    "ANY_VENDOR_KEY": "r9-258-sentinel-vendor-key",
     "PERSONA_FILESYSTEM_SCOPE_ROOT": "/shared/flat/root",
 }
 

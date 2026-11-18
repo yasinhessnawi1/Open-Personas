@@ -136,7 +136,7 @@ def test_weather_reaches_its_outbound_settings(name: str) -> None:
 
 @pytest.mark.parametrize("server", ["time", "calculator", "filesystem"])
 def test_offline_servers_get_no_outbound_settings(server: str) -> None:
-    env = child_env(server, {**_parent(), "HTTPS_PROXY": "http://u:p@proxy:3128"})
+    env = child_env(server, {**_parent(), "HTTPS_PROXY": "r9-258-sentinel-proxy"})
     assert "HTTPS_PROXY" not in env
     assert "SSL_CERT_FILE" not in env
 
