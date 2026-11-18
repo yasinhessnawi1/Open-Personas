@@ -339,7 +339,8 @@ class _LegCost:
         not distil bills exactly what it billed before.
         """
         totals = self._distillation.totals()
-        if not totals.prompt_tokens and not totals.completion_tokens and not totals.failed_tries:
+        charged_tries = any(a.reported_tokens for a in totals.failed_tries)
+        if not totals.prompt_tokens and not totals.completion_tokens and not charged_tries:
             return 0.0, None
         # One round, its failed tries charged at their own model (D-ORCH-11-18-s).
         return price_rounds(

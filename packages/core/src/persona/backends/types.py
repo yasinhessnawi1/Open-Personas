@@ -137,8 +137,9 @@ class BackendAttempt(BaseModel):
             response (non-streaming) or the commit to its stream.
         usage: Tokens a FAILED try reported (an empty or degenerate completion is still a
             completion the provider bills). ``None`` for the serving try, whose usage is
-            the call's own, and for a failure that reported none. Not charged to the
-            user (D-ORCH-11-18-h); carried so the cost can be logged.
+            the call's own, and for a failure that reported none. Charged to the
+            user at this try's model when it reported tokens (D-ORCH-11-18-s; see
+            :attr:`reported_tokens`).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -151,6 +152,18 @@ class BackendAttempt(BaseModel):
     retry: bool = False
     elapsed_ms: float = Field(default=0.0, ge=0.0)
     usage: TokenUsage | None = None
+
+    @property
+    def reported_tokens(self) -> bool:
+        """Whether this try reported provider tokens or an actual cost (D-ORCH-11-18-s).
+
+        A backend whose provider sent no usage fills ``TokenUsage(0, 0, 0)``, so usage
+        being present is not enough: a try that cost nothing reported nothing.
+        """
+        usage = self.usage
+        return usage is not None and (
+            usage.prompt_tokens > 0 or usage.completion_tokens > 0 or bool(usage.cost_usd)
+        )
 
 
 class ServedCall(BaseModel):
@@ -181,6 +194,14 @@ class ServedCall(BaseModel):
     def first_attempt(self) -> bool:
         """Whether the call was answered with no failed try before it (D-R9-226 ii)."""
         return all(attempt.error_class is None for attempt in self.attempts)
+
+    def charged_failed_tries(self) -> tuple[BackendAttempt, ...]:
+        """The failed tries of this call that reported tokens, so are charged.
+
+        D-ORCH-11-18-s: each is priced at the model that made it. The one filter every
+        surface uses (chat, voice, agentic steps, authoring, background ops).
+        """
+        return tuple(a for a in self.attempts if a.error_class is not None and a.reported_tokens)
 
     def fell_through(self) -> tuple[BackendAttempt, ...]:
         """One record per backend that failed and was left for the next, in chain order.

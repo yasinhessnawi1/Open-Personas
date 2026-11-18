@@ -195,7 +195,7 @@ def _failed_tries(response: ChatResponse) -> tuple[BackendAttempt, ...]:
     served = response.served
     if served is None:
         return ()
-    return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
+    return served.charged_failed_tries()
 
 
 class AgenticLoop:

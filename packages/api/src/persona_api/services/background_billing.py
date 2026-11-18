@@ -91,7 +91,8 @@ def bill_background_llm(
     if credits_policy is None or rls_engine is None:
         return
     # A surface that made no real model call (0 tokens, no cost) charges nothing.
-    if prompt_tokens <= 0 and completion_tokens <= 0 and not cost_usd and not failed_tries:
+    charged_tries = any(a.reported_tokens for a in failed_tries)
+    if prompt_tokens <= 0 and completion_tokens <= 0 and not cost_usd and not charged_tries:
         return
     # R9-179 item 3, a background op on a free chain spends the SAME account-wide
     # daily cap a free user's turn does, and this is where the api already knows which

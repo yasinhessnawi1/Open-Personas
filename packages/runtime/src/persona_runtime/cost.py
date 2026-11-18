@@ -340,9 +340,7 @@ def _price_failed_try(
     costs nothing and labels nothing. A priced try is logged at INFO with what it adds.
     """
     usage = attempt.usage
-    if usage is None or (
-        usage.prompt_tokens <= 0 and usage.completion_tokens <= 0 and not usage.cost_usd
-    ):
+    if usage is None or not attempt.reported_tokens:
         return None
     cents, basis = compute_turn_cost(
         provider=attempt.provider,

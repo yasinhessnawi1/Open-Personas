@@ -114,3 +114,19 @@ def test_an_op_whose_only_cost_is_a_failed_try_is_still_charged() -> None:
     policy = _FakePolicy()
     _bill(policy, prompt_tokens=0, completion_tokens=0, cost_usd=None, failed_tries=(_wasted(),))
     assert policy.calls[-1]["cost_cents"] == pytest.approx(0.4)
+
+
+def test_an_op_whose_only_failed_try_reported_no_tokens_bills_nothing() -> None:
+    """A provider that sends no usage yields TokenUsage(0, 0, 0): that try cost nothing."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    zero = BackendAttempt(
+        index=0,
+        provider="openrouter",
+        model="primary",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+    )
+    policy = _FakePolicy()
+    _bill(policy, prompt_tokens=0, completion_tokens=0, cost_usd=None, failed_tries=(zero,))
+    assert policy.calls == []

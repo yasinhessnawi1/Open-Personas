@@ -127,11 +127,7 @@ def _price_usage(
     if usage is None:
         return 0.0, "unpriced", 0, 0
     provider, model = served_identity(backend, served)
-    failed = (
-        tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
-        if served is not None
-        else ()
-    )
+    failed = served.charged_failed_tries() if served is not None else ()
     cost, basis = price_rounds(
         [
             PricedRound(

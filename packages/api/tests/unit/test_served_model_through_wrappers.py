@@ -187,6 +187,33 @@ async def test_the_usage_sink_carries_a_failed_try_that_cost_tokens(
     assert (wasted.usage.prompt_tokens, wasted.usage.completion_tokens) == (1, 1)
 
 
+class _NoUsageMember(_Member):
+    """Answers with nothing and, as a provider that sends no usage, TokenUsage(0, 0, 0)."""
+
+    async def chat(self, messages: Any, **_: Any) -> ChatResponse:  # noqa: ANN401, ARG002
+        self.calls += 1
+        return ChatResponse(
+            content="",
+            model=self.model_name,
+            provider=self.provider_name,
+            usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            latency_ms=1.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_usage_sink_keeps_no_failed_try_that_reported_no_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = _NoUsageMember("openrouter", "openai/gpt-oss-120b", "")
+    spare = _Member("groq", "openai/gpt-oss-120b", "an answer")
+    chain = MultiModelChatBackend([head, spare], max_retries_per_backend=0)  # type: ignore[list-item]
+    wrapper, _ = _wrapped(chain, monkeypatch)
+    with collect_llm_usage() as sink:
+        await wrapper.chat(_MESSAGES)
+    assert sink.totals().failed_tries == ()
+
+
 @pytest.mark.asyncio
 async def test_the_usage_sink_records_the_served_model_of_a_stream(
     monkeypatch: pytest.MonkeyPatch,

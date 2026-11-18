@@ -2900,11 +2900,7 @@ def _priced_round(
     each at the model that made it (D-ORCH-11-18-s).
     """
     provider, model = served_identity(backend, served)
-    failed_tries = (
-        tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
-        if served is not None
-        else ()
-    )
+    failed_tries = served.charged_failed_tries() if served is not None else ()
     return PricedRound(
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
