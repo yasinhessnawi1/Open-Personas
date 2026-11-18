@@ -702,9 +702,10 @@ def _apply(
         (etc / "dropin.conf").write_text(dropin, encoding="utf-8", newline="\n")
     if bak is not None:
         (etc / "config.toml.bak-r9289").write_text(bak, encoding="utf-8", newline="\n")
-    if stuck_dropin_tmp:  # a temporary nothing may write: the drop-in's printf fails
-        (etc / "dropin.conf.tmp").write_text("stale", encoding="utf-8", newline="\n")
-        (etc / "dropin.conf.tmp").chmod(0o444)
+    if stuck_dropin_tmp:
+        # A directory where the drop-in's temporary goes: its printf fails for root too
+        # (round 3 LOW-5: root writes through a 0444 file, so that failed for no one but us).
+        (etc / "dropin.conf.tmp").mkdir()
     result = _bash(
         # A POSIX path for PATH: a "C:/..." entry would split at its colon.
         f'set -eu; export STUB_DIR="{stubs.as_posix()}"; '
