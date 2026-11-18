@@ -160,3 +160,28 @@ def test_the_scope_binds_and_resets() -> None:
 def test_the_scope_refuses_an_empty_id() -> None:
     with pytest.raises(ValueError, match="interaction"):
         bind_interaction("conversation", "")
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, dict[str, object]]] = []
+
+    def warning(self, message: str, **fields: object) -> None:
+        self.lines.append((message, fields))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fact_logs_its_cause_by_class_never_by_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from persona_runtime.extraction import direct_write  # noqa: PLC0415
+
+    logger = _RecordingLogger()
+    monkeypatch.setattr(direct_write, "_logger", logger)
+    log = _Log()
+    await _tool(log, _Facts(log, error=OSError("struggling with eating"))).execute(  # type: ignore[attr-defined]
+        fact="I've been struggling with disordered eating", category="disordered_eating"
+    )
+    ((_message, fields),) = logger.lines
+    assert fields["error_class"] == "OSError"
+    assert "struggling" not in repr(logger.lines), "no exception message, no disclosure text"

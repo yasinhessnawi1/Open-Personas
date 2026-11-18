@@ -115,11 +115,13 @@ def _fact_refusal(
         return None
     try:
         held = disclosures.record(owner_id, persona_id, interaction.id)
-    except Exception:  # noqa: BLE001 - refused below; the turn must not crash
+    except Exception as exc:  # noqa: BLE001 - refused below; the turn must not crash
+        # The class only: a driver's message can carry the statement's parameters.
         _logger.warning(
             "direct write refused: the disclosure fact failed",
             persona_id=persona_id,
             interaction_id=interaction.id,
+            error_class=type(exc).__name__,
         )
         held = False
     if held:

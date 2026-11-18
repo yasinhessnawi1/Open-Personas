@@ -136,3 +136,27 @@ async def test_run_worker_binds_the_run_as_the_interaction(engine: Engine) -> No
     await handle.task
     assert loop.seen_interaction == InteractionRef(kind="agentic_run", id=_RUN_ID)
     assert current_interaction() is None
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_raises_still_frees_the_long_op_slot(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-253 review: the interaction bind sits inside the try whose finally does cleanup."""
+    import contextlib  # noqa: PLC0415
+
+    from persona_api.background import run_worker  # noqa: PLC0415
+
+    def broken(*_a: object) -> object:
+        raise ValueError("an interaction needs a kind and an id")
+
+    monkeypatch.setattr(run_worker, "bind_interaction", broken)
+    registry = RunRegistry(engine)
+    released: list[str] = []
+    monkeypatch.setattr(registry, "_release_op_slot", lambda h: released.append(h.run_id))
+    handle = registry.start(run_id=_RUN_ID, owner_id=_OWNER, loop=_RecordingLoop(), task_text="t")  # type: ignore[arg-type]
+    assert handle.task is not None
+    with contextlib.suppress(ValueError):
+        await handle.task
+    assert released == [_RUN_ID]
+    assert get_sandbox_request_context() is None

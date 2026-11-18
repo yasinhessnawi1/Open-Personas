@@ -37,7 +37,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.billing import BillingConfig, credits_charged
 from persona.logging import get_logger
-from persona_runtime.interaction_scope import bind_interaction, reset_interaction
+from persona_runtime.interaction_scope import (
+    InteractionRef,
+    bind_interaction,
+    reset_interaction,
+)
 
 from persona_api.errors import (
     CreditsExhaustedError,
@@ -54,6 +58,7 @@ from persona_api.services.user_facing_errors import owner_on_free_plan, user_fac
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from contextvars import Token
     from typing import Any
 
     from persona.backends import StreamChunk
@@ -297,8 +302,7 @@ class ChatTurnRegistry:
         sandbox_token = set_sandbox_request_context(
             SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.conversation_id)
         )
-        # R9-253: a direct write in this turn names its conversation (initiative's gate).
-        interaction_token = bind_interaction("conversation", handle.conversation_id)
+        interaction_token: Token[InteractionRef | None] | None = None
         handle._last_flush = time.monotonic()
         # R9-020: snapshot the PRE-turn message count now — the loop appends this
         # turn's user+assistant pair to ``conversation.messages`` while it runs, so
@@ -368,6 +372,9 @@ class ChatTurnRegistry:
 
         status = "complete"
         try:
+            # R9-253: a direct write here names its interaction (initiative's gate). Bound
+            # inside the try, so a raise cannot skip the cleanup in its finally.
+            interaction_token = bind_interaction("conversation", handle.conversation_id)
             try:
                 # ``turn_kwargs`` (turn_has_image / images / documents /
                 # document_context) is built + validated by ``start_chat_turn`` and
@@ -476,7 +483,8 @@ class ChatTurnRegistry:
                     )
                 )
         finally:
-            reset_interaction(interaction_token)
+            if interaction_token is not None:
+                reset_interaction(interaction_token)
             reset_sandbox_request_context(sandbox_token)
             # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
             # (clean / cancel / error / shutdown) so the per-user cap doesn't ratchet

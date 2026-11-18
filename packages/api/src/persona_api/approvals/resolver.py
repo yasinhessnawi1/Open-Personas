@@ -55,6 +55,7 @@ from persona.tasks import (
     merge_artifact_pointers,
     pointers_from_artifacts,
 )
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -372,8 +373,15 @@ class ApprovalResolver:
             _log.info("execute skipped (lost approve CAS)", proposal_id=proposal.proposal_id)
             return ResolutionOutcome(outcome=DecisionType.APPROVE, executed=False, note="race_lost")
 
-        # Verbatim replay — the EXACT recorded payload, never re-derived by the model.
-        result = await self._executor.execute(proposal.tool_name, exec_arguments)
+        # Verbatim replay, the EXACT recorded payload, never re-derived by the model.
+        # R9-253: every proposal is one task leg's, and the replay runs off that leg with
+        # nothing bound, so it is bound to the task here: an approved direct write then names
+        # the task and records its disclosure fact, as it would have inside the leg.
+        interaction_token = bind_interaction("task", proposal.task_id)
+        try:
+            result = await self._executor.execute(proposal.tool_name, exec_arguments)
+        finally:
+            reset_interaction(interaction_token)
         headline = "Approved with your edits" if carries_edit else "Approved"
         self._write_resolution_checkpoint(
             owner_id,

@@ -21,6 +21,7 @@ T2b adds the streaming-shape parity with the old inline ``stream_chat``:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -595,3 +596,23 @@ async def test_tool_only_turn_persists_runtime_marker_not_empty_content() -> Non
     assert sink.finalize_calls[0]["content"] == _ToolOnlyMarkerLoop.marker
     kinds = _kinds(_drain(handle))
     assert "done" in kinds
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_raises_still_frees_the_long_op_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-253 review: the interaction bind sits inside the try whose finally does cleanup."""
+    from persona_api.background import chat_turn_worker  # noqa: PLC0415
+
+    def broken(*_a: object) -> object:
+        raise ValueError("an interaction needs a kind and an id")
+
+    monkeypatch.setattr(chat_turn_worker, "bind_interaction", broken)
+    reg = _registry(_RecordingSink())
+    released: list[str] = []
+    monkeypatch.setattr(reg, "_release_op_slot", lambda h: released.append(h.conversation_id))
+    handle = _start(reg, _ScriptedLoop(["x"]))
+    with contextlib.suppress(ValueError):
+        await handle.task
+    assert released == [_CONV]
