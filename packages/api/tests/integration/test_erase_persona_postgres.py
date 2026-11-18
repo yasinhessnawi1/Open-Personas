@@ -58,6 +58,8 @@ _TABLES = (
     "notifications",
     "initiative_notices",
     "tool_audit_events",
+    # R9-253: seeded on a live conversation and on one already gone; both go with the persona.
+    "wellbeing_disclosures",
 )
 
 
@@ -182,6 +184,7 @@ def test_nothing_of_the_persona_remains_on_postgres_and_its_neighbours_keep_all(
     sibling = (_memory_of(seeded.engine, SIBLING), _rows_of(seeded.engine, SIBLING))
     stranger = (_memory_of(seeded.engine, STRANGER), _rows_of(seeded.engine, STRANGER))
     assert _memory_of(seeded.engine, PERSONA) == 7
+    assert len(ids_naming(seeded.engine, "wellbeing_disclosures", PERSONA[-6:])) == 2
 
     _erase(seeded, platform, embedder)
 

@@ -83,6 +83,7 @@ from persona_api.initiative.deferred_flush import (
     register_initiative_deferred_flush_handler,
 )
 from persona_api.initiative.delivery import InitiativeDeliveryExecutor
+from persona_api.initiative.disclosures import PgDisclosureStore
 from persona_api.initiative.handler import (
     InitiativeScanHandler,
     read_initiative_dial,
@@ -302,6 +303,9 @@ def build_worker_registry(
         # R9-284 review H2: a synthesis past its read writes nothing for an erased persona.
         # On the RLS engine, inside the job owner's scope.
         persona_exists=functools.partial(persona_service.persona_exists, rls_engine),
+        # R9-253: a tagged (or means-dropped) candidate records the durable disclosure fact
+        # before any merge, so a forgotten tagged node never un-gates its interaction.
+        disclosures=PgDisclosureStore(rls_engine),
     )
     registry = JobRegistry()
 

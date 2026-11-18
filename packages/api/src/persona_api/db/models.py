@@ -97,6 +97,7 @@ __all__ = [
     "turn_logs",
     "user_mcp_servers",
     "users",
+    "wellbeing_disclosures",
 ]
 
 # bge-small-en-v1.5 (architecture §4.3). The column is hard-coded to this dim;
@@ -1624,6 +1625,28 @@ synthesis_markers = Table(
         name="uq_synthesis_markers_owner_kind_interaction",
     ),
     Index("idx_synthesis_markers_owner", "owner_id"),
+)
+
+
+# R9-253: the durable per-interaction disclosure fact the initiative wellbeing gate reads. The
+# gate once derived "this interaction carried a disclosure" from the tagged nodes that exist
+# now, so forgetting the tagged node un-gated the untagged nodes learned beside it. A row is
+# written whenever synthesis or a direct write sees a wellbeing disclosure, and it is never
+# cleared by a node or conversation deletion (the nodes learned from a conversation outlive
+# it). It holds ids and a time only, never the text or the category (D-ORCH-11-18-m). It goes
+# with its persona (the persona erasure's row step cascades) or its account. Created with its
+# RLS ENTIRELY in its own migration (065, the 015 template); deliberately NOT in
+# ``db/rls._POLICIES``. Cloud and managed community only, like ``synthesis_markers``.
+wellbeing_disclosures = Table(
+    "wellbeing_disclosures",
+    metadata,
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    # A conversation, run or task id: the gate is kind-agnostic, so the kind is not kept.
+    Column("interaction_id", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    PrimaryKeyConstraint("owner_id", "interaction_id", name="pk_wellbeing_disclosures"),
+    Index("idx_wellbeing_disclosures_persona", "persona_id"),
 )
 
 

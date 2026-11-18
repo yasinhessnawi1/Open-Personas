@@ -10,8 +10,12 @@ conversation is gated even when the node itself carries no tag (the dinner-party
 node synthesis extracted beside the disclosure it tagged).
 
 - **disclosed**: a wellbeing-flagged node was sourced from the conversation (its
-  provenance ``interaction_id`` equals the conversation id). This is A7's original
-  layer-(a) rule, moved here unchanged.
+  provenance ``interaction_id`` equals the conversation id), A7's original layer-(a)
+  rule, OR the durable disclosure fact holds it (R9-253). The fact is written whenever
+  synthesis or a direct write sees a disclosure and no node or conversation deletion
+  clears it, so a user forgetting the tagged node does not un-gate the untagged nodes
+  learned beside it (D-ORCH-11-18-m). Both halves count; the node half keeps every
+  interaction a tagged node cites gated even where no fact was ever written.
 - **unsynthesised**: K2 synthesis has not caught up with the conversation, so a
   disclosure in it cannot have been tagged yet. Synthesis runs off the critical path
   at every completed turn (and at run and voice end) and records its progress in
@@ -27,7 +31,7 @@ node synthesis extracted beside the disclosure it tagged).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import func, select
 
@@ -36,6 +40,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import synthesis_markers
 from persona_api.db.models import tasks as tasks_t
+from persona_api.initiative.disclosures import PgDisclosureStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -44,11 +49,19 @@ if TYPE_CHECKING:
     from persona.graph.protocol import GraphStore
     from sqlalchemy import Engine
 
-__all__ = ["SYNTHESISED_ROLES", "ConversationWellbeingGate", "node_sources"]
+__all__ = ["SYNTHESISED_ROLES", "ConversationWellbeingGate", "DisclosureReader", "node_sources"]
 
 #: The message roles K2 synthesis reads as the transcript (its ``_TRANSCRIPT_ROLES``,
 #: pinned equal by a test): the count ``synthesised_up_to`` is compared against.
 SYNTHESISED_ROLES: tuple[str, ...] = ("user", "assistant")
+
+
+class DisclosureReader(Protocol):
+    """The read half of the durable disclosure fact (``PgDisclosureStore`` in production)."""
+
+    def disclosed(self, owner_id: str, refs: Iterable[str]) -> set[str]:
+        """The refs among ``refs`` that ever carried a disclosure for this owner."""
+        ...
 
 
 def node_sources(node: ConceptNode | None) -> set[str]:
@@ -61,10 +74,23 @@ def node_sources(node: ConceptNode | None) -> set[str]:
 class ConversationWellbeingGate:
     """Which conversations are wellbeing-gated for unprompted initiative."""
 
-    def __init__(self, store: GraphStore, engine: Engine | None = None) -> None:
-        """Bind the graph store (the flagged set) and, for the freshness half, the engine."""
+    def __init__(
+        self,
+        store: GraphStore,
+        engine: Engine | None = None,
+        *,
+        disclosures: DisclosureReader | None = None,
+    ) -> None:
+        """Bind the graph store (the flagged set), the engine and the disclosure facts.
+
+        ``disclosures`` defaults to the fact table over ``engine``; without either, only the
+        flagged-node half of ``disclosed`` runs (a unit-test shape, never production's).
+        """
         self._store = store
         self._engine = engine
+        self._disclosures = disclosures
+        if disclosures is None and engine is not None:
+            self._disclosures = PgDisclosureStore(engine)
 
     def disclosed(
         self,
@@ -73,15 +99,18 @@ class ConversationWellbeingGate:
         *,
         flagged: Sequence[ConceptNode] | None = None,
     ) -> set[str]:
-        """The refs some wellbeing-flagged node was sourced from (kind-agnostic)."""
+        """The refs a wellbeing-flagged node was sourced from, or a disclosure fact holds."""
         wanted = set(refs)
         nodes = self._store.flagged_nodes(owner_id) if flagged is None else flagged
-        return {
+        found = {
             p.interaction_id
             for node in nodes
             for p in node.provenance
             if p.interaction_id is not None and p.interaction_id in wanted
         }
+        if self._disclosures is not None and wanted:
+            found |= self._disclosures.disclosed(owner_id, wanted)
+        return found
 
     def unsynthesised(self, owner_id: str, conversation_ids: Iterable[str]) -> set[str]:
         """The conversations holding transcript messages K2 synthesis has not processed."""
