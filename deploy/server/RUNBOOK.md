@@ -290,12 +290,14 @@ sudo rsync -aHAX --numeric-ids --delete /var/lib/containerd/ /srv/containerd/
 sudo rsync -aHAXn --numeric-ids --delete -i /var/lib/containerd/ /srv/containerd/
 
 # 6. only when no root is set yet (a root already set is not this procedure's: STOP), back
-#    up the config (cp -n never overwrites an earlier backup) and prepend the root. Safe to
-#    paste twice: the second time it stops.
+#    up the config (an earlier backup is never overwritten) and prepend the root. Safe to
+#    paste twice: the second time it stops. Not `cp -n`: coreutils 9.2 to 9.4 (Ubuntu 24.04)
+#    make it fail when it skips, so a redo after a rollback would never set the root.
 if sudo grep -qE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml; then
   echo "STOP: containerd's config already sets a root"
 else
-  sudo cp -an /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289 \
+  { sudo test -e /etc/containerd/config.toml.bak-r9289 \
+      || sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289; } \
     && sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
 fi
 

@@ -145,3 +145,37 @@ def test_the_orphan_count_reaches_the_operator_with_a_way_to_settle_it() -> None
     assert "--orphaned" in step
     assert "--apply" in step
     assert "persona repair --all-personas" in step
+
+
+CONTAINERD_MOVE = RUNBOOK.split("### containerd's root (R9-289)", 1)[1].split("\n## ", 1)[0]
+CONTAINERD_CONFIG = "/etc/containerd/config.toml"
+CONTAINERD_BAK = "/etc/containerd/config.toml.bak-r9289"
+
+
+def _containerd_step(number: int) -> str:
+    """Step <number> of the containerd move, as code: comments and fences dropped,
+    continued lines joined, whitespace collapsed."""
+    found = re.search(
+        rf"^# {number}\. .*?(?=^# {number + 1}\. )", CONTAINERD_MOVE, re.S | re.M
+    )
+    assert found, f"step {number}"
+    code = "\n".join(
+        line
+        for line in found.group(0).splitlines()
+        if not line.lstrip().startswith(("#", "```"))
+    )
+    return " ".join(code.replace("\\\n", " ").split())
+
+
+def test_the_containerd_moves_backup_is_not_cp_n() -> None:
+    """R9-289 round 3 MEDIUM-1: coreutils 9.2 to 9.4 (Ubuntu 24.04 ships 9.4) make `cp -n`
+    exit 1 when it skips an existing file. On a redo after a rollback the backup is there,
+    so `cp -an ... && sed` would never prepend the root and the move would go on without it.
+    """
+    step = _containerd_step(6)
+    backup = (
+        f"{{ sudo test -e {CONTAINERD_BAK} || sudo cp -a {CONTAINERD_CONFIG} {CONTAINERD_BAK}; }}"
+        f" && sudo sed -i '1i root = \"/srv/containerd\"' {CONTAINERD_CONFIG}"
+    )
+    assert backup in step
+    assert not re.search(r"\bcp\s+-[a-zA-Z]*n[a-zA-Z]*\s[^&]*&&", step), "cp -n ... &&"
