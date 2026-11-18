@@ -16,7 +16,8 @@ is never released unseen. Only the conversation's owner can read or change it: a
 conversation, or another owner's, is not found.
 
 The token is keyless: a SHA-256 over the owner, the conversation, the fact row's own
-``created_at`` (to the microsecond) and the count. A hash of the conversation and the count
+``created_at`` (to the microsecond), the count and the latest write of a tagged node citing
+the conversation, every instant in UTC. A hash of the conversation and the count
 alone could be inverted by trying small counts; ``created_at`` is never shown by any route, so
 the count cannot be guessed from the token, and no new server secret has to be deployed and
 kept in step across processes. The token changes with every recorded disclosure, which is all
@@ -28,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import dataclass
+from datetime import UTC
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
@@ -39,9 +41,10 @@ from persona_api.initiative.disclosures import PgDisclosureStore, ReleaseOutcome
 from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from datetime import datetime
 
+    from persona.graph.models import ConceptNode
     from persona.graph.protocol import GraphStore
     from sqlalchemy import Engine
 
@@ -73,16 +76,45 @@ class ConversationHold:
     version: str
 
 
-def version_token(owner_id: str, conversation_id: str, state: DisclosureState | None) -> str:
-    """The opaque version of a conversation's disclosure count (see the module)."""
+def _utc(at: datetime | None) -> str:
+    """An instant as UTC text, so the token is the same whatever the session time zone."""
+    return "" if at is None else at.astimezone(UTC).isoformat()
+
+
+def version_token(
+    owner_id: str,
+    conversation_id: str,
+    state: DisclosureState | None,
+    *,
+    latest_tagged: datetime | None = None,
+) -> str:
+    """The opaque version of what the user saw (see the module).
+
+    ``latest_tagged`` is the latest ``written_at`` of a tagged node citing the conversation
+    (PR #44 delta review N2): a tagging path that skips the fact (``merge.py`` keeping a
+    target's tag) moves it, so a write landing between the read and the release is a 409
+    rather than covered unseen by the re-stamp.
+    """
     material: tuple[str, ...]
     if state is None:
         material = (_TOKEN_PURPOSE, owner_id, conversation_id, "no-fact")
     else:
-        created = state.created_at.isoformat() if state.created_at is not None else ""
-        material = (_TOKEN_PURPOSE, owner_id, conversation_id, created, str(state.disclosure_seq))
+        count = str(state.disclosure_seq)
+        material = (_TOKEN_PURPOSE, owner_id, conversation_id, _utc(state.created_at), count)
+    material = (*material, _utc(latest_tagged))
     digest = hashlib.sha256("\x1f".join(material).encode("utf-8")).hexdigest()
     return f"v1.{digest[:32]}"
+
+
+def _latest_tagged(flagged: Sequence[ConceptNode], conversation_id: str) -> datetime | None:
+    """The latest write of a tagged node citing the conversation, if any."""
+    writes = [
+        p.written_at
+        for node in flagged
+        for p in node.provenance
+        if p.interaction_id == conversation_id
+    ]
+    return max(writes, default=None)
 
 
 _NOT_HELD = ConversationHold(state="not_held", released_at=None, version="")
@@ -183,7 +215,12 @@ class ConversationHoldService:
         refs = [conversation_id]
         if state is None:
             state = self._facts.states(owner_id, refs).get(conversation_id)
-        version = version_token(owner_id, conversation_id, state)
+        version = version_token(
+            owner_id,
+            conversation_id,
+            state,
+            latest_tagged=_latest_tagged(flagged, conversation_id),
+        )
         released = self._gate.released(owner_id, refs, flagged=flagged)
         if conversation_id in released:
             return ConversationHold(

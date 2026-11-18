@@ -276,3 +276,72 @@ def test_a_stale_token_is_a_conflict_and_writes_nothing(monkeypatch: pytest.Monk
     with pytest.raises(HoldChangedError):
         service.change("u", "conv-d", released=True, version=stale, at=_AT)
     assert facts.calls == []
+
+
+def _tagged_at(written_at: datetime) -> Any:  # noqa: ANN401 - a ConceptNode, imported late
+    from persona.graph.models import ConceptNode, NodeKind, NodeProvenance  # noqa: PLC0415
+    from persona.schema.chunks import WriteSource  # noqa: PLC0415
+
+    return ConceptNode(
+        id=f"n-{written_at.isoformat()}",
+        node_kind=NodeKind.FACT,
+        concept_name="x",
+        content="x",
+        wellbeing_category="mental_health_crisis",
+        provenance=(
+            NodeProvenance(
+                source=WriteSource.PERSONA_SELF,
+                interaction_id="conv",
+                written_at=written_at,
+            ),
+        ),
+        created_at=_AT,
+    )
+
+
+def test_a_tagged_write_between_the_read_and_the_release_is_a_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 delta review N2: a fact-skipping tagged write (``merge.py`` keeping a tag)
+    landing after the read moves the token, so the re-stamp never covers it unseen."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    graph = _NetGraph()
+    facts = _StoreLike(replace(_HELD, disclosure_seq=1), ReleaseOutcome.CHANGED)
+    gate = ConversationWellbeingGate(graph, object(), disclosures=facts, releases=facts)  # type: ignore[arg-type]
+    monkeypatch.setattr(gate, "unsynthesised", lambda _o, _ids: set())
+    service = ConversationHoldService(
+        graph,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        facts=facts,  # type: ignore[arg-type]
+        gate=gate,
+        persona_of=lambda _o, _c: "pers",
+    )
+    first = service.read("u", "conv")
+    service.change("u", "conv", released=True, version=first.version, at=_AT)
+    graph.nodes.append(_tagged_at(_AT + timedelta(minutes=5)))
+    seen = service.read("u", "conv")
+    assert seen.state == "held"
+    graph.nodes.append(_tagged_at(_AT + timedelta(minutes=30)))  # lands after the read
+    calls = len(facts.calls)
+    with pytest.raises(HoldChangedError):
+        service.change(
+            "u", "conv", released=True, version=seen.version, at=_AT + timedelta(hours=1)
+        )
+    assert len(facts.calls) == calls, "nothing written"
+
+
+def test_the_token_moves_with_the_latest_tagged_write_and_ignores_the_time_zone() -> None:
+    """N2 and the delta review nit: the same instants in any zone give the same token."""
+    from datetime import timedelta, timezone  # noqa: PLC0415
+
+    oslo = timezone(timedelta(hours=1))
+    late = _AT + timedelta(minutes=5)
+    base = version_token("u", "conv-d", _HELD, latest_tagged=late)
+    assert base != version_token("u", "conv-d", _HELD), "a tagged write moves it"
+    assert base != version_token("u", "conv-d", _HELD, latest_tagged=late + timedelta(seconds=1))
+    elsewhere = replace(_HELD, created_at=_CREATED.astimezone(oslo))
+    assert version_token("u", "conv-d", elsewhere, latest_tagged=late.astimezone(oslo)) == base
+    assert version_token("u", "conv-d", None, latest_tagged=late) != version_token(
+        "u", "conv-d", None
+    )
