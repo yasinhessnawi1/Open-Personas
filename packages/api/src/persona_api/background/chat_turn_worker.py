@@ -185,8 +185,13 @@ class ChatTurnRegistry:
         task_steering_service: TaskSteeringService | None = None,
         task_reschedule_service: TaskRescheduleService | None = None,
         initiative_verb_service: InitiativeVerbService | None = None,
+        delivers_images: bool = True,
     ) -> None:
         self._sink = sink
+        # R9-308: whether this registry's surface can show a generated image. Bound onto
+        # each turn's request context, where the chat image charge reads it; the connector
+        # registry passes False, so a persona's image on Telegram is made and not charged.
+        self._delivers_images = delivers_images
         self._engine = rls_engine
         self._credits_policy = credits_policy
         # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
@@ -230,6 +235,11 @@ class ChatTurnRegistry:
         # confirm/decline). None → the events are ignored (the pre-activation posture).
         self._initiative_verb_service = initiative_verb_service
         self._handles: dict[str, ChatTurnHandle] = {}
+
+    @property
+    def delivers_images(self) -> bool:
+        """Whether turns run here can show a generated image (R9-308)."""
+        return self._delivers_images
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
         return self._handles.get(conversation_id)
@@ -300,7 +310,11 @@ class ChatTurnRegistry:
         """
         token = current_user_id.set(handle.owner_id)
         sandbox_token = set_sandbox_request_context(
-            SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.conversation_id)
+            SandboxRequestContext(
+                owner_id=handle.owner_id,
+                conversation_id=handle.conversation_id,
+                delivers_images=self._delivers_images,
+            )
         )
         interaction_token: Token[InteractionRef | None] | None = None
         handle._last_flush = time.monotonic()

@@ -51,6 +51,40 @@ describe("surfaceKey", () => {
     expect(surfaceKey("connectors_mcp:infra_flat")).toBe("background");
   });
 
+  it("files an image a persona made in chat under image spend, not chat (R9-308)", () => {
+    // The chat generate_image charge: the hold, the true-up, and the refund rows.
+    expect(surfaceKey("image_chat_pre")).toBe("image");
+    expect(surfaceKey("image_chat:estimate_static")).toBe("image");
+    expect(surfaceKey("image_chat:actual_openrouter")).toBe("image");
+    expect(surfaceKey("image_chat_trueup:estimate_static")).toBe("image");
+    expect(surfaceKey("image_chat_refund:provider_failure")).toBe("image");
+    // The turn that made the image stays chat spend.
+    expect(surfaceKey("chat_turn:actual_openrouter")).toBe("chat");
+  });
+
+  it("nets a chat image's hold and true-up into one image figure", () => {
+    const groups = aggregateBySurface([
+      entry({ reason: "chat_turn:actual_openrouter", delta: -1 }),
+      entry({
+        reason: "image_chat_pre",
+        delta: -9,
+        cost_cents: null,
+        cost_basis: null,
+      }),
+      entry({
+        reason: "image_chat_trueup:estimate_static",
+        delta: 4,
+        cost_cents: 4.2,
+        cost_basis: "estimate_static",
+      }),
+    ]);
+    const image = groups.find((g) => g.key === "image");
+    const chat = groups.find((g) => g.key === "chat");
+    expect(image?.creditsCharged).toBe(5);
+    expect(image?.count).toBe(2);
+    expect(chat?.creditsCharged).toBe(1);
+  });
+
   it("falls back to 'other' for unknown reasons", () => {
     expect(surfaceKey("something_new:basis")).toBe("other");
     expect(surfaceKey("")).toBe("other");

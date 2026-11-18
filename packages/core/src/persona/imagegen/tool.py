@@ -66,7 +66,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.imagegen._merge import merge_visual_style
-from persona.imagegen.charge import ImageChargeRefusedError
+from persona.imagegen.charge import ImageChargeLedgerError, ImageChargeRefusedError
 from persona.imagegen.errors import (
     ContentRejectedError,
     ImageGenError,
@@ -168,9 +168,10 @@ def make_generate_image_tool(
         charge_hook: Optional :class:`ImageChargeHook` (R9-308). When
             provided it is asked to authorize every call AFTER the options
             validate and BEFORE the provider is called; a refusal returns a
-            structured ``insufficient_credits`` error and the provider is
-            never called. The charge it returns is settled with the
-            provider's result after a success, and never after a failure.
+            structured error (``insufficient_credits`` / ``daily_spend_cap``)
+            and the provider is never called. The charge it returns is
+            settled with the provider's result after a success and released
+            after a failure.
             ``None`` (the CLI, core tests) bills nothing, as before. Core
             only defines the seam; the api implements it over its ledger.
 
@@ -295,7 +296,9 @@ def make_generate_image_tool(
         #    exceptions as ContentRejectedError (moderation) or
         #    ImageGenError-family (auth / rate / transient / etc.).
         try:
-            result = await backend.generate(merged_prompt, options=options)
+            result = await _generate(
+                backend, merged_prompt, options=options, charge=charge, persona_id=persona_id
+            )
         except ContentRejectedError as exc:
             stage = exc.context.get("stage", "")
             reason = exc.context.get("reason", "provider_moderation")
@@ -480,16 +483,51 @@ def _validated_options(*, size: str, count: int, quality: str) -> ImageGenOption
     )
 
 
+async def _generate(
+    backend: ImageBackend,
+    prompt: str,
+    *,
+    options: ImageGenOptions,
+    charge: ImageCharge | None,
+    persona_id: str | None,
+) -> GenerationResult:
+    """Call the provider; when it raises, release the charge before the error goes on.
+
+    Any exception releases, not only the image errors the tool turns into results: an
+    unexpected one still made no image, and an authorization may be holding money.
+    """
+    try:
+        return await backend.generate(prompt, options=options)
+    except BaseException:
+        if charge is not None:
+            await _release(charge, persona_id=persona_id)
+        raise
+
+
+async def _release(charge: ImageCharge, *, persona_id: str | None) -> None:
+    """Release a charge after a failed generation; a ledger failure is logged, not raised."""
+    try:
+        await charge.release()
+    except ImageChargeLedgerError as exc:
+        _LOG.warning(
+            "generate_image charge failed to release (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            error=str(exc),
+        )
+
+
 async def _settle(charge: ImageCharge, result: GenerationResult, *, persona_id: str | None) -> None:
-    """Settle the charge for ``result``; a failure is logged and never raised.
+    """Settle the charge for ``result``; a ledger failure is logged and never raised.
 
     By now the provider has made the images and billed us for them. Failing the tool here
     would take away an image the person already has without making the charge any more
-    likely to land, so a ledger hiccup is logged loudly instead.
+    likely to land, so a ledger failure (which the hook reports as
+    :class:`ImageChargeLedgerError` after recording it) is logged loudly instead. Anything
+    else is a bug in the hook and is left to surface.
     """
     try:
         await charge.settle(result)
-    except Exception as exc:  # noqa: BLE001 (a billing write must never break the result)
+    except ImageChargeLedgerError as exc:
         _LOG.warning(
             "generate_image charge failed to settle (fail-soft)",
             persona_id=persona_id or "<unknown>",
@@ -510,27 +548,29 @@ def _refused_result(
     model: str,
 ) -> ToolResult:
     """The structured error for an image the person cannot pay for; the provider was not called."""
+    reason = exc.context.get("reason", "insufficient_credits")
     _emit_error_audit(
         audit_logger=audit_logger,
         persona_id=persona_id,
         provider=provider,
         model=model,
         error_type=type(exc).__name__,
-        reason="insufficient_credits",
+        reason=reason,
     )
     _LOG.info(
         "generate_image refused by its charge hook; provider not called",
         persona_id=persona_id or "<unknown>",
         provider=provider,
+        reason=reason,
     )
     return ToolResult(
         tool_name="generate_image",
         # The message alone: it is written for the person, the context is for logs.
-        content=f"insufficient_credits: {exc.message}",
+        content=f"{reason}: {exc.message}",
         is_error=True,
         metadata={
             "outcome": "error",
-            "reason": "insufficient_credits",
+            "reason": reason,
             "provider": provider,
             "model": model,
         },

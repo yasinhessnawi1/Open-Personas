@@ -55,6 +55,13 @@ class SandboxRequestContext:
 
     owner_id: str
     conversation_id: str
+    #: Whether the surface this turn runs on can show the person a generated image.
+    #: A connector (Telegram, email, SMS...) sends only the reply text, so an image a
+    #: persona makes there never reaches anyone. The chat image charge reads this and
+    #: bills nothing on such a turn (R9-308): the owner ruled the house pays for those
+    #: until a channel can deliver them. Set explicitly by the registry that runs the
+    #: turn, never inferred from the ids.
+    delivers_images: bool = True
 
     def __post_init__(self) -> None:
         # T12 F-T12-INT-01: kickoff trip-up #6 isolation guarantee is

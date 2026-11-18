@@ -19,6 +19,7 @@ from persona.imagegen import (
     GeneratedImage,
     GenerationResult,
     ImageBackend,
+    ImageChargeLedgerError,
     ImageChargeRefusedError,
     ImageGenOptions,
     ImageProviderError,
@@ -66,17 +67,21 @@ class _Backend:
 
 
 class _Charge:
-    def __init__(self, log: list[str], *, fail: bool = False) -> None:
+    def __init__(self, log: list[str], *, fail: BaseException | None = None) -> None:
         self._log = log
         self._fail = fail
         self.settled: list[GenerationResult] = []
+        self.released = 0
 
     async def settle(self, result: GenerationResult) -> None:
         self._log.append("settle")
         self.settled.append(result)
-        if self._fail:
-            msg = "ledger unavailable"
-            raise RuntimeError(msg)
+        if self._fail is not None:
+            raise self._fail
+
+    async def release(self) -> None:
+        self._log.append("release")
+        self.released += 1
 
 
 class _Hook:
@@ -86,9 +91,9 @@ class _Hook:
         self,
         log: list[str],
         *,
-        refuse: bool = False,
+        refuse: str | None = None,
         no_charge: bool = False,
-        settle_fails: bool = False,
+        settle_fails: BaseException | None = None,
     ) -> None:
         self._log = log
         self._refuse = refuse
@@ -101,9 +106,9 @@ class _Hook:
     ) -> _Charge | None:
         self._log.append("authorize")
         self.authorized.append((options, provider, model))
-        if self._refuse:
+        if self._refuse is not None:
             msg = "Not enough credits for this image."
-            raise ImageChargeRefusedError(msg, context={"reason": "insufficient_credits"})
+            raise ImageChargeRefusedError(msg, context={"reason": self._refuse})
         return None if self._no_charge else self.charge
 
 
@@ -143,7 +148,7 @@ async def test_an_unaffordable_image_never_reaches_the_provider() -> None:
     audit = MemoryToolAuditLogger()
     backend = _LoggingBackend(log)
     tool = make_generate_image_tool(
-        backend=backend, charge_hook=_Hook(log, refuse=True), audit_logger=audit
+        backend=backend, charge_hook=_Hook(log, refuse="insufficient_credits"), audit_logger=audit
     )
 
     result = await tool.execute(prompt="a lighthouse at dusk")
@@ -170,8 +175,40 @@ async def test_a_provider_failure_settles_nothing() -> None:
     result = await tool.execute(prompt="a lighthouse at dusk")
 
     assert result.is_error is True
-    assert log == ["authorize", "generate"]
+    assert log == ["authorize", "generate", "release"]
     assert hook.charge.settled == []
+    assert hook.charge.released == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_provider_exception_also_releases() -> None:
+    """Not every failure is an ImageGenError; a held authorization must come back anyway."""
+    log: list[str] = []
+    hook = _Hook(log)
+    backend = _LoggingBackend(log, side_effect=RuntimeError("socket closed"))
+    tool = make_generate_image_tool(backend=backend, charge_hook=hook)
+
+    result = await tool.execute(prompt="a lighthouse at dusk")
+
+    assert result.is_error is True
+    assert log == ["authorize", "generate", "release"]
+    assert hook.charge.settled == []
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_reason_comes_from_the_hook() -> None:
+    log: list[str] = []
+    backend = _LoggingBackend(log)
+    tool = make_generate_image_tool(
+        backend=backend, charge_hook=_Hook(log, refuse="daily_spend_cap")
+    )
+
+    result = await tool.execute(prompt="a lighthouse at dusk")
+
+    assert result.is_error is True
+    assert result.metadata["reason"] == "daily_spend_cap"
+    assert result.content.startswith("daily_spend_cap: ")
+    assert backend.calls == []
 
 
 @pytest.mark.asyncio
@@ -189,17 +226,31 @@ async def test_no_charge_handed_back_means_nothing_to_settle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_settle_failure_does_not_take_the_image_away() -> None:
-    """The image exists and the provider billed us; a ledger hiccup is logged, not raised."""
+async def test_a_ledger_failure_on_settle_does_not_take_the_image_away() -> None:
+    """The image exists and the provider billed us; a ledger failure is logged, not raised."""
     log: list[str] = []
+    failure = ImageChargeLedgerError("ledger unavailable", context={"billing_key": "k"})
     tool = make_generate_image_tool(
-        backend=_LoggingBackend(log), charge_hook=_Hook(log, settle_fails=True)
+        backend=_LoggingBackend(log), charge_hook=_Hook(log, settle_fails=failure)
     )
 
     result = await tool.execute(prompt="a lighthouse at dusk")
 
     assert result.is_error is False
     assert log == ["authorize", "generate", "settle"]
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_settle_is_not_swallowed() -> None:
+    """Only ledger failures are fail-soft; anything else surfaces as a tool error."""
+    log: list[str] = []
+    tool = make_generate_image_tool(
+        backend=_LoggingBackend(log), charge_hook=_Hook(log, settle_fails=TypeError("bug"))
+    )
+
+    result = await tool.execute(prompt="a lighthouse at dusk")
+
+    assert result.is_error is True
 
 
 @pytest.mark.asyncio

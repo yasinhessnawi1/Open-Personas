@@ -50,6 +50,7 @@ def build_chat_turn_registry(
     task_steering_service: TaskSteeringService | None = None,
     task_reschedule_service: TaskRescheduleService | None = None,
     initiative_verb_service: InitiativeVerbService | None = None,
+    delivers_images: bool = True,
 ) -> ChatTurnRegistry:
     """Build the detached chat-turn registry with the edition's full billing set.
 
@@ -75,6 +76,9 @@ def build_chat_turn_registry(
         task_steering_service: Worker side of the A4 steering verbs.
         task_reschedule_service: Worker side of the A8 reschedule verb.
         initiative_verb_service: Worker side of the A5 initiative verbs.
+        delivers_images: Whether this surface can show a generated image (R9-308). The
+            connectors pass ``False``: they send only text, so an image a persona makes
+            there is not charged.
 
     Returns:
         The composed :class:`~persona_api.background.chat_turn_worker.ChatTurnRegistry`.
@@ -100,4 +104,5 @@ def build_chat_turn_registry(
         task_steering_service=task_steering_service,
         task_reschedule_service=task_reschedule_service,
         initiative_verb_service=initiative_verb_service,
+        delivers_images=delivers_images,
     )

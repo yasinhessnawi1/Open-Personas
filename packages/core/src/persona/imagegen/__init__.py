@@ -20,7 +20,12 @@ from __future__ import annotations
 
 from persona.imagegen._factory import load_image_backend, load_image_backend_from_env
 from persona.imagegen.avatar_prompt import craft_avatar_prompt, wants_generated_portrait
-from persona.imagegen.charge import ImageCharge, ImageChargeHook, ImageChargeRefusedError
+from persona.imagegen.charge import (
+    ImageCharge,
+    ImageChargeHook,
+    ImageChargeLedgerError,
+    ImageChargeRefusedError,
+)
 from persona.imagegen.config import ImageBackendConfig, ImageProvider
 from persona.imagegen.errors import (
     ContentRejectedError,
@@ -62,6 +67,7 @@ __all__ = [
     "ImageBackendConfig",
     "ImageCharge",
     "ImageChargeHook",
+    "ImageChargeLedgerError",
     "ImageChargeRefusedError",
     "ImageGenError",
     "ImageGenOptions",
