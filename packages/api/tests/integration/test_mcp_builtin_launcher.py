@@ -9,6 +9,9 @@ Marked ``integration`` (spawns subprocesses + binds loopback ports); run with
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 from persona.tools.mcp.client import MCPClient
 from persona_api.mcp import BuiltinMCPSupervisor
@@ -77,26 +80,48 @@ async def test_dead_server_is_respawned_on_next_resolution() -> None:
         await sup.aclose()
 
 
-async def test_spawned_child_cannot_see_a_parent_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    # R9-258 end to end: read the real child's environment from the OS, not the dict
-    # the supervisor built, and prove a sentinel secret in the api env is not there.
+_SENTINELS = {
+    "DATABASE_URL": "postgres://su:r9-258-sentinel@db/persona",
+    "STRIPE_SECRET_KEY": "sk_live_r9-258-sentinel",
+    "OPENAI_API_KEY": "sk-r9-258-sentinel",
+}
+
+
+def _os_environ_of(pid: int) -> dict[str, str]:
+    """The env the OS holds for ``pid``: procfs on Linux (no dependency, never skips).
+
+    psutil only where procfs is absent (Windows, macOS); it is not a declared
+    dependency, so off Linux a missing psutil skips.
+    """
+    if sys.platform.startswith("linux"):
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+        pairs = (item.split(b"=", 1) for item in raw.split(b"\0") if b"=" in item)
+        return {k.decode(errors="replace"): v.decode(errors="replace") for k, v in pairs}
     psutil = pytest.importorskip("psutil")
-    sentinels = {
-        "DATABASE_URL": "postgres://su:r9-258-sentinel@db/persona",
-        "STRIPE_SECRET_KEY": "sk_live_r9-258-sentinel",
-        "OPENAI_API_KEY": "sk-r9-258-sentinel",
-    }
-    for name, value in sentinels.items():
+    return dict(psutil.Process(pid).environ())
+
+
+def _assert_clean(env: dict[str, str]) -> None:
+    upper = {name.upper() for name in env}
+    assert not upper & set(_SENTINELS)
+    assert not any("r9-258-sentinel" in value for value in env.values())
+    assert "PATH" in upper
+
+
+@pytest.mark.parametrize("server", ["calculator", "weather"])
+async def test_spawned_child_boots_and_cannot_see_a_parent_secret(
+    server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # R9-258 end to end: read the real child's environment from the OS, not the dict
+    # the supervisor built. weather is the one built-in with extra names (CA bundle,
+    # proxies); it boots here only, no outbound call.
+    for name, value in _SENTINELS.items():
         monkeypatch.setenv(name, value)
-    sup = BuiltinMCPSupervisor(("calculator",))
+    sup = BuiltinMCPSupervisor((server,))
     try:
-        assert await sup.ensure("calculator") is not None  # the child still boots
-        proc = sup._states["calculator"].proc
+        assert await sup.ensure(server) is not None  # the child boots under the filtered env
+        proc = sup._states[server].proc
         assert proc is not None
-        child_env = psutil.Process(proc.pid).environ()
-        upper = {name.upper() for name in child_env}
-        assert not upper & set(sentinels)
-        assert not any("r9-258-sentinel" in value for value in child_env.values())
-        assert "PATH" in upper
+        _assert_clean(_os_environ_of(proc.pid))
     finally:
         await sup.aclose()
