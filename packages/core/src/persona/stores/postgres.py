@@ -749,16 +749,22 @@ def _move_links(
     }
     if found != {prior: (supersedes[prior][0], None) for prior in priors}:
         raise _chain_conflict(persona_id, store_kind)
+    # The lock above is what makes the comparison exact. The UPDATE says the same thing again and
+    # counts what it moved, so the move stays right if that lock were ever lost (PR #39 review).
     for prior in priors:
-        conn.execute(
+        moved = conn.execute(
             _memory_chunks.update()
             .where(
                 _memory_chunks.c.persona_id == persona_id,
                 _memory_chunks.c.kind == store_kind,
                 _memory_chunks.c.id == prior,
+                _memory_chunks.c.version == supersedes[prior][0],
+                _memory_chunks.c.superseded_by.is_(None),
             )
             .values(superseded_by=supersedes[prior][1])
         )
+        if moved.rowcount != 1:
+            raise _chain_conflict(persona_id, store_kind)
 
 
 def _is_deadlock(exc: OperationalError) -> bool:
