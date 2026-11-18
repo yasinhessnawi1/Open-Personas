@@ -30,7 +30,12 @@ from persona.tools.mcp.catalog import (
     mcp_server_entry,
     recommender_provider_tag,
 )
-from persona_runtime.cost import PricedRound, least_certain_basis, price_rounds
+from persona_runtime.cost import (
+    CENTS_ROUND_DECIMALS,
+    PricedRound,
+    least_certain_basis,
+    price_rounds,
+)
 from persona_runtime.routing import served_identity
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -388,11 +393,15 @@ async def _generate_stream(
 def _cost_event(
     cost_cents: float, basis: CostBasis, prompt_tokens: int, completion_tokens: int
 ) -> tuple[Literal["cost"], AuthoringCost]:
-    """Build the ``("cost", AuthoringCost)`` event (the summed authoring-turn cost)."""
+    """Build the ``("cost", AuthoringCost)`` event (the summed authoring-turn cost).
+
+    The draft's and the repair's costs are summed by the caller; the sum is rounded
+    once here, to micro-cents, so float noise (0.1 + 0.2) never reaches the ceil.
+    """
     return (
         "cost",
         AuthoringCost(
-            cost_cents=cost_cents,
+            cost_cents=round(cost_cents, CENTS_ROUND_DECIMALS),
             cost_basis=basis,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

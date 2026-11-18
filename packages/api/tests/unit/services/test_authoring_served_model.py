@@ -141,3 +141,12 @@ async def test_a_failed_try_that_cost_tokens_is_in_the_drafts_charge() -> None:
     assert cost.cost_cents == pytest.approx(2.4)
     assert (cost.prompt_tokens, cost.completion_tokens) == (4000, 1600)
     assert cost.cost_basis == "estimate_static"
+
+
+@pytest.mark.asyncio
+async def test_the_drafts_two_attempts_are_rounded_once_with_no_float_noise() -> None:
+    """0.1 + 0.2 cents is 0.30000000000000004 in floats; the recorded cost must be 0.3."""
+    first = _Member("openrouter", "z-ai/glm-4.6", [BAD], fail_on=(1,), cost_usd=0.001)
+    repair = _Member("openrouter", "qwen/qwen3-30b-a3b", [GOOD], cost_usd=0.002)
+    cost = await _cost(MultiModelChatBackend([first, repair]))  # type: ignore[list-item]
+    assert cost.cost_cents == 0.3

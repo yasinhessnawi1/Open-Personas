@@ -159,3 +159,21 @@ async def test_a_distiller_failed_try_with_no_tokens_bills_nothing() -> None:
             failed_tries=(_zero_try(),),  # type: ignore[arg-type]
         )
         assert cost.result() == (0.0, None)
+
+
+@pytest.mark.asyncio
+async def test_a_legs_steps_are_summed_and_rounded_once_before_the_ceil() -> None:
+    """0.1 + 2.7 + 0.2 cents is 3.0000000000000004 in floats, which ceils to 4 credits.
+
+    The leg total is rounded once to micro-cents, so it is 3.0 and bills 3.
+    """
+    from persona.billing import BillingConfig, credits_charged
+
+    steps = [("openrouter", "z-ai/glm-4.6", usd) for usd in (0.001, 0.027, 0.002)]
+    cents, basis = await _leg(*steps)
+    assert cents == 3.0
+    assert basis == "actual_openrouter"
+    charge = credits_charged(
+        provider_cents=cents, infra_flat_cents=0.0, markup=BillingConfig().credit_markup, floor=1
+    )
+    assert charge == 3

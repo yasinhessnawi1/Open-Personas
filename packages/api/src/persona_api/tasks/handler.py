@@ -68,7 +68,12 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import PricedRound, least_certain_basis, price_rounds
+from persona_runtime.cost import (
+    CENTS_ROUND_DECIMALS,
+    PricedRound,
+    least_certain_basis,
+    price_rounds,
+)
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -372,7 +377,10 @@ class _LegCost:
         basis: str | None = steps_basis
         if not steps_priced and distilled_basis is not None:
             basis = distilled_basis
-        return self._step_cents + distilled_cents, basis
+        # Rounded once, to the micro-cents every part is priced in: a float sum of
+        # steps such as 0.1 + 2.7 + 0.2 lands on 3.0000000000000004, and the charge ceils
+        # the printed value, so an unrounded total bills an extra credit.
+        return round(self._step_cents + distilled_cents, CENTS_ROUND_DECIMALS), basis
 
     def ledger_spend(
         self,
