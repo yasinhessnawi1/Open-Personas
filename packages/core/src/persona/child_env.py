@@ -1,16 +1,18 @@
-"""The allow-listed environment a built-in MCP child starts with (R9-258).
+"""The allow-listed environment a subprocess of the api starts with (R9-258).
 
 The api process holds database DSNs, model provider keys, Stripe and Clerk keys and
-connector tokens. A built-in MCP child needs none of them, so it must not inherit
-them: a compromised or prompt-injected child could read its own environment.
+connector tokens. Its subprocesses (the built-in MCP children, the git clones of the
+catalog syncs) need none of them, so they must not inherit them: a compromised child
+could read its own environment, and a same-uid child could read a sibling's
+``/proc/<pid>/environ`` while it runs.
 
 The rule is default deny. A child gets exactly:
 
-- the names in :data:`BASE_CHILD_ENV`, which every built-in needs to start
+- the names in :data:`BASE_CHILD_ENV`, which every such child needs to start
   (interpreter, OS runtime, locale, temp dir, the baked tiktoken cache, logging);
-- the names its own server declares as ``CHILD_ENV`` in its module, collected next
-  to the registration in :data:`persona.tools.mcp.builtin.SERVER_CHILD_ENV`;
-- any value the launcher sets for that one spawn (``overrides``), such as the
+- the names its own kind adds: a built-in MCP server declares ``CHILD_ENV`` in its
+  module, collected in :data:`persona.tools.mcp.builtin.SERVER_CHILD_ENV`;
+- any value the caller sets for that one spawn (``overrides``), such as the
   filesystem scope root.
 
 Names are listed one by one. No name passes by prefix or pattern, so a new secret
@@ -26,7 +28,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["BASE_CHILD_ENV", "build_child_env"]
+__all__ = ["BASE_CHILD_ENV", "OUTBOUND_HTTPS_ENV", "build_child_env"]
 
 #: POSIX process basics. USER and LOGNAME matter: the data uid has no passwd entry
 #: in the image, so getpass.getuser() needs them (R9-292).
@@ -104,6 +106,25 @@ _APP = frozenset(
 
 #: The names every built-in MCP child receives from the api env, when set there.
 BASE_CHILD_ENV: frozenset[str] = _POSIX | _LOCALE | _WINDOWS | _PYTHON | _APP
+
+#: What a child that calls out over HTTPS needs: the CA bundle names and the proxy
+#: names (both cases), so it still gets out where the operator routes egress through
+#: a proxy. A proxy URL can carry proxy credentials; it is allowed only to the
+#: children that call out. SSLKEYLOGFILE is deliberately not here.
+OUTBOUND_HTTPS_ENV: frozenset[str] = frozenset(
+    {
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    }
+)
 
 #: Windows env names are case-insensitive, so there a name matches whatever its case.
 _FOLD_CASE = sys.platform == "win32"

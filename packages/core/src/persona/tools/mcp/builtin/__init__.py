@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from persona.tools.mcp.builtin._child_env import build_child_env
+from persona.child_env import build_child_env
 from persona.tools.mcp.builtin._harness import (
     DEFAULT_BIND_HOST,
     STREAMABLE_HTTP_TRANSPORT,

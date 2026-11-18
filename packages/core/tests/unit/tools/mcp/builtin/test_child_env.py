@@ -12,8 +12,9 @@ import re
 import sys
 
 import pytest
-from persona.tools.mcp.builtin import SERVER_BUILDERS, SERVER_CHILD_ENV, _child_env, child_env
-from persona.tools.mcp.builtin._child_env import BASE_CHILD_ENV, build_child_env
+from persona import child_env as _child_env
+from persona.child_env import BASE_CHILD_ENV, build_child_env
+from persona.tools.mcp.builtin import SERVER_BUILDERS, SERVER_CHILD_ENV, child_env
 
 #: Secrets an api process really holds, by name. None may reach a child.
 _NAMED_SECRETS = (

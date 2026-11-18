@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from persona.child_env import OUTBOUND_HTTPS_ENV
+
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
@@ -32,20 +34,7 @@ __all__ = ["CHILD_ENV", "build", "fetch_weather"]
 #: where the operator routes egress through a proxy. A proxy URL can carry proxy
 #: credentials; that is the one secret-bearing value allowed, because the
 #: outbound call needs it. SSLKEYLOGFILE is deliberately left out.
-CHILD_ENV: frozenset[str] = frozenset(
-    {
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    }
-)
+CHILD_ENV: frozenset[str] = OUTBOUND_HTTPS_ENV
 
 _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
