@@ -125,39 +125,116 @@ def test_a_park_that_loses_to_a_pause_keeps_the_pause(engine: Engine) -> None:
     assert parked.paused is True
 
 
-def test_a_completion_that_loses_to_a_pause_still_completes(engine: Engine) -> None:
-    """A lost race decides again: the completion re-reads the paused row and completes it,
-    clearing the pause (R9-158: a finished task holds nothing)."""
+def test_a_completion_that_loses_to_a_cancel_does_not_undo_the_cancel(engine: Engine) -> None:
+    """The leg's ``complete`` reads ACTIVE, the user's Cancel lands, then the completion writes.
+    A read-modify-write stored COMPLETED over the cancel the user had just pressed. The compare
+    misses, the completion decides again on the CANCELLED row, and the entity refuses."""
     store = TaskStore(engine)
     _active_task(store)
     other = TaskStore(engine)
 
+    with pytest.raises(TaskStateError):
+        store._transition(
+            _OWNER,
+            _TASK,
+            "task.complete",
+            _racing(
+                lambda: other.cancel(_OWNER, _TASK, now=_LATER),
+                lambda t: t.complete(now=_LATER),
+            ),
+        )
+
+    assert store.get(_OWNER, _TASK).state is TaskState.CANCELLED
+
+
+def test_a_pause_racing_a_change_of_wait_keeps_the_new_wait(engine: Engine) -> None:
+    """The wait kind is part of what is compared. A Pause reads WAITING(until_time); before it
+    writes, the task resumes and parks again on a question, WAITING(on_user), so state and
+    pause match what Pause read and only the wait kind differs. Comparing state and pause alone
+    let Pause write its stale ``until_time`` back over the question the task now waits on."""
+    store = TaskStore(engine)
+    _active_task(store)
+    store.begin_wait(_OWNER, _TASK, WaitKind.UNTIL_TIME, now=_NOW)
+    other = TaskStore(engine)
+
+    def _resumed_and_asked() -> None:
+        other.resume(_OWNER, _TASK, now=_LATER)
+        other.begin_wait(_OWNER, _TASK, WaitKind.ON_USER, now=_LATER)
+
     store._transition(
         _OWNER,
         _TASK,
-        "task.complete",
-        _racing(
-            lambda: other.pause(_OWNER, _TASK, now=_LATER),
-            lambda t: t.complete(now=_LATER),
-        ),
+        "task.pause",
+        _racing(_resumed_and_asked, lambda t: t.pause(now=_LATER)),
     )
 
     final = store.get(_OWNER, _TASK)
-    assert (final.state, final.paused) == (TaskState.COMPLETED, False)
+    assert (final.state, final.wait_kind, final.paused) == (
+        TaskState.WAITING,
+        WaitKind.ON_USER,
+        True,
+    )
 
 
-def test_a_cancel_that_loses_to_a_completion_reports_the_task_finished(engine: Engine) -> None:
-    """The cancel door checked the task was live, then the leg completed it before the cancel
-    landed. A lost race is not a server error: the completion stands and the door says the
-    task had already finished (``None``), exactly as it would have a moment earlier."""
+def test_a_cancel_that_loses_to_a_completion_reports_the_task_finished(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real race through the cancel door: the cancel's transition reads ACTIVE, the leg's
+    completion commits, then the cancel writes. Before the compare-and-set the cancel landed
+    over the completion; now the completion stands and the door answers that the task had
+    already finished (``None``) instead of raising a server error."""
     from persona_api.services import task_control_service
 
     store = TaskStore(engine)
     live = _active_task(store)
-    store.complete(_OWNER, _TASK, now=_LATER)
+    other = TaskStore(engine)
+    original_cancel = Task.cancel
+    fired = False
+
+    def _cancel_after_the_leg_completes(self: Task, *, now: datetime) -> Task:
+        nonlocal fired
+        if not fired:
+            fired = True
+            other.complete(_OWNER, _TASK, now=_LATER)
+        return original_cancel(self, now=now)
+
+    monkeypatch.setattr(Task, "cancel", _cancel_after_the_leg_completes)
 
     summary = task_control_service.cancel_task(engine, _OWNER, live, now=_LATER)
 
     assert summary is None
     final = store.get(_OWNER, _TASK)
     assert (final.state, final.paused) == (TaskState.COMPLETED, False)
+
+
+# --- F: the pause door says what actually stopped it ------------------------------------
+
+
+def test_a_pause_that_loses_to_a_pause_says_already_paused(engine: Engine) -> None:
+    """The door's snapshot is unpaused, but another Pause landed first. The transition then
+    meets an already-paused row; that is "Already paused.", not "already finished"."""
+    from persona_api.services import task_control_service
+
+    store = TaskStore(engine)
+    stale = _active_task(store)
+    store.pause(_OWNER, _TASK, now=_LATER)
+
+    outcome = task_control_service.pause_task(engine, _OWNER, stale, now=_LATER)
+
+    assert (outcome.changed, outcome.note) == (False, "Already paused.")
+
+
+def test_a_pause_whose_task_kept_changing_says_so(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every compare misses (the row changes under each attempt), so the transition gives up.
+    The task is live and unpaused: the honest answer is to try again, not "already finished"."""
+    from persona_api.services import task_control_service
+
+    store = TaskStore(engine)
+    live = _active_task(store)
+    monkeypatch.setattr(TaskStore, "_persist_state", lambda *_a, **_k: False)
+
+    outcome = task_control_service.pause_task(engine, _OWNER, live, now=_LATER)
+
+    assert (outcome.changed, outcome.note) == (False, task_control_service.PAUSE_RACED_NOTE)

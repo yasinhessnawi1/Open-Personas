@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
 __all__ = [
+    "PAUSE_RACED_NOTE",
     "PICKUP_AUDIT_ACTION",
     "PICKUP_REPLY",
     "ControlOutcome",
@@ -167,6 +168,10 @@ def _continuation(engine: Engine, queue: JobQueue | None = None) -> TaskContinua
     )
 
 
+#: What Pause says when the task kept changing under it and the transition gave up (R9-247).
+PAUSE_RACED_NOTE = "This task changed while it was being paused, so it was not paused. Try again."
+
+
 def pause_task(engine: Engine, owner_id: str, task: Task, *, now: datetime) -> ControlOutcome:
     """Pause: no new legs, a running leg stops at its next boundary (D-W1-21), and the schedule
     stops firing (R9-108). One pause for every door (route, chat verb)."""
@@ -177,10 +182,22 @@ def pause_task(engine: Engine, owner_id: str, task: Task, *, now: datetime) -> C
         return ControlOutcome(task=task, changed=False, note="Already paused.")
     if is_terminal(task.state):
         return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+    store = TaskStore(engine)
     try:
-        paused = TaskStore(engine).pause(owner_id, task.id, now=now)
+        paused = store.pause(owner_id, task.id, now=now)
     except TaskStateError:
-        return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+        # The snapshot above was live and unpaused, so something changed before the pause
+        # landed (R9-247: the transition compares, and a lost race decides again). Say what
+        # the row now holds: a finished task, a pause that landed first, or a task that kept
+        # changing until the transition gave up, which is worth one more try.
+        current = store.get(owner_id, task.id)
+        if is_terminal(current.state):
+            note = "This task has already finished."
+        elif current.paused:
+            note = "Already paused."
+        else:
+            note = PAUSE_RACED_NOTE
+        return ControlOutcome(task=current, changed=False, note=note)
     mirror_schedule_pause(engine, owner_id, paused, paused=True)
     return ControlOutcome(task=paused, changed=True)
 
