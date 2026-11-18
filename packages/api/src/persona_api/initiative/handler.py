@@ -245,6 +245,7 @@ class InitiativeScanHandler:
             prompt_tokens=totals.prompt_tokens,
             completion_tokens=totals.completion_tokens,
             cost_usd=totals.cost_usd,
+            failed_tries=totals.failed_tries,
             surface="initiative_scan",
             billing_key=f"initiative_scan:{payload.persona_id}:{payload.fire_time.isoformat()}",
             cost_source=self._cost_source,

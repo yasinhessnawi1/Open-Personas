@@ -166,6 +166,28 @@ async def test_the_usage_sink_records_the_model_that_served_each_call(
 
 
 @pytest.mark.asyncio
+async def test_the_usage_sink_carries_a_failed_try_that_cost_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-ORCH-11-18-s: the head's empty completion was billed (1 in, 1 out); the sink keeps
+    it, at the head's own model, for the background op to be charged for it."""
+    head = _Member("openrouter", "openai/gpt-oss-120b", "")
+    spare = _Member("groq", "openai/gpt-oss-120b", "an answer")
+    chain = MultiModelChatBackend([head, spare], max_retries_per_backend=0)  # type: ignore[list-item]
+    wrapper, _ = _wrapped(chain, monkeypatch)
+    with collect_llm_usage() as sink:
+        await wrapper.chat(_MESSAGES)
+    (wasted,) = sink.totals().failed_tries
+    assert (wasted.provider, wasted.model, wasted.error_class) == (
+        "openrouter",
+        "openai/gpt-oss-120b",
+        "EmptyCompletionError",
+    )
+    assert wasted.usage is not None
+    assert (wasted.usage.prompt_tokens, wasted.usage.completion_tokens) == (1, 1)
+
+
+@pytest.mark.asyncio
 async def test_the_usage_sink_records_the_served_model_of_a_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

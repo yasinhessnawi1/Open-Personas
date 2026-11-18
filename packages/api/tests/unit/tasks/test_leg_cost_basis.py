@@ -95,3 +95,30 @@ async def test_a_steps_failed_try_that_cost_tokens_is_in_the_legs_cost() -> None
         cents, basis = cost.result()
     assert cents == pytest.approx(0.75)
     assert basis == "estimate_static"
+
+
+@pytest.mark.asyncio
+async def test_the_distillers_failed_try_that_cost_tokens_is_in_the_legs_cost() -> None:
+    """The distiller's own call (D-W1-44) is charged for its failed try too."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    wasted = BackendAttempt(
+        index=0,
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=1000, completion_tokens=0, total_tokens=1000),
+    )
+    with collect_llm_usage() as distillation:
+        cost = _LegCost(None, distillation)
+        distillation.record(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            prompt_tokens=1000,
+            completion_tokens=100,
+            cost_usd=None,
+            failed_tries=(wasted,),
+        )
+        cents, basis = cost.result()
+    assert cents == pytest.approx(0.75)  # the distillation 0.45 plus its failed try 0.3
+    assert basis == "estimate_static"

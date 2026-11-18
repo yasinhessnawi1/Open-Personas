@@ -85,3 +85,32 @@ def test_fail_soft_swallows_billing_errors() -> None:
     # Must NOT raise — a billing hiccup can never break the background op.
     _bill(policy)
     assert len(policy.calls) == 1  # it was attempted, the error was swallowed
+
+
+def _wasted(cost_usd: float | None = 0.004) -> object:
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    return BackendAttempt(
+        index=0,
+        provider="openrouter",
+        model="primary",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(
+            prompt_tokens=500, completion_tokens=0, total_tokens=500, cost_usd=cost_usd
+        ),
+    )
+
+
+def test_a_failed_try_that_cost_tokens_is_in_the_ops_charge() -> None:
+    """D-ORCH-11-18-s: the op's 3.0 cent answer plus its failed try's 0.4 cent actual."""
+    policy = _FakePolicy()
+    _bill(policy, failed_tries=(_wasted(),))
+    kw = policy.calls[-1]
+    assert kw["cost_cents"] == pytest.approx(3.4)
+    assert kw["amount"] == 4  # one ceil over the op, the failed try inside it
+
+
+def test_an_op_whose_only_cost_is_a_failed_try_is_still_charged() -> None:
+    policy = _FakePolicy()
+    _bill(policy, prompt_tokens=0, completion_tokens=0, cost_usd=None, failed_tries=(_wasted(),))
+    assert policy.calls[-1]["cost_cents"] == pytest.approx(0.4)

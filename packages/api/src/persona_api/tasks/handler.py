@@ -68,7 +68,7 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import PricedRound, compute_turn_cost, least_certain_basis, price_rounds
+from persona_runtime.cost import PricedRound, least_certain_basis, price_rounds
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -339,15 +339,22 @@ class _LegCost:
         not distil bills exactly what it billed before.
         """
         totals = self._distillation.totals()
-        if not totals.prompt_tokens and not totals.completion_tokens:
+        if not totals.prompt_tokens and not totals.completion_tokens and not totals.failed_tries:
             return 0.0, None
-        return compute_turn_cost(
-            provider=totals.provider,
-            model=totals.model,
-            prompt_tokens=totals.prompt_tokens,
-            completion_tokens=totals.completion_tokens,
-            actual_cost_usd=totals.cost_usd,
+        # One round, its failed tries charged at their own model (D-ORCH-11-18-s).
+        return price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=totals.prompt_tokens,
+                    completion_tokens=totals.completion_tokens,
+                    cost_usd=totals.cost_usd,
+                    provider=totals.provider,
+                    model=totals.model,
+                    failed_tries=totals.failed_tries,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg_distillation",
         )
 
     def result(self) -> tuple[float, str | None]:
