@@ -807,3 +807,38 @@ async def test_a_failed_try_that_cost_tokens_reaches_the_meter_as_unrecovered(
         "EmptyCompletionError",
         700,
     )
+
+
+class _UsageFirstBackend(_Backend):
+    """Sends its usage before its reply, so the chain holds it back until commit."""
+
+    async def chat_stream(self, messages: list[Any], **_kwargs: Any) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        yield StreamChunk(
+            delta="", usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        )
+        yield StreamChunk(delta=f"Hi from {self.model_name}. ", is_final=True)
+
+
+async def test_a_held_back_usage_chunk_is_billed_at_the_fallback_that_released_it(
+    ended: _EndedLines,
+) -> None:
+    """The usage chunk reaches the producer BEFORE the payload that committed the chain.
+
+    It is the chunk the meter prices from, so it must carry the fallback's identity even
+    though the chain held it back and released it at commit; unstamped, the round would be
+    billed at the chain's own (primary) names.
+    """
+    primary = _Backend("nvidia", "primary-model", [_RATE_LIMIT])
+    fallback = _UsageFirstBackend("anthropic", "fallback-model", [])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain)
+    meter = _MeterFeed()
+    producer.set_turn_meter(meter)  # type: ignore[arg-type]
+
+    await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
+
+    assert meter.llm == [("anthropic", "fallback-model")]
+    assert _ended(ended) == ("completed", "anthropic", "fallback-model")
