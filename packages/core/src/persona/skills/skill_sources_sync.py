@@ -18,6 +18,7 @@ import subprocess  # noqa: S404 — git clone of operator/curated repos; offline
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from persona.child_env import git_env
 from persona.logging import get_logger
 from persona.skills.skill_mirror_reconcile import SkillMirrorSyncResult, reconcile_skill_mirror
 from persona.skills.sources.anthropic import ingest_anthropic_skills
@@ -187,11 +188,14 @@ def clone_at_ref(repo_url: str, ref: str | None, dest: Path) -> SourceCheckout:
         _log.warning(
             "git not on PATH — skill source sync cannot clone; keeping the last-good skill mirror"
         )
+    # R9-258: one scrubbed env for every git call, never the api's DSNs, keys or tokens.
+    env = git_env()
     subprocess.run(  # noqa: S603 — fixed argv, no shell; repo is a constant/operator arg
         ["git", "clone", "--depth", "1", repo_url, str(dest)],  # noqa: S607 — git on PATH by design
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
     if ref is not None:
         subprocess.run(  # noqa: S603
@@ -199,17 +203,20 @@ def clone_at_ref(repo_url: str, ref: str | None, dest: Path) -> SourceCheckout:
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         subprocess.run(  # noqa: S603
             ["git", "-C", str(dest), "checkout", ref],  # noqa: S607
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
     commit = subprocess.run(  # noqa: S603
         ["git", "-C", str(dest), "rev-parse", "HEAD"],  # noqa: S607
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     ).stdout.strip()
     return SourceCheckout(root=dest, repo_url=repo_url, commit=commit)

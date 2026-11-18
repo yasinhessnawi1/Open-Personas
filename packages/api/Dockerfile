@@ -92,8 +92,11 @@ ENV PERSONA_AUDIT_ROOT=/var/lib/persona/audit \
     PERSONA_TURNLOG_PATH=/var/lib/persona/turnlogs
 
 EXPOSE 8000
+# R9-258: the probe runs in this container with its whole env, as the api's uid. Exec
+# form and `env -i`: no shell, and curl gets an empty env, so a built-in MCP child
+# cannot read a secret from the probe's /proc/<pid>/environ. Same probe as compose.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
+    CMD ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "/usr/bin/curl", "-fsS", "http://127.0.0.1:8000/livez"]
 
 # Single uvicorn worker (S08-4). Set proxy headers because the VPS terminates TLS upstream.
 CMD ["uvicorn", "persona_api.app:create_app", "--factory", \
