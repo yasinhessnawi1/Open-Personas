@@ -30,11 +30,12 @@ oversight (``recent`` and ``band_histogram`` are noted on their methods):
   Postgres and two calls on Chroma, delete first, so the forgotten text goes on both. The
   rewrite is planned from a read, and another writer can land in between. Postgres locks the
   chain and compares it with that read inside the transaction, so a stale plan never lands:
-  the forget reads again and plans again. Chroma makes the same comparison just before it
-  acts, which catches a writer that landed after the read but not one landing inside the
-  excise itself. A stale plan that lands there leaves a chain with a version missing, which
-  ``persona repair`` refuses and will not settle, so that memory's history raises until a
-  person looks at it. Its current version still reads.
+  the forget reads again and plans again. Chroma makes the same comparison under the folder's
+  lock, which every write in the process also takes (R9-271), so within one process no writer
+  lands inside the excise. A writer in another process on the same folder still can, and a
+  stale plan that lands then leaves a chain with a version missing, which ``persona repair``
+  refuses and will not settle, so that memory's history raises until a person looks at it.
+  Its current version still reads.
 - **A write that must still find what it read** (``upsert`` with ``supersedes`` and
   ``requires``, R9-271). Postgres locks the evidence ``FOR KEY SHARE`` and the superseded
   versions ``FOR UPDATE``, each in id order, compares, and writes, in one transaction, so a
