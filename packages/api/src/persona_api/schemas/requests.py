@@ -11,7 +11,7 @@ from datetime import datetime  # noqa: TC003 — a runtime Pydantic field type
 from typing import Literal
 
 from persona.schedules import RecurrencePattern  # noqa: TC001 — a runtime Pydantic field type
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 __all__ = [
     "ApprovalDecisionRequest",
@@ -32,6 +32,7 @@ __all__ = [
     "PostMessageRequest",
     "RefinePersonaRequest",
     "RespondToRunRequest",
+    "SetInitiativeHoldRequest",
     "StartRunRequest",
     "TaskAttachmentIn",
     "TurnIntoFileRequest",
@@ -549,3 +550,22 @@ class PackCheckoutRequest(_Input):
     """
 
     pack: Literal["5", "10", "25", "50"]
+
+
+class SetInitiativeHoldRequest(_Input):
+    """Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).
+
+    ``released`` true says the persona may draw on what it learned in the conversation when it
+    reaches out unprompted; false undoes that. A release carries ``version``, the count the
+    user saw in the control's read, so a disclosure recorded since is never released unseen.
+    """
+
+    released: bool
+    version: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _a_release_names_what_was_seen(self) -> SetInitiativeHoldRequest:
+        if self.released and self.version is None:
+            msg = "a release needs the version the control was read at"
+            raise ValueError(msg)
+        return self

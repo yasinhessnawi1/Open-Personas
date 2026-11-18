@@ -286,3 +286,39 @@ def test_a_release_lifts_the_sibling_but_never_the_conversation_or_the_tagged_no
     _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
     again = _as(_OWNER, lambda: check.tagged_refs(_OWNER, cited, include_unsynthesised=True))
     assert again == {_DINNER, _TAGGED, "conv-d"}, "a disclosure after the release holds it again"
+
+
+def test_the_control_reads_and_changes_only_the_owners_conversation(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    from persona_api.errors import ConversationNotFoundError  # noqa: PLC0415
+    from persona_api.initiative.conversation_hold import ConversationHoldService  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    store = build_graph_store(
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
+    )
+    service = ConversationHoldService(store, app_engine)
+    assert _as(_OWNER, lambda: service.read(_OWNER, "conv-d")).state == "not_held"
+    _as(_OWNER, lambda: PgDisclosureStore(app_engine).record(_OWNER, _PERSONA, "conv-d"))
+    held = _as(_OWNER, lambda: service.read(_OWNER, "conv-d"))
+    assert (held.state, held.version) == ("held", 1)
+
+    with pytest.raises(ConversationNotFoundError):
+        _as(_OTHER, lambda: service.read(_OTHER, "conv-d"))
+    with pytest.raises(ConversationNotFoundError):
+        _as(
+            _OTHER,
+            lambda: service.change(_OTHER, "conv-d", released=True, version=1, at=_AT),
+        )
+
+    done = _as(_OWNER, lambda: service.change(_OWNER, "conv-d", released=True, version=1, at=_AT))
+    assert (done.state, done.released_at) == ("released", _AT)
+    undone = _as(
+        _OWNER, lambda: service.change(_OWNER, "conv-d", released=False, version=None, at=_AT)
+    )
+    assert undone.state == "held"
