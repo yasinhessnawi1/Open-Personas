@@ -715,3 +715,69 @@ def test_the_same_answer_saved_concurrently_counts_as_saved_once(
 
     assert saved is SavedReply.ALREADY_SAVED
     assert len(chain) == 2
+
+
+# --- the review's N2: a lost race is not reported as a failure ------------------------------
+
+
+def test_a_cancel_landing_before_the_hold_moves_the_task_is_answered_as_finished(
+    engine: Engine,
+    client: TestClient,
+    enqueued: list[str],
+    chain: _Chain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply is saved; the user cancels after the hold read the task WAITING and before
+    it moves it, so the hold's WAITING to ACTIVE move meets a cancelled task. That is a
+    finished task, not a hold that failed and a pointer to Raise cap."""
+    from persona_api.services.task_control_service import REPLY_SAVED_TASK_FINISHED_NOTE
+
+    store = _waiting_on_a_question(engine, chain, spent=_CAP)
+    original_resume = TaskStore.resume
+
+    def _cancelled_first(self: TaskStore, owner_id: str, task_id: str, *, now: datetime) -> Task:
+        store.cancel(owner_id, task_id, now=now)  # lands after hold() read the task WAITING
+        return original_resume(self, owner_id, task_id, now=now)
+
+    monkeypatch.setattr(TaskStore, "resume", _cancelled_first)
+
+    assert _reply(client, "Use the joint account.") == (
+        200,
+        True,
+        REPLY_SAVED_TASK_FINISHED_NOTE,
+    )
+    assert store.get(_OWNER, "t1").state is TaskState.CANCELLED
+    assert enqueued == []
+
+
+def test_a_pause_landing_before_the_fallback_pause_counts_as_held(
+    engine: Engine,
+    client: TestClient,
+    enqueued: list[str],
+    chain: _Chain,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The budget pause fails, and the user's own Pause lands just before the plain pause
+    that stands in for it, so that plain pause meets an already-paused task. The task is
+    paused either way, which is what the hold wanted: it is held, not a failure."""
+    from persona_api.approvals.budget import BudgetEnforcer
+
+    store = _waiting_on_a_question(engine, chain, spent=_CAP)
+
+    def _gate_fails(*_a: object, **_k: object) -> bool:
+        raise RuntimeError("row lock timed out")
+
+    original_pause = TaskStore.pause
+
+    def _the_users_pause_lands_first(
+        self: TaskStore, owner_id: str, task_id: str, *, now: datetime
+    ) -> Task:
+        original_pause(self, owner_id, task_id, now=now)  # the user's Pause
+        return original_pause(self, owner_id, task_id, now=now)  # the fallback's: already paused
+
+    monkeypatch.setattr(BudgetEnforcer, "enforce", _gate_fails)
+    monkeypatch.setattr(TaskStore, "pause", _the_users_pause_lands_first)
+
+    assert _reply(client, "Use the joint account.") == (200, True, REPLY_SAVED_AT_THE_CAP_NOTE)
+    assert _shape(store) == (TaskState.ACTIVE, None, True)
+    assert enqueued == []

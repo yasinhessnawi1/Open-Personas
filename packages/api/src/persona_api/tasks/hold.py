@@ -37,6 +37,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from persona.errors import TaskStateError
 from persona.logging import get_logger
 from persona.tasks import (
     CheckpointKind,
@@ -238,7 +239,13 @@ class TaskHold:
         """
         task = self._tasks.get(owner_id, task_id)
         if task.state is TaskState.WAITING:
-            task = self._tasks.resume(owner_id, task_id, now=now)
+            try:
+                task = self._tasks.resume(owner_id, task_id, now=now)
+            except TaskStateError:
+                # Lost a race (the review's N2): a cancel landed after the read above.
+                if is_terminal(self._tasks.get(owner_id, task_id).state):
+                    return HoldOutcome.FINISHED
+                raise
         if reason is HoldReason.BUDGET:
             self._pause_at_the_cap(owner_id, task, now=now)
         current = self._tasks.get(owner_id, task_id)
@@ -272,7 +279,13 @@ class TaskHold:
             )
             current = self._tasks.get(owner_id, task.id)
             if not current.paused and not is_terminal(current.state):
-                self._tasks.pause(owner_id, task.id, now=now)
+                try:
+                    self._tasks.pause(owner_id, task.id, now=now)
+                except TaskStateError:
+                    # A Pause or a cancel landed first; the hold's own re-read then decides.
+                    now_is = self._tasks.get(owner_id, task.id)
+                    if not (now_is.paused or is_terminal(now_is.state)):
+                        raise
 
     def _at_the_cap(self, owner_id: str, task: Task) -> bool:
         from persona_api.approvals.budget import BudgetState
