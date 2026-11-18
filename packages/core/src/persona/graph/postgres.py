@@ -484,9 +484,12 @@ class PostgresGraphBackend:
         changed) and the write guard (the entry's persona and conversation are held first).
         ``False`` if the node is gone. ``updated_at`` advances, as for any node write.
         """
+        # Appended in SQL, under the CAS on the trail as read (review round 3).
+        appended = graph_nodes.c.provenance.concat(
+            func.jsonb_build_array(literal(entry.model_dump(mode="json"), JSONB))
+        )
         with self._engine.begin() as conn:
             self._hold_personas(conn, owner_id, [entry.persona_id], cites=[entry])
-            trail = [p.model_dump(mode="json") for p in (*expected_provenance, entry)]
             written = conn.execute(
                 update(graph_nodes)
                 .where(
@@ -495,7 +498,7 @@ class PostgresGraphBackend:
                     graph_nodes.c.content_hash == expected_content_hash,
                     trail_is(expected_provenance),
                 )
-                .values(provenance=trail, updated_at=datetime.now(UTC))
+                .values(provenance=appended, updated_at=datetime.now(UTC))
                 .returning(graph_nodes.c.id)
             ).first()
             if written is None:

@@ -375,7 +375,8 @@ def test_restating_a_fact_in_another_conversation_records_that_conversation() ->
     eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
     before, _ = b.nodes["u1::node::00000000"]
 
-    out = eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-d")))
+    said_on_a_call = _said_in("conv-d").model_copy(update={"channel": "voice"})
+    out = eng.merge("u1", _cand("works as a nurse", provenance=said_on_a_call))
 
     after, _ = b.nodes["u1::node::00000000"]
     assert out.action is MergeAction.EXTENDED
@@ -388,6 +389,7 @@ def test_restating_a_fact_in_another_conversation_records_that_conversation() ->
     assert entry.grounding is None, "a slim entry: none of D's words are stored again"
     assert entry.reason == merge_module.RESTATED_REASON
     assert (entry.interaction_kind, entry.persona_id) == ("conversation", "persona-a")
+    assert entry.channel == "voice", "the surface it was restated on is kept"
 
 
 def test_a_restatement_never_re_embeds_the_node() -> None:

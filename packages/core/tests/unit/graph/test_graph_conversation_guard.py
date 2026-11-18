@@ -360,8 +360,9 @@ def test_append_provenance_writes_the_trail_only_under_the_node_cas() -> None:
     )
 
     (update,) = captured
-    assert set(update.params) >= {"provenance", "updated_at"}
+    assert "updated_at" in update.params
     assert not {"embedding", "embedding_model", "content"} & set(update.params)
     sql = str(update)
+    assert "SET provenance=(graph_nodes.provenance || jsonb_build_array(" in sql, "appended in SQL"
     assert "graph_nodes.content_hash = %(content_hash_1)s" in sql, "the hash the merge read"
     assert "jsonb_strip_nulls(graph_nodes.provenance) = jsonb_strip_nulls(" in sql, "and trail"

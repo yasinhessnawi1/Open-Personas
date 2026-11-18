@@ -447,7 +447,7 @@ class MergeEngine:
         A fact restated in another conversation (or through another persona) is supported
         there too. Without an entry for it, forgetting the first conversation, or erasing the
         first persona, would delete a fact the second still supports. The entry is slim: who
-        and where (source, persona, interaction and its kind, when), reason
+        and where (source, persona, interaction and its kind, channel, when), reason
         :data:`RESTATED_REASON`, no grounding, so none of the restatement's words are stored
         again. Only the trail is written (``append_provenance``): content, name, metadata,
         embedding and its model stay, the content hash does not change, and no version is
@@ -467,6 +467,7 @@ class MergeEngine:
             interaction_kind=said.interaction_kind,
             written_at=said.written_at,
             reason=RESTATED_REASON,
+            channel=said.channel,
         )
         written = self._backend.append_provenance(
             owner_id,
