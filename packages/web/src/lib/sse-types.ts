@@ -206,6 +206,13 @@ export interface ChatDoneData {
   /** Spec 31 — SEPARATE additive routing (D-31-1) + budget (D-31-2) fields. */
   routing?: RoutingSummary;
   budget?: BudgetSnapshot;
+  /**
+   * A decision cue answered as an approval ends the stream with one `done` whose `kind` is
+   * `approval_resolved` (routes/conversations.py). Its `note` says why the task waits when
+   * the decision was carried out but the next leg is held (D-ORCH-11-18-d (2)).
+   */
+  kind?: string;
+  note?: string;
 }
 
 /** A parsed chat SSE event, discriminated by the `event:` name. */

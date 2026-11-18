@@ -161,4 +161,55 @@ describe("ApprovalCard", () => {
       reflectionKey({ status: "pending", edited: false }, null),
     ).toBeNull();
   });
+
+  it("says the approved action ran and why the task waits while it is paused", () => {
+    // D-ORCH-11-18-d (2): the decision is carried out; only the next leg waits.
+    const { getByText } = renderCard({
+      outcome: "approve",
+      status: "consumed",
+      note: "held_paused",
+    });
+    expect(getByText("Approved.")).toBeTruthy();
+    expect(
+      getByText(
+        "The task is paused, so it carries on from here when you resume it.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("points a held approval at the cap to Raise cap", () => {
+    const { getByText } = renderCard({
+      outcome: "deny",
+      status: "denied",
+      note: "held_at_cap",
+    });
+    expect(getByText("Denied.")).toBeTruthy();
+    expect(
+      getByText(
+        "The task has used its budget, so it carries on from here when you raise the cap with Raise cap on the task page.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says plainly when the task could not be set to carry on", () => {
+    const { getByText } = renderCard({
+      outcome: "approve",
+      status: "consumed",
+      note: "hold_failed",
+    });
+    expect(
+      getByText(
+        "The task could not be set to carry on by itself. Pick it up from the task page when you want it to continue.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("adds nothing for an approval whose task carried straight on", () => {
+    const { container } = renderCard({
+      outcome: "approve",
+      status: "consumed",
+      note: "",
+    });
+    expect(container.querySelector('[data-slot="approval-held"]')).toBeNull();
+  });
 });

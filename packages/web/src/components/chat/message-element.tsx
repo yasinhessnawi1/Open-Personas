@@ -53,6 +53,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
 import type { ActivityView } from "@/lib/activity";
 import type { OutputContent } from "@/lib/api/output-content";
+import type { HeldNoteKey } from "@/lib/approvals/held-note";
 import { stripToolCallMarkup } from "@/lib/chat/strip-tool-call-markup";
 import { operationFor, projectToolResult } from "@/lib/normalisers/_classify";
 import { personaIdentityStyle } from "@/lib/persona-identity";
@@ -138,6 +139,11 @@ export interface MessageElementView {
    * `originated` flag, so the "started this" badge shows live and on reload alike.
    */
   originated?: boolean;
+  /**
+   * An approval answered in this chat was carried out, but the task's next step waits (it
+   * is paused, or at its budget cap). Set from the live `approval_resolved` done frame.
+   */
+  approvalHeld?: HeldNoteKey;
   tools?: ToolEntry[];
   /** D-F2-15: ordered event log. When present, MessageElement renders interleaved. */
   events?: MessageEvent[];
@@ -576,6 +582,9 @@ function PersonaMessage({
           {message.streaming ? (
             <ActivityState activities={message.activities} />
           ) : null}
+          {message.approvalHeld ? (
+            <ApprovalHeldNote held={message.approvalHeld} />
+          ) : null}
         </div>
 
         {/* R9-025a: copy / retry / read-aloud — a terminal-only turn action
@@ -661,6 +670,19 @@ function PersonaMessage({
  * store-colour pulse. The `.v-recall-dot[data-store]` rule colours the dot from
  * the store token; the line reads "Recalling from <store> memory".
  */
+/**
+ * Why the task waits after an approval answered in chat was carried out. The copy lives with
+ * the approvals inbox's (`approvals.held`), so the card and the chat say the same sentence.
+ */
+function ApprovalHeldNote({ held }: { held: HeldNoteKey }) {
+  const t = useTranslations("approvals");
+  return (
+    <p className="text-sm text-muted-foreground" data-slot="approval-held">
+      {t(`held.${held}`)}
+    </p>
+  );
+}
+
 function RecallState({
   recall,
 }: {
