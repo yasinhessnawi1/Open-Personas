@@ -538,6 +538,21 @@ class CheckpointStore:
         Raises:
             CheckpointTooLargeError: If the checkpoint's accumulating core exceeds the budget.
         """
+        return self.append_applied(task, checkpoint, spend=spend, now=now)[0]
+
+    def append_applied(
+        self,
+        task: Task,
+        checkpoint: TaskCheckpoint,
+        *,
+        spend: Mapping[SpendKind, int] | None = None,
+        now: datetime,
+    ) -> tuple[Task, bool]:
+        """:meth:`append`, and whether the compare-and-set applied (PR 34 review, E).
+
+        A caller that must not claim it wrote something it did not (a saved reply on a
+        double submit) reads the flag; a leg's re-delivery is content with :meth:`append`.
+        """
         enforce_checkpoint_budget(checkpoint, token_budget=self._budget)
         seq = checkpoint.checkpoint_seq
         predecessor = seq - 1 if seq > 0 else None
@@ -548,7 +563,10 @@ class CheckpointStore:
         with rls_connection(self._engine, task.owner_id) as conn:
             conn.execute(
                 pg_insert(checkpoints_t)
-                .values(**checkpoint_values(checkpoint, task.owner_id))
+                # The row id is minted here rather than by Postgres's server default, in the
+                # same text form, so the community engine (which has no such default) can
+                # write a checkpoint too.
+                .values(id=str(uuid.uuid4()), **checkpoint_values(checkpoint, task.owner_id))
                 .on_conflict_do_nothing(constraint="uq_task_checkpoints_task_seq")
             )
             result = conn.execute(
@@ -573,14 +591,14 @@ class CheckpointStore:
             for kind, micros in (spend or {}).items():
                 advanced = advanced.record_spend(kind, micros, now=now)
             self._audit_append(task.owner_id, advanced, checkpoint)
-            return advanced
+            return advanced, True
         # Re-delivery: the head already advanced past seq-1 → a clean no-op (the CAS truth).
         _log.info(
             "checkpoint append no-op (re-delivery)",
             task_id=task.id,
             checkpoint_seq=seq,
         )
-        return self._read_task(task.owner_id, task.id)
+        return self._read_task(task.owner_id, task.id), False
 
     # --- internals ----------------------------------------------------------
 

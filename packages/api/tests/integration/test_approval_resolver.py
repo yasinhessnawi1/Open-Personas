@@ -36,7 +36,7 @@ from persona_api.approvals import (
     InboxDecision,
 )
 from persona_api.tasks.continuation import TaskContinuation
-from persona_api.tasks.hold import APPROVAL_HELD_WHILE_PAUSED_NOTE, TaskHold
+from persona_api.tasks.hold import APPROVAL_HELD_WHILE_PAUSED, TaskHold
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -254,7 +254,7 @@ async def test_an_approval_answered_after_a_pause_is_carried_out_and_held(
     assert (len(executor.calls), outcome.resumed, outcome.note, queue.enqueued) == (
         1,
         False,
-        APPROVAL_HELD_WHILE_PAUSED_NOTE,
+        APPROVAL_HELD_WHILE_PAUSED,
         [],
     )
     task = tasks.get("user_a", "t1")

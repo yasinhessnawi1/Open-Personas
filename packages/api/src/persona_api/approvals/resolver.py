@@ -439,14 +439,28 @@ class ApprovalResolver:
         paused afterwards would stay WAITING with nothing left to move it; at the cap the leg
         would run at zero budget. So the task is held ACTIVE under its pause instead, where
         Resume or Raise cap carries it on from this decision (D-ORCH-11-18-d (2)). Returns
-        whether a leg was queued and the note the user is shown.
+        whether a leg was queued and the note (a code the web renders) the user is shown.
+
+        The hold decides again after it moves the task (PR 34 review): a Resume or Raise cap
+        that landed after the read below leaves the task carried on, which is answered as an
+        ordinary resumed approval. The action has already run, so a hold that fails is logged
+        and answered with ``hold_failed`` rather than raised: the inbox must not show an
+        error for a decision that was carried out.
         """
         if self._hold is not None:
-            from persona_api.tasks.hold import held_approval_note
+            from persona_api.tasks.hold import APPROVAL_HOLD_FAILED, HoldOutcome, held_approval_note
 
             reason = self._hold.reason(owner_id, self._tasks.get(owner_id, task_id))
             if reason is not None:
-                self._hold.hold(owner_id, task_id, reason, now=now)
+                try:
+                    where = self._hold.hold(owner_id, task_id, reason, now=now)
+                except Exception:  # noqa: BLE001 - the decision ran; answer, never a 500
+                    _log.exception("approval carried out but the hold failed", task_id=task_id)
+                    return False, APPROVAL_HOLD_FAILED
+                if where is HoldOutcome.CARRIED_ON:
+                    return True, ""
+                if where is HoldOutcome.FINISHED:
+                    return False, ""
                 return False, held_approval_note(reason)
         self._continuation.resume(owner_id, task_id, UserReply(reply=reply), now=now)
         return True, ""
