@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from persona.errors import ForgottenEvidenceError
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.core_memory import CORE_MEMORY_KIND, CORE_SOURCE_IDS_KEY, core_logical_id
 from persona.stores.summarizer import assemble_summarizer_input
@@ -68,6 +69,7 @@ class CoreMemoryWriter(Protocol):
         written_by: str | None = ...,
         reason: str | None = ...,
         force: bool = ...,
+        requires: Sequence[str] = ...,
     ) -> None: ...
 
     def current(self, persona_id: str) -> PersonaChunk | None: ...
@@ -165,18 +167,18 @@ async def refresh_core_block(
     With no sources there is no evidence left, so the block goes too: a summary must not
     outlive what it summarises (K8-D-14, R9-209).
 
-    The sources are checked twice, because they were selected before a model call that takes
-    seconds and a forget can land at any point in it. Before the write, so a block that is
-    already stale is not written. After it, because a forget can also land between that check
-    and the write, and then this write can put back what the forget took.
+    The sources were selected before a model call that takes seconds, and a forget can land at
+    any point in it. They are checked before the write, so a block that is already stale is not
+    written. Then the write itself requires them (R9-271): it lands only if every source is still
+    there when it does, and on Postgres it holds them while it lands, so a forget either waits
+    for the block and then removes it, or goes first and the block is refused. A refused block is
+    dropped, not rebuilt: the next pass rebuilds from what remains, without paying for a second
+    model call now (D-ORCH-11-18-l). The write also moves the prior head's link only if that head
+    is still there at the version it was read, so a forget of the prior head cannot be undone by
+    this write either.
 
-    The second check covers the whole chain, not only this block's sources. The write links the
-    prior head to the new one by writing the prior head again, text and all, so a forget that
-    deleted the prior head in that window gets it back as a superseded version, citing what the
-    person asked to forget, while this block cites none of it (round 2 review, R2-M1).
-    ``EpisodicStore.remove_documents`` deletes the evidence before the blocks, so whatever this
-    write puts back is citing evidence that is already gone, which is exactly what the sweep
-    finds.
+    The sweep after the write stays as the second line. It covers what the guard cannot: rows
+    restored from before it, and a Chroma folder written by two processes at once.
     """
     block = await build_core_block(
         summarizer=summarizer, sources=sources, target_tokens=target_tokens
@@ -187,7 +189,16 @@ async def refresh_core_block(
     if store.missing_sources(persona_id, block.source_ids):
         return None  # the next pass rebuilds from what remains
     chunk = core_block_to_chunk(block, persona_id, now=now)
-    store.write(persona_id, [chunk], source=WriteSource.SYSTEM, written_by=written_by)
+    try:
+        store.write(
+            persona_id,
+            [chunk],
+            source=WriteSource.SYSTEM,
+            written_by=written_by,
+            requires=block.source_ids,
+        )
+    except ForgottenEvidenceError:
+        return None  # a forget took some of the sources during the model call
     gone = store.orphaned_citations(persona_id)
     if gone:
         store.forget_cited(persona_id, gone, written_by=written_by)

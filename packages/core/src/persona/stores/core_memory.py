@@ -69,6 +69,9 @@ class CoreMemoryStore(TypedStore):
     _POLICY: ClassVar[PolicyTable] = {
         WriteSource.SYSTEM: PolicyRule(decision=PolicyDecision.ACCEPT),
     }
+    #: A block cites raw memory, so a write citing it is checked where a citation can be
+    #: (R9-271): the same kinds :meth:`missing_sources` and the sweep look in.
+    _EVIDENCE_KINDS: ClassVar[tuple[str, ...]] = _EVIDENCE_KINDS
 
     def __init__(self, *, backend: Any, audit_logger: Any) -> None:  # noqa: ANN401 — composes via base
         super().__init__(backend=backend, audit_logger=audit_logger)
