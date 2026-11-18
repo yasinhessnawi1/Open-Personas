@@ -23,6 +23,7 @@ from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules import ScheduleStore
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.hold import REPLY_SAVED_AT_THE_CAP_NOTE, HoldReason, TaskHold
 from persona_api.tasks.store import CheckpointStore, TaskStore
 
 if TYPE_CHECKING:
@@ -360,6 +361,11 @@ def reply_to_task(
 ) -> ControlOutcome:
     """Answer a task that waits on the user: the reply rides into its next leg (D-W1-4).
 
+    At the budget cap the reply is saved instead (R9-240, D-ORCH-11-18-d (3)): it becomes
+    the task's head checkpoint and the task takes the budget pause, so Raise cap carries it
+    on from the answer. A further reply before Raise cap is saved the same way, so nothing
+    the user types is lost. A reply to a task the user paused is still refused (D-W1-10).
+
     Raises:
         ApprovalPendingError: The task's wait is a pending approval; that is answered as an
             approval (approve / decline), never as free text past the gate.
@@ -371,6 +377,9 @@ def reply_to_task(
 
     if is_terminal(task.state):
         return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+    hold = TaskHold(engine)
+    if hold.holds_a_saved_reply(owner_id, task):
+        return _save_reply(hold, owner_id, task, reply, now=now)
     if task.state is not TaskState.WAITING or task.wait_kind is not WaitKind.ON_USER:
         return ControlOutcome(task=task, changed=False, note="This task is not waiting on you.")
     pending = ApprovalStore(engine).get_pending_for_task(owner_id, task.id)
@@ -382,9 +391,21 @@ def reply_to_task(
     held, why, owner_paused = _blocked(engine, owner_id, task)
     if held:
         return ControlOutcome(task=task, changed=False, note=why, owner_paused=owner_paused)
+    if hold.reason(owner_id, task) is HoldReason.BUDGET:
+        return _save_reply(hold, owner_id, task, reply, now=now)
     _continuation(engine).resume(owner_id, task.id, UserReply(reply=reply), now=now)
     _log.info("task replied to", task_id=task.id)
     return ControlOutcome(task=task, changed=True)
+
+
+def _save_reply(
+    hold: TaskHold, owner_id: str, task: Task, reply: str, *, now: datetime
+) -> ControlOutcome:
+    """Keep a reply that arrived at the cap, and hold the task for Raise cap (R9-240)."""
+    saved = hold.save_reply(owner_id, task, reply, now=now)
+    held = hold.hold(owner_id, saved.id, HoldReason.BUDGET, now=now)
+    _log.info("reply saved at the budget cap; next leg waits for Raise cap", task_id=task.id)
+    return ControlOutcome(task=held, changed=True, note=REPLY_SAVED_AT_THE_CAP_NOTE)
 
 
 def retry_task(

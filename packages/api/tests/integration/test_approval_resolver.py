@@ -36,6 +36,7 @@ from persona_api.approvals import (
     InboxDecision,
 )
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.hold import APPROVAL_HELD_WHILE_PAUSED_NOTE, TaskHold
 from persona_api.tasks.store import CheckpointStore, TaskStore
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -159,6 +160,7 @@ def _resolver(
     interp: _FakeInterpreter,
     *,
     artifacts: tuple[PersistedArtifact, ...] = (),
+    hold: TaskHold | None = None,
     **extra: object,
 ) -> tuple:
     approvals = ApprovalStore(engine)
@@ -176,6 +178,7 @@ def _resolver(
         interpreter=interp,
         executor=executor,
         notifier=notifier,
+        hold=hold,
     )
     return resolver, approvals, checkpoints, executor, notifier, queue
 
@@ -227,6 +230,35 @@ async def test_the_resolution_checkpoint_carries_the_query_and_source_ledgers(
     assert head.sources_seen == ("https://lovdata.no/a",)
     # R9-220, on Postgres's JSONB: two checkpoints, one of them a leg.
     assert checkpoints.count_legs("user_a", "t1") == 1
+
+
+async def test_an_approval_answered_after_a_pause_is_carried_out_and_held(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """R9-239 part 1, on Postgres under RLS: the task parked on the approval, the user paused
+    it, then approved. The action runs once, no leg is queued (the claim would consume it),
+    and the task is held ACTIVE under its pause so Resume carries it on (D-ORCH-11-18-d (2))."""
+    from persona.tasks import TaskState
+
+    _seed(migrated_engine, "user_a", "persona_a")
+    resolver, approvals, _c, executor, _n, queue = _resolver(
+        app_engine, _approve(), hold=TaskHold(app_engine)
+    )
+    tasks = TaskStore(app_engine)
+    _waiting_task(tasks, owner="user_a", persona="persona_a", task_id="t1")
+    tasks.pause("user_a", "t1", now=_NOW)
+    approvals.create_proposal(_proposal("user_a", "persona_a", "t1"))
+
+    outcome = await resolver.resolve("user_a", "p1", "yes send it", "telegram", now=_NOW)
+
+    assert (len(executor.calls), outcome.resumed, outcome.note, queue.enqueued) == (
+        1,
+        False,
+        APPROVAL_HELD_WHILE_PAUSED_NOTE,
+        [],
+    )
+    task = tasks.get("user_a", "t1")
+    assert (task.state, task.paused) == (TaskState.ACTIVE, True)
 
 
 # --- verbatim proposal-replay -----------------------------------------------

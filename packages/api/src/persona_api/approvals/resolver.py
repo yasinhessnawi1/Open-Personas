@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
     from persona_api.approvals.store import ApprovalStore
     from persona_api.tasks.continuation import TaskContinuation
+    from persona_api.tasks.hold import TaskHold
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
 __all__ = [
@@ -186,7 +187,9 @@ class ApprovalResolver:
         interpreter: ReplyInterpreter,
         executor: ActionExecutor,
         notifier: ApprovalNotifier,
+        hold: TaskHold | None = None,
     ) -> None:
+        self._hold = hold
         self._approvals = approvals
         self._tasks = tasks
         self._checkpoints = checkpoints
@@ -389,17 +392,19 @@ class ApprovalResolver:
             new=ProposalStatus.CONSUMED,
             now=now,
         )
-        self._continuation.resume(owner_id, proposal.task_id, UserReply(reply=reply), now=now)
+        resumed, note = self._resume_or_hold(owner_id, proposal.task_id, reply, now)
         _log.info(
-            "approved action executed + resumed",
+            "approved action executed",
             proposal_id=proposal.proposal_id,
             task_id=proposal.task_id,
+            resumed=resumed,
         )
         return ResolutionOutcome(
             outcome=DecisionType.APPROVE,
             executed=True,
             executed_arguments=dict(exec_arguments),
-            resumed=True,
+            resumed=resumed,
+            note=note,
         )
 
     def _deny_and_resume(
@@ -421,8 +426,30 @@ class ApprovalResolver:
             conclusion=f"User denied: {proposal.description}. Adapt the plan or report.",
             now=now,
         )
-        self._continuation.resume(owner_id, proposal.task_id, UserReply(reply=reply), now=now)
-        return ResolutionOutcome(outcome=DecisionType.DENY, resumed=True)
+        resumed, note = self._resume_or_hold(owner_id, proposal.task_id, reply, now)
+        return ResolutionOutcome(outcome=DecisionType.DENY, resumed=resumed, note=note)
+
+    def _resume_or_hold(
+        self, owner_id: str, task_id: str, reply: str, now: datetime
+    ) -> tuple[bool, str]:
+        """Queue the next leg, or hold it when the task cannot run (R9-239 part 1).
+
+        The decision has been carried out and folded into the head by now. A paused task's
+        leg would be consumed at the claim, and a task that parked on this approval and was
+        paused afterwards would stay WAITING with nothing left to move it; at the cap the leg
+        would run at zero budget. So the task is held ACTIVE under its pause instead, where
+        Resume or Raise cap carries it on from this decision (D-ORCH-11-18-d (2)). Returns
+        whether a leg was queued and the note the user is shown.
+        """
+        if self._hold is not None:
+            from persona_api.tasks.hold import held_approval_note
+
+            reason = self._hold.reason(owner_id, self._tasks.get(owner_id, task_id))
+            if reason is not None:
+                self._hold.hold(owner_id, task_id, reason, now=now)
+                return False, held_approval_note(reason)
+        self._continuation.resume(owner_id, task_id, UserReply(reply=reply), now=now)
+        return True, ""
 
     def _write_resolution_checkpoint(
         self,

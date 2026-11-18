@@ -143,9 +143,13 @@ MAX_RECENT_LEG_SUMMARIES = 5
 #: WAITING_USER is the leg stopping on a question only the user can move, whose reply is
 #: refused while paused (D-W1-10). Every other outcome is held until Resume, which
 #: re-enqueues from the head (D-W1-30): CONTINUE's next leg and FAILED's retry would be jobs
-#: the claim consumes, and an approval park would strand the task, because an approval
-#: answered while paused enqueues a leg the claim consumes and Resume only clears a waiting
-#: task's overlay.
+#: the claim consumes. WAITING_APPROVAL was held too because, when this was written, an
+#: approval answered while paused enqueued a leg the claim consumed and Resume only cleared
+#: a waiting task's overlay, which stranded the task. Since R9-239 the resolver holds that
+#: leg instead (``persona_api.tasks.hold``: the decision is carried out and the task moves
+#: to ACTIVE under its pause, where Resume carries it on), so an approval park would no
+#: longer strand here. Keeping it held is unchanged behaviour; moving it into this set is a
+#: separate decision (a held gated leg re-runs on Resume and re-proposes).
 _SETTLED_UNDER_A_PAUSE: Final = frozenset({LegDisposition.COMPLETED, LegDisposition.WAITING_USER})
 
 
