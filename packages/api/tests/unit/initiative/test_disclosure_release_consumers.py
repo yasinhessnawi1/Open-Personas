@@ -263,6 +263,33 @@ def test_the_judge_reads_context_notes_learned_in_a_released_conversation(
     assert [n.content for n in notes] == ["from released"]
 
 
+def test_the_judge_reads_no_notes_from_a_released_conversation_synthesis_has_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 delta review N1: the judge's context asks for freshness on the honoured path."""
+
+    def note(content: str, source: str) -> Any:
+        return SimpleNamespace(
+            id=content, content=content, created_at=_BEFORE, provenance=[{"interaction_id": source}]
+        )
+
+    rows = [note("from released, unread", "conv-d"), note("from elsewhere", "conv-c")]
+
+    class _Conn:
+        def execute(self, *_: Any) -> Any:
+            return SimpleNamespace(all=lambda: rows)
+
+    @contextmanager
+    def connection(_engine: Any, _owner: str) -> Iterator[_Conn]:
+        yield _Conn()
+
+    monkeypatch.setattr(readers, "rls_connection", connection)
+    gate = _gate(monkeypatch, _Graph(_TAGGED))
+    monkeypatch.setattr(gate, "unsynthesised", lambda _owner, ids: {"conv-d"} & set(ids))
+    notes = judge_context(object(), gate, "u", "n-anchor", limit=5)  # type: ignore[arg-type]
+    assert [n.content for n in notes] == ["from elsewhere"]
+
+
 def test_the_judges_context_read_drops_tagged_notes_in_sql() -> None:
     """Mutant 6: the tagged filter is the query's, independent of any release."""
     sql = str(readers._CONTEXT_SQL)  # noqa: SLF001
