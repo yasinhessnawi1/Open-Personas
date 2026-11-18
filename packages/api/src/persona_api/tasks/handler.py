@@ -57,6 +57,7 @@ from persona.tasks import (
     LegBox,
     RecentLegSummary,
     ResumeTrigger,
+    Revived,
     ScheduledFire,
     SpendKind,
     TaskState,
@@ -869,7 +870,20 @@ class TaskLegHandler:
             except CreditsExhaustedError:
                 _log.info("task leg skipped (no credits)", task_id=task.id, state=task.state.value)
                 return
-        # The job firing IS the trigger arriving — resume a waiting task (one resume point).
+        # R9-239 (part 2): a Revived leg is only ever queued for a task that is not waiting
+        # (Resume on a paused live task, Raise cap, the stranded sweep). Finding the task
+        # waiting on the user means it parked on a question after the enqueue: a pause
+        # tripped the leg, Resume was pressed after its checkpoint landed, and the tripped
+        # step then asked. Resuming here would run the next leg without the answer, so the
+        # job is consumed and the task keeps waiting for the reply, which carries it on.
+        if (
+            task.state == TaskState.WAITING
+            and task.wait_kind is WaitKind.ON_USER
+            and isinstance(payload.trigger, Revived)
+        ):
+            _log.info("task leg skipped (stale resume; waiting on the user)", task_id=task.id)
+            return
+        # The job firing IS the trigger arriving: resume a waiting task (one resume point).
         if task.state == TaskState.WAITING:
             task = self._tasks.resume(owner, payload.task_id, now=now)
         # Finding O: the contract's deadline and leg cap, checked at the door for a leg the
