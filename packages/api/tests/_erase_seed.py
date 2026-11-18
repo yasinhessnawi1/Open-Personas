@@ -21,7 +21,7 @@ from persona.stores.chroma import ChromaBackend
 from persona_api.db.community import create_community_schema, make_community_engine
 from persona_api.db.models import metadata
 from persona_api.storage import LocalFileStorage
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, select
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, inspect, select
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -298,6 +298,25 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
             message_key="k",
             params={},
         )
+    _persona_disclosures(conn, owner, pid)
+
+
+def _persona_disclosures(conn: Connection, owner: str, pid: str) -> None:
+    """R9-253's disclosure facts: one on a live conversation, one on a conversation now gone.
+
+    Postgres editions only (the legacy SQLite build has no graph, so no such table). The second
+    fact names no row that still exists, so only the persona's own cascade can remove it.
+    """
+    if not inspect(conn).has_table("wellbeing_disclosures"):
+        return
+    for interaction in (conversation_of(pid), f"goneconv_{pid[-6:]}"):
+        row(
+            conn,
+            "wellbeing_disclosures",
+            owner_id=owner,
+            persona_id=pid,
+            interaction_id=interaction,
+        )
 
 
 def _persona_memory(memory: Backend, pid: str) -> None:
@@ -477,6 +496,8 @@ PERSONA_TABLES: dict[str, str] = {
     "skill_consents": "cascade",
     "suspended_personas": "cascade",
     "tasks": "cascade",
+    # R9-253: the disclosure fact outlives its node and its conversation, never its persona.
+    "wellbeing_disclosures": "cascade",
 }
 
 JSON_COLUMNS: dict[str, str] = {
