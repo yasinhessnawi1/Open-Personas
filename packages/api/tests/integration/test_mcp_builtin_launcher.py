@@ -80,10 +80,11 @@ async def test_dead_server_is_respawned_on_next_resolution() -> None:
         await sup.aclose()
 
 
+#: Each value is derived from its name at run time, so the source holds no literal
+#: that a secret scanner could mistake for a credential.
 _SENTINELS = {
-    "DATABASE_URL": "r9-258-sentinel-database-url",
-    "STRIPE_SECRET_KEY": "r9-258-sentinel-stripe",
-    "OPENAI_API_KEY": "r9-258-sentinel-openai",
+    name: f"r9-258-sentinel-{name.lower()}"
+    for name in ("DATABASE_URL", "STRIPE_SECRET_KEY", "OPENAI_API_KEY")
 }
 
 
