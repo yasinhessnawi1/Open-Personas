@@ -84,14 +84,14 @@ class TaskSteeringPort(Protocol):
 
 
 def steering_reply(outcome: SteeringOutcome, acknowledgement: str) -> str:
-    """The reply to a steering verb: the control's note on a no-op, else the normal ack.
+    """The reply to a steering verb: the control's note whenever it has one, else the ack.
 
-    D-ORCH-11-18-d (4). A no-op with no note (none exists today) still gets the ack rather
-    than an empty reply.
+    D-ORCH-11-18-e (1), which widens D-ORCH-11-18-d (4): a resume that took can still carry
+    something the user needs ("Resumed, but your autonomy is paused, ..."), so the note is
+    spoken whether or not the task changed. No note means the plain acknowledgement, never
+    an empty reply.
     """
-    if not outcome.changed and outcome.note:
-        return outcome.note
-    return acknowledgement
+    return outcome.note or acknowledgement
 
 
 @runtime_checkable

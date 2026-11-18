@@ -199,9 +199,9 @@ class DelegatedTurnHandler:
                     "persona_id": persona_id,
                 }
             )
-            # R9-241: a pause or resume that changed nothing says why (the control's note),
-            # rather than "Done" over a refusal.
-            if steered is not None and not steered.changed and steered.note:
+            # R9-241, D-ORCH-11-18-e (1): the control's note is spoken whenever it has one
+            # (a refusal, or a resume that took under a paused autonomy), never "Done" over it.
+            if steered is not None and steered.note:
                 return DelegatedTurnOutcome.SUCCEEDED, steered.note
             verb = str(steer.get("verb", "updated"))
             return DelegatedTurnOutcome.SUCCEEDED, f"Done. I've {_verb_past(verb)} that task."

@@ -438,3 +438,60 @@ async def test_a_pause_that_took_gets_the_normal_acknowledgement() -> None:
     reply, _ = await _steer_in_chat(_Port(SteeringOutcome(changed=True)), "pause the fare check")
 
     assert reply == "Paused. Just say the word when you want it going again."
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_took_but_carries_a_note_says_the_note() -> None:
+    """D-ORCH-11-18-e (1): the note is spoken whenever there is one, not only on a no-op.
+    A resume that unpaused the task while the owner's autonomy is paused has changed the task
+    and still has something the user needs to hear."""
+    autonomy = "Resumed, but your autonomy is paused, so it won't run until you resume autonomy."
+    reply, _ = await _steer_in_chat(
+        _Port(SteeringOutcome(changed=True, note=autonomy)), "resume the fare check"
+    )
+
+    assert reply == autonomy
+
+
+@pytest.mark.asyncio
+async def test_the_voice_hand_back_on_the_port_wired_path_says_why() -> None:
+    """Production voice: the delegated turn's loop has the steering port, so the verb is
+    applied in the turn, no ``task_steering`` event is left, and the hand-back is the loop's
+    own reply. Driven the way ``DelegatedTurnHandler.handle`` drives it (events captured as
+    dicts, reply chunks joined) and resolved by the real ``_resolve_outcome``."""
+    from persona_api.jobs.handlers.delegated_turn import (
+        DelegatedTurnHandler,
+        DelegatedTurnOutcome,
+    )
+
+    port = _Port(SteeringOutcome(changed=False, note=_AT_THE_CAP))
+    loop = _make_loop(draft=_standing_draft(), with_steering=True, steering_port=port)
+    conv = Conversation(conversation_id="conv-voice", persona_id="astrid", messages=[])
+    events: list[dict[str, object]] = []
+    spoken: list[str] = []
+
+    async def on_event(ev: Any) -> None:  # noqa: ANN401
+        events.append(ev.model_dump(mode="json"))
+
+    async for chunk in loop.turn(conv, "resume the fare check", on_event=on_event):
+        if getattr(chunk, "delta", None):
+            spoken.append(chunk.delta)
+
+    handler = DelegatedTurnHandler(
+        runtime_factory=None,  # type: ignore[arg-type]
+        origination_service=None,  # type: ignore[arg-type]
+        steering_service=None,  # type: ignore[arg-type]  # never reached: no event is left
+        rls_engine=None,  # type: ignore[arg-type]
+    )
+    outcome = await handler._resolve_outcome(  # noqa: SLF001
+        conversation=conv,
+        events=events,
+        reply_text="".join(spoken).strip(),
+        owner_id="user-1",
+        conversation_id="conv-voice",
+        persona_id="astrid",
+        delegation_key="d1",
+    )
+
+    assert port.calls == [("resume", "task-fare")]
+    assert outcome == (DelegatedTurnOutcome.SUCCEEDED, _AT_THE_CAP)

@@ -63,3 +63,13 @@ async def test_a_spoken_pause_that_took_says_done() -> None:
         DelegatedTurnOutcome.SUCCEEDED,
         "Done. I've paused that task.",
     )
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_resume_that_took_with_a_note_says_the_note() -> None:
+    """D-ORCH-11-18-e (1): the note whenever there is one."""
+    autonomy = "Resumed, but your autonomy is paused, so it won't run until you resume autonomy."
+    assert await _spoken("resume", SteeringOutcome(changed=True, note=autonomy)) == (
+        DelegatedTurnOutcome.SUCCEEDED,
+        autonomy,
+    )
