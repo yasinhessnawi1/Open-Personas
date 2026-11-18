@@ -83,11 +83,19 @@ class _Waiter:
 
     def __init__(self, database_url: str) -> None:
         self.engine = create_engine(database_url, connect_args={"options": _GUARDED})
-        self.pids: set[int] = set()
+        self._pids: set[int] = set()
+        # Checkouts happen on the waiting side's own threads while the main thread reads.
+        self._pids_lock = threading.Lock()
         event.listen(self.engine, "checkout", self._record)
 
     def _record(self, dbapi_connection: Any, *_: object) -> None:  # noqa: ANN401 - the driver's
-        self.pids.add(int(dbapi_connection.info.backend_pid))
+        with self._pids_lock:
+            self._pids.add(int(dbapi_connection.info.backend_pid))
+
+    def pids(self) -> list[int]:
+        """A snapshot of every backend pid this side has used so far."""
+        with self._pids_lock:
+            return sorted(self._pids)
 
     def backend(self, embedder: HashEmbedder384) -> PostgresBackend:
         return PostgresBackend(engine=self.engine, embedder=embedder)  # type: ignore[arg-type]
@@ -102,17 +110,24 @@ def waiter(engine: Engine, database_url: str) -> Iterator[_Waiter]:
 
 
 def _waiting_on_a_lock(observer: Engine, waiter: _Waiter) -> str:
-    """Return the statement once one of ``waiter``'s own sessions is waiting on a lock."""
+    """Return a statement once one of ``waiter``'s own sessions is waiting on a lock.
+
+    More than one of them may be waiting; any one will do, the lowest pid first.
+    """
     deadline = time.monotonic() + _WAIT_S
     while time.monotonic() < deadline:
         with observer.connect() as conn:
-            waiting = conn.execute(
-                text(
-                    "SELECT query FROM pg_stat_activity "
-                    "WHERE pid = ANY(:pids) AND wait_event_type = 'Lock'"
-                ),
-                {"pids": sorted(waiter.pids)},
-            ).scalar_one_or_none()
+            waiting = (
+                conn.execute(
+                    text(
+                        "SELECT query FROM pg_stat_activity "
+                        "WHERE pid = ANY(:pids) AND wait_event_type = 'Lock' ORDER BY pid"
+                    ),
+                    {"pids": waiter.pids()},
+                )
+                .scalars()
+                .first()
+            )
         if waiting is not None:
             return str(waiting)
         time.sleep(0.02)
