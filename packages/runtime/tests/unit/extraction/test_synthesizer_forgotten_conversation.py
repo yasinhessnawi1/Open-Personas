@@ -154,3 +154,19 @@ async def test_a_link_lost_while_the_conversation_is_there_still_fails_the_job()
 
     with pytest.raises(GraphLinkTargetGoneError):
         await _synth_with(_LinkStore(), conversation_there=True).synthesise("u1", _input())
+
+
+@pytest.mark.asyncio
+async def test_a_lost_link_in_a_run_synthesis_is_never_taken_for_a_forget() -> None:
+    """A run's id names no conversation: whatever the lookup says, the job fails as before."""
+    from persona.graph.errors import GraphLinkTargetGoneError  # noqa: PLC0415
+
+    run = ExtractionInput(
+        interaction_kind=InteractionKind.AGENTIC_RUN,
+        interaction_id="run-1",
+        persona_id="persona-a",
+        content="the run",
+    )
+
+    with pytest.raises(GraphLinkTargetGoneError):
+        await _synth_with(_LinkStore(), conversation_there=False).synthesise("u1", run)

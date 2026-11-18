@@ -93,6 +93,10 @@ def _read_again(exc: Exception, own_persona: str | None) -> bool:
     return isinstance(exc, GraphStaleWriteError)
 
 
+#: The reason on a support entry: the fact was said again, and nothing about it changed.
+RESTATED_REASON = "restated"
+
+
 def accumulate(existing: str, addition: str) -> str:
     """Append ``addition`` to ``existing`` unless it is empty or already present.
 
@@ -156,6 +160,15 @@ class _MergeBackend(Protocol):
     def associate_entities(
         self, owner_id: str, node_id: str, entity_ids: Sequence[str]
     ) -> None: ...
+    def append_provenance(
+        self,
+        owner_id: str,
+        node_id: str,
+        entry: NodeProvenance,
+        *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+    ) -> bool: ...
 
 
 class MergeEngine:
@@ -429,33 +442,40 @@ class MergeEngine:
     def _record_support(
         self, owner_id: str, target: ConceptNode, candidate: KnowledgeCandidate
     ) -> None:
-        """Add the candidate's entry to a node that already says what it says (R9-304 review).
+        """Add a support entry to a node that already says what it says (R9-304 review).
 
         A fact restated in another conversation (or through another persona) is supported
-        there too. Without its entry, forgetting the first conversation, or erasing the first
-        persona, would delete a fact the second still supports. Only the trail grows: the
-        content, name and metadata stay, so the content hash does not change, and no version
-        is taken (this is ``update_node``, not a supersede). It goes through the node CAS and
-        the write guard like any added entry, so an entry citing a forgotten conversation is
-        refused. A source already on the trail (same interaction, persona and kind of source)
-        adds nothing, which keeps a re-merge idempotent (K2 crit 8).
+        there too. Without an entry for it, forgetting the first conversation, or erasing the
+        first persona, would delete a fact the second still supports. The entry is slim: who
+        and where (source, persona, interaction and its kind, when), reason
+        :data:`RESTATED_REASON`, no grounding, so none of the restatement's words are stored
+        again. Only the trail is written (``append_provenance``): content, name, metadata,
+        embedding and its model stay, the content hash does not change, and no version is
+        taken. It goes through the node CAS and the write guard like any added entry, so an
+        entry citing a forgotten conversation is refused. A source already on the trail (same
+        interaction, persona and kind of source) adds nothing, which keeps a re-merge
+        idempotent (K2 crit 8).
         """
-        entry = candidate.provenance
-        key = (entry.interaction_id, entry.persona_id, entry.source)
+        said = candidate.provenance
+        key = (said.interaction_id, said.persona_id, said.source)
         if any((p.interaction_id, p.persona_id, p.source) == key for p in target.provenance):
             return
-        node = target.model_copy(
-            update={"provenance": (*target.provenance, entry), "distance": None}
+        entry = NodeProvenance(
+            source=said.source,
+            persona_id=said.persona_id,
+            interaction_id=said.interaction_id,
+            interaction_kind=said.interaction_kind,
+            written_at=said.written_at,
+            reason=RESTATED_REASON,
         )
-        written = self._backend.update_node(
+        written = self._backend.append_provenance(
             owner_id,
-            node,
-            # The content is unchanged, so this is the embedding the row already holds.
-            self._embedder.encode([target.content])[0],
+            target.id,
+            entry,
             expected_content_hash=target.content_hash,
             expected_provenance=target.provenance,
         )
-        if written is None:
+        if not written:
             raise GraphStaleWriteError(
                 "extend target removed meanwhile", context={"node_id": target.id}
             )

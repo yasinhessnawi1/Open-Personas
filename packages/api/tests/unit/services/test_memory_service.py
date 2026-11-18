@@ -354,6 +354,28 @@ def test_node_detail_projects_provenance_evolution_and_typed_links() -> None:
     assert detail.links[0].neighbor.id == "leaf1"
 
 
+def test_a_restatement_is_not_a_step_in_the_timeline() -> None:
+    """R9-304 review round 2: a restatement records support and changes nothing visible."""
+    from persona.graph.merge import RESTATED_REASON  # noqa: PLC0415
+
+    trail = [
+        NodeProvenance(source=WriteSource.PERSONA_SELF, written_at=NOW, reason="first learned"),
+        NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            interaction_id="conv-d",
+            interaction_kind="conversation",
+            written_at=NOW,
+            reason=RESTATED_REASON,
+        ),
+    ]
+    store = _FakeStore([_node("hub", provenance=trail)], [])
+
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+
+    assert detail is not None
+    assert [e.reason for e in detail.evolution] == ["first learned"]
+
+
 def test_node_detail_carries_wellbeing_mark() -> None:
     store = _FakeStore([_node("grief_node", wellbeing="grief")], [])
     detail = memory_service.node_detail(store, "u1", "grief_node")  # type: ignore[arg-type]

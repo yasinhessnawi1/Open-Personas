@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from persona.extraction import InteractionKind
 from persona.graph.config import GraphSettings
+from persona.graph.merge import RESTATED_REASON
 from persona.graph.models import LinkType, TypedLink, make_edge_id
 from persona.graph.retrieval import HybridRetriever
 from persona.stores.episodic import EpisodicStore
@@ -416,6 +417,8 @@ def node_detail(
                 superseded_content=p.superseded_content,
             )
             for p in trail
+            # R9-304 review round 2: a restatement records support and changes nothing.
+            if p.reason != RESTATED_REASON
         ],
         links=links,
     )

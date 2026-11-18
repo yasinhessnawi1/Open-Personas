@@ -196,6 +196,12 @@ _WRITES = {
         lambda b: b.insert_edge_if_absent("u1", _edge(_from(_C))),
         "insert",
     ),
+    "append_provenance": (
+        lambda b: b.append_provenance(
+            "u1", "n1", _from(_C), expected_content_hash="h", expected_provenance=(_from(_D),)
+        ),
+        "update",
+    ),
     "insert_entity": (
         lambda b: b.insert_entity(
             "u1",
@@ -330,3 +336,32 @@ def test_another_integrity_error_is_not_relabelled() -> None:
 
     with pytest.raises(IntegrityError):
         _backend(engine).upsert_edge("u1", _edge(None))
+
+
+def test_append_provenance_writes_the_trail_only_under_the_node_cas() -> None:
+    """A restatement's write: no embedding, no model, no content (R9-304 review round 2)."""
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    captured: list[Any] = []
+
+    class _Capture(_Conn):
+        def execute(self, stmt: Any, params: dict[str, str] | None = None) -> _Result:  # noqa: ANN401
+            if str(stmt).startswith("UPDATE graph_nodes"):
+                captured.append(stmt.compile(dialect=postgresql.dialect()))
+            return super().execute(stmt, params)
+
+    class _CaptureEngine(_Engine):
+        def _open(self) -> _Conn:
+            self._next += 1
+            return _Capture(self, self._next)
+
+    assert _backend(_CaptureEngine()).append_provenance(
+        "u1", "n1", _from(_C), expected_content_hash="h", expected_provenance=(_from(_D),)
+    )
+
+    (update,) = captured
+    assert set(update.params) >= {"provenance", "updated_at"}
+    assert not {"embedding", "embedding_model", "content"} & set(update.params)
+    sql = str(update)
+    assert "graph_nodes.content_hash = %(content_hash_1)s" in sql, "the hash the merge read"
+    assert "jsonb_strip_nulls(graph_nodes.provenance) = jsonb_strip_nulls(" in sql, "and trail"

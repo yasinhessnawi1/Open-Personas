@@ -467,6 +467,42 @@ class PostgresGraphBackend:
                 _refuse_if_stale(conn, owner_id, node.id, current is not None)
         return None if surrogate is None else int(surrogate)
 
+    def append_provenance(
+        self,
+        owner_id: str,
+        node_id: str,
+        entry: NodeProvenance,
+        *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+    ) -> bool:
+        """Append one entry to a node's trail, and nothing else (R9-304 review round 2).
+
+        A restatement's support entry: content, metadata, embedding and embedding model are
+        not written, so the content hash stays and no version is taken. Under the node CAS
+        (the hash and trail the caller read, :class:`GraphStaleWriteError` if the row
+        changed) and the write guard (the entry's persona and conversation are held first).
+        ``False`` if the node is gone. ``updated_at`` advances, as for any node write.
+        """
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [entry.persona_id], cites=[entry])
+            trail = [p.model_dump(mode="json") for p in (*expected_provenance, entry)]
+            written = conn.execute(
+                update(graph_nodes)
+                .where(
+                    graph_nodes.c.id == node_id,
+                    graph_nodes.c.owner_id == owner_id,
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+                .values(provenance=trail, updated_at=datetime.now(UTC))
+                .returning(graph_nodes.c.id)
+            ).first()
+            if written is None:
+                _refuse_if_stale(conn, owner_id, node_id, None)
+                return False
+        return True
+
     def _update_node_statement(
         self,
         owner_id: str,

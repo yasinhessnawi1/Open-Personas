@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from persona.extraction import InteractionKind
 from persona.graph.errors import GraphInteractionGoneError, GraphLinkTargetGoneError
 from persona.graph.models import NodeProvenance
 from persona.graph.protocol import KnowledgeCandidate, ProposedLink
@@ -167,8 +168,14 @@ class Synthesizer:
         return outcomes
 
     def _forgotten(self, interaction: ExtractionInput) -> bool:
-        """Whether the interaction's conversation is gone (only asked after a lost link)."""
+        """Whether the interaction's conversation is gone (only asked after a lost link).
+
+        Only a conversation can be forgotten: a run's or a task's id names none, so a lost link
+        there is never swallowed as a forget.
+        """
         if self._conversation_exists is None:
+            return False
+        if interaction.interaction_kind is not InteractionKind.CONVERSATION:
             return False
         return not self._conversation_exists(interaction.interaction_id)
 
