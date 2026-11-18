@@ -785,10 +785,10 @@ async def test_the_turn_ended_line_reads_the_turns_own_stream_first(ended: _Ende
     assert _ended(ended) == ("completed", "anthropic", "this-turn")
 
 
-async def test_a_failed_try_that_cost_tokens_reaches_the_meter_as_unrecovered(
+async def test_a_failed_try_that_cost_tokens_reaches_the_meter(
     ended: _EndedLines,
 ) -> None:
-    """D1: the empty completion's tokens are carried to the meter to be logged, not charged."""
+    """The empty completion's tokens are carried to the meter, to be charged (D-ORCH-11-18-s)."""
     primary = _EmptyThenRateLimited("nvidia", "primary-model", [])
     fallback = _Backend("anthropic", "fallback-model", [_SPEAK])
     chain = MultiModelChatBackend(

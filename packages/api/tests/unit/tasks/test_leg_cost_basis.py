@@ -66,3 +66,32 @@ async def test_an_unpriced_step_never_relabels_a_priced_leg() -> None:
 async def test_a_leg_with_no_priced_step_is_unpriced_and_one_with_no_step_has_none() -> None:
     assert (await _leg(_UNPRICED, _UNPRICED))[1] == "unpriced"
     assert await _leg() == (0.0, None)
+
+
+@pytest.mark.asyncio
+async def test_a_steps_failed_try_that_cost_tokens_is_in_the_legs_cost() -> None:
+    """D-ORCH-11-18-s: the static step (0.45) plus its failed try at Sonnet (1000 in, 0.3)."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    wasted = BackendAttempt(
+        index=0,
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=1000, completion_tokens=0, total_tokens=1000),
+    )
+    with collect_llm_usage() as distillation:
+        cost = _LegCost(None, distillation)
+        await cost.on_step_usage(
+            StepUsage(
+                step=0,
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                prompt_tokens=1000,
+                completion_tokens=100,
+                failed_tries=(wasted,),
+            )
+        )
+        cents, basis = cost.result()
+    assert cents == pytest.approx(0.75)
+    assert basis == "estimate_static"

@@ -17,7 +17,9 @@ Rules pinned here (D-ORCH-11-18-h):
   turn; ``unpriced`` only when no round was priced;
 * D4: an unpriced round inside a priced turn adds 0 cents and logs a warning that
   names its provider and model;
-* D1: a failed try that reported usage is NOT charged; its cost is logged.
+* D-ORCH-11-18-s (reverses D1 of D-ORCH-11-18-h): a failed try that reported
+  provider tokens IS charged, at the model that made it, inside the same single
+  rounding and single ceil; a failed try that reported no tokens costs nothing.
 """
 
 from __future__ import annotations
@@ -242,22 +244,90 @@ def test_the_sum_is_rounded_once_and_the_charge_ceils_once() -> None:
     assert charge == 1
 
 
-def test_a_failed_try_with_usage_is_not_charged_but_its_cost_is_logged(
+def _failed(
+    provider: str, model: str, prompt: int, completion: int = 0, cost_usd: float | None = None
+) -> BackendAttempt:
+    return BackendAttempt(
+        index=0,
+        provider=provider,
+        model=model,
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            cost_usd=cost_usd,
+        ),
+    )
+
+
+def test_a_failed_try_that_reported_tokens_is_charged_at_its_own_model(
     logs: list[tuple[str, str]],
 ) -> None:
-    """D1: the user is charged for the answer only; the wasted try is logged with its cost."""
-    wasted = BackendAttempt(
-        index=0,
-        provider="anthropic",
-        model="claude-sonnet-4-6",
-        error_class="EmptyCompletionError",
-        usage=TokenUsage(prompt_tokens=9000, completion_tokens=0, total_tokens=9000),
-    )
+    """D-ORCH-11-18-s: the answer (deepseek, 0.238) plus the wasted try (Sonnet, 2.7)."""
+    wasted = _failed("anthropic", "claude-sonnet-4-6", 9000)
     rounds = [_round("deepseek", "deepseek-chat", 8000, 200, failed_tries=(wasted,))]
-    cents, _ = price_rounds(rounds, source=_SRC, surface="chat")
-    assert cents == pytest.approx(0.238)
-    lines = [m for level, m in logs if level == "INFO" and "unrecovered model cost" in m]
+    cents, basis = price_rounds(rounds, source=_SRC, surface="chat")
+    assert cents == pytest.approx(2.938)
+    assert basis == "estimate_static"
+    lines = [m for level, m in logs if level == "INFO" and "failed model try charged" in m]
     assert len(lines) == 1
     assert "cost_cents=2.7" in lines[0]
     assert "model=claude-sonnet-4-6" in lines[0]
     assert "surface=chat" in lines[0]
+    assert "prompt_tokens=9000" in lines[0]
+
+
+def test_a_failed_try_that_reported_no_tokens_costs_nothing_and_labels_nothing(
+    logs: list[tuple[str, str]],
+) -> None:
+    no_usage = BackendAttempt(index=0, provider="x", model="y", error_class="RateLimitError")
+    zero = _failed("openrouter", "z-ai/glm-4.6", 0)  # a catalog model, zero tokens
+    rounds = [_round("deepseek", "deepseek-chat", 8000, 200, failed_tries=(no_usage, zero))]
+    assert price_rounds(rounds, source=_SRC) == (pytest.approx(0.238), "estimate_static")
+    assert not [m for _level, m in logs if "failed model try" in m]
+
+
+def test_failed_tries_are_summed_inside_the_one_rounding_and_the_one_ceil() -> None:
+    """A 0.1 cent answer and three 0.1 cent failed tries: 0.4 cents, one credit, not four."""
+    tries = tuple(_failed("vendor", "tiny", 1000) for _ in range(3))
+    cents, _ = price_rounds([_round("vendor", "tiny", 1000, 0, failed_tries=tries)], source=_SRC)
+    assert cents == 0.4
+    charge = credits_charged(
+        provider_cents=cents, infra_flat_cents=0.0, markup=BillingConfig().credit_markup, floor=1
+    )
+    assert charge == 1
+
+
+def test_a_failed_trys_basis_labels_the_turn_too() -> None:
+    """D3 over every priced part: an actual answer after a statically priced failed try."""
+    wasted = _failed("anthropic", "claude-sonnet-4-6", 1000)
+    rounds = [_round("openrouter", "z-ai/glm-4.6", 100, 10, cost_usd=0.01, failed_tries=(wasted,))]
+    cents, basis = price_rounds(rounds, source=_SRC)
+    assert cents == pytest.approx(1.0 + 0.3)
+    assert basis == "estimate_static"
+
+
+def test_a_failed_trys_own_actual_is_used() -> None:
+    wasted = _failed("openrouter", "z-ai/glm-4.6", 5000, cost_usd=0.004)
+    rounds = [_round("openrouter", "z-ai/glm-4.6", 100, 10, cost_usd=0.01, failed_tries=(wasted,))]
+    assert price_rounds(rounds, source=_SRC) == (pytest.approx(1.4), "actual_openrouter")
+
+
+def test_an_unpriced_failed_try_adds_nothing_and_says_which(logs: list[tuple[str, str]]) -> None:
+    wasted = _failed("vendor", "mystery-model", 9000)
+    rounds = [_round("deepseek", "deepseek-chat", 8000, 200, failed_tries=(wasted,))]
+    assert price_rounds(rounds, source=_SRC) == (pytest.approx(0.238), "estimate_static")
+    warnings = [m for level, m in logs if level == "WARNING" and "unpriced failed model try" in m]
+    assert len(warnings) == 1
+    assert "provider=vendor" in warnings[0]
+    assert "model=mystery-model" in warnings[0]
+
+
+def test_a_failed_try_is_charged_even_when_no_model_served_the_round() -> None:
+    """A voice round with no served model still owes the tokens its failed try burned."""
+    wasted = _failed("anthropic", "claude-sonnet-4-6", 1000)
+    assert price_rounds([_round("", "", 0, 0, failed_tries=(wasted,))], source=_SRC) == (
+        pytest.approx(0.3),
+        "estimate_static",
+    )

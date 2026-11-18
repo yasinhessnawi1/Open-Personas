@@ -107,7 +107,7 @@ GATE_BUDGET_S: float = 4.0
 
 
 def _failed_tries(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
-    """A call's failed tries that reported tokens: logged as unrecovered, never charged."""
+    """A call's failed tries that reported tokens: the meter charges them (D-ORCH-11-18-s)."""
     if served is None:
         return ()
     return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)

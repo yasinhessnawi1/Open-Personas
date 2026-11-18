@@ -191,7 +191,7 @@ def _backend_max_tokens(backend: ChatBackend) -> int:
 
 
 def _failed_tries(response: ChatResponse) -> tuple[BackendAttempt, ...]:
-    """The call's failed tries that reported tokens: logged by the pricer, never charged."""
+    """The call's failed tries that reported tokens: the pricer charges them (D-ORCH-11-18-s)."""
     served = response.served
     if served is None:
         return ()

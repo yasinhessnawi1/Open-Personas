@@ -122,8 +122,8 @@ class VoiceTurnAccumulator:
     ) -> None:
         """Record one model round's usage under the model that served that round.
 
-        ``failed_tries``: the round's failed tries that reported tokens, logged with
-        their cost when the turn is priced and never charged (D-ORCH-11-18-h).
+        ``failed_tries``: the round's failed tries that reported tokens, each
+        charged at its own model when the turn is priced (D-ORCH-11-18-s).
         """
         self._rounds.append(
             LlmRound(

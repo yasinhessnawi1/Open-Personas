@@ -137,8 +137,8 @@ class StepUsage(BaseModel):
         cost_usd: Response-side actual cost in USD (OpenRouter usage.cost), or
             ``None`` — the caller then prices from the token counts.
         failed_tries: The step's failed tries that reported tokens (an empty or
-            degenerate completion before a fallback answered). Never charged; the
-            pricer logs their cost as unrecovered (D-ORCH-11-18-h).
+            degenerate completion before a fallback answered). The pricer charges
+            each at the model that made it (D-ORCH-11-18-s).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

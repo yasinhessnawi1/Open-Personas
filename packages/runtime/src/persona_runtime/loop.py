@@ -2878,8 +2878,8 @@ def _priced_round(
     """One round's usage under the model that served that round (R9-246).
 
     ``served`` is the round's own trace; ``None`` means a bare backend, its own
-    identity. The round's failed tries that reported usage ride along to be logged as
-    unrecovered cost, never charged (D-ORCH-11-18-h).
+    identity. The round's failed tries that reported usage ride along and are charged,
+    each at the model that made it (D-ORCH-11-18-s).
     """
     provider, model = served_identity(backend, served)
     failed_tries = (

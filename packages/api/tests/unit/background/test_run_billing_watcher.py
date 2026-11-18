@@ -111,3 +111,23 @@ async def test_unpriced_step_falls_to_the_floor() -> None:
     assert kw["amount"] == 1  # the floor
     assert kw["cost_basis"] == "unpriced"
     assert not token.is_cancelled
+
+
+@pytest.mark.asyncio
+async def test_a_steps_failed_try_that_cost_tokens_is_in_the_charge() -> None:
+    """D-ORCH-11-18-s: 3.0 cents for the answer plus 0.4 cents its failed try burned."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    wasted = BackendAttempt(
+        index=0,
+        provider="openrouter",
+        model="primary",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=500, completion_tokens=0, total_tokens=500, cost_usd=0.004),
+    )
+    policy = _FakePolicy(captured=4, new_balance=96)
+    usage = _usage().model_copy(update={"failed_tries": (wasted,)})
+    await _watcher(policy, CancelToken()).on_step_usage(usage)
+    kw = policy.calls[-1]
+    assert kw["cost_cents"] == pytest.approx(3.4)
+    assert kw["amount"] == 4  # one ceil over the step, failed try included
