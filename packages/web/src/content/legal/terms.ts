@@ -118,7 +118,7 @@ You must also follow the rules of every service you connect (for example the ter
       id: "ending",
       heading: "Ending your use",
       body: `- **You** can stop at any time. You can delete a single persona in the app, or your whole account in Settings. Deletion is immediate and cannot be undone. The Privacy Policy explains what is removed and what we have to keep.
-- **We** may suspend or close an account that seriously or repeatedly breaks these terms, that puts other people or the service at risk, or where the law requires it. Unless the law or the risk prevents it, we will tell you why first and give you a chance to respond or to take your content out.`,
+- **We** may suspend or close an account that seriously or repeatedly breaks these terms, that puts other people or the service at risk, or where the law requires it. Unless the law or the risk prevents it, we will tell you why first and give you a chance to respond. You can still ask for a copy of your data by email, as the Privacy Policy explains, and we send it within one month.`,
     },
     {
       id: "liability",

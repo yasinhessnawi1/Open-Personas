@@ -44,9 +44,9 @@ For any question about your data, or to use any of your rights, write to [[OWNER
 
 **Activity records.** A record of actions in your account, such as a memory changed, a tool used or an approval given, with the time. They let you and us see what happened and when.
 
-**Technical data.** Our servers log requests (time, IP address, what was requested, errors) to keep the service secure and working. Our own performance measurements record the route, the status and the time taken, without your account.
+**Technical data.** Our servers log requests (time, IP address, the path requested, errors) to keep the service secure and working. Our own performance measurements record the route, the status and the time taken, without your account.
 
-**A wellbeing marker.** If you tell a persona about something in a sensitive area (see "Wellbeing and safety"), we record that a disclosure happened in that conversation: your account, the persona, the conversation and the time. The marker holds no category and no text. Separately, a memory in a sensitive area is labelled with its area so the wellbeing rules can apply to it.`,
+**A wellbeing marker.** If you tell a persona about something in a sensitive area (see "Wellbeing and safety"), we record that a disclosure happened in that conversation: your account, the persona, the conversation and the time. The marker holds no category and no text. A message caught by the crisis check (see "Wellbeing and safety") does not create a marker on its own. Separately, a memory in a sensitive area is labelled with its area so the wellbeing rules can apply to it.`,
     },
     {
       id: "how-we-use",
@@ -56,14 +56,24 @@ For any question about your data, or to use any of your rights, write to [[OWNER
 - **To provide the service you signed up for** (performance of a contract, GDPR Article 6(1)(b)): your account, your personas, conversations, memory, files, tasks, connected services, voice and usage data.
 - **To meet legal duties** (legal obligation, Article 6(1)(c)): keeping invoices and payment records under Norwegian bookkeeping law.
 - **To keep the service secure and working** (legitimate interests, Article 6(1)(f)): request logs, abuse prevention, and the audit records that show what changed in your account and when. Our interest is a service that works and is safe; you can object (see "Your rights").
-- **Sensitive information you choose to share** (Article 9): you may tell a persona about your health or other special categories of data. We process it only to give you the service you asked for, and the wellbeing rules below limit what a persona does with it. [[OWNER: confirm the Article 9 condition relied on, for example explicit consent, with a lawyer.]]
+- **Sensitive information you choose to share** (Article 9): you may tell a persona about your health or other special categories of data. We process it on the basis of your explicit consent (Article 9(2)(a)), which you give by choosing to share it, and only to give you the service you asked for. The wellbeing rules below limit what a persona does with it. You can withdraw that consent at any time by forgetting the memory or deleting the persona. [[OWNER: the app shows no consent statement at the point where a user shares sensitive information. Decide whether to add one, and have a lawyer confirm Article 9(2)(a) is the right condition.]]
 
-We do not sell your data. We do not use it for advertising. We do not use your content to train AI models.`,
+We do not sell your data. We do not use it for advertising. We do not use your content to train AI models.
+
+**No automated decisions about you** (Article 22). We make no decisions with legal or similarly significant effects about you by automated means.`,
     },
     {
       id: "ai-providers",
       heading: "How your conversations reach the AI models",
       body: `A persona's replies are written by large language models run by other companies. To write a reply, we send the model what it needs for that turn: the persona's instructions, the recent conversation, memories that are relevant to it, the results of any tools it used, and any image or part of a file you shared that the reply needs.
+
+Models are also called for other work the service does for you, and each call gets only the text that work needs:
+
+- building and updating your personas' memory from your conversations;
+- reading text out of files you upload;
+- writing and refreshing conversation titles;
+- making a persona's avatar picture;
+- running your tasks, and preparing the actions you are asked to approve.
 
 - We send these requests through **OpenRouter**, which passes them to the company that runs the chosen model (for example Anthropic, Google, OpenAI, DeepSeek, Moonshot, Z.ai, Qwen or others). Which company serves a turn depends on the model and on availability.
 - On paid plans, some requests go directly to **NVIDIA** (NVIDIA NIM) instead.
@@ -93,11 +103,12 @@ Memory search runs on our own servers. The models that find relevant memories, a
 | --- | --- | --- | --- |
 | Oracle Cloud | Hosts our servers, database, files and nightly backups | Everything stored in Open Persona | EU (Frankfurt, Germany) |
 | Vercel | Hosts the web app | Your requests to the web app, including your IP address | The app runs in Frankfurt, Germany; pages are delivered through Vercel's worldwide network |
-| Clerk | Sign-in and account security | Email, name, password, sign-in sessions and devices | United States [[OWNER: confirm]] |
+| Clerk | Sign-in and account security | Your email and password at sign-up, sign-in sessions and devices, and a name only if you enter one in Clerk's profile screen | United States [[OWNER: confirm]] |
 | Stripe | Payments, invoices and tax | Name, email, billing address, card details, payments | [[OWNER: confirm]] |
 | OpenRouter | Routes requests to AI models | The content of each model request (see above) | United States |
 | AI model companies, through OpenRouter | Write the replies | The content of each model request | Mostly United States, some elsewhere |
 | NVIDIA | Writes replies on paid plans | The content of each model request | [[OWNER: confirm]] |
+| [[OWNER: list any of these the production config enables, or remove this row: Anthropic, DeepSeek, Groq, Cloudflare Workers AI, a custom model provider]] | Write replies when a model is called directly instead of through OpenRouter | The content of each model request | [[OWNER: confirm]] |
 | ElevenLabs | Turns replies into speech, when you use voice | The text of the persona's spoken replies | [[OWNER: confirm]] |
 
 **Only when you use them.** These get data only if you turn the feature on or ask for it:
@@ -107,7 +118,7 @@ Memory search runs on our own servers. The models that find relevant memories, a
 - **Web pages**: when a persona reads a web page, our server fetches that page from its website.
 - **Running code**: when a persona runs code, the code and the files it needs go to E2B, which runs it in an isolated sandbox. [[OWNER: confirm E2B is enabled in production.]]
 - **Image generation**: your image prompt goes to the image model, through OpenRouter. [[OWNER: confirm the production image provider.]]
-- **Tools you add**: if you connect a tool or server of your own, it gets what the persona sends it.
+- **Tools you add**: if you connect a tool or server, it gets what the persona sends it. For example, if you connect GitHub (you sign in to GitHub to allow it), GitHub gets the requests the persona makes there.
 
 **Loaded by your browser.** When you open a PDF in the app, your browser loads the PDF viewer from unpkg.com, which sees your IP address.
 
@@ -129,11 +140,12 @@ You can ask us for a copy of the safeguards that apply.`,
 | --- | --- |
 | Your account, personas, conversations, memory, files, tasks and connected services | Until you delete them, or delete your account |
 | A memory you tell a persona to forget | Removed when you forget it |
-| Usage and activity records | As long as your account exists |
+| Per-turn usage records | Until you delete the conversation, the persona or your account |
+| Activity records | Until you delete your account. After that they are kept with no end date, without their content and with your account id replaced |
 | The wellbeing marker | Until you delete the persona or your account |
-| Server request logs | [[OWNER: confirm the log retention period]] |
-| Nightly backups | 14 days, then deleted |
-| Invoices and payment records | 5 years from the end of the financial year they belong to (Norwegian Bookkeeping Act), even after you delete your account |
+| Server request logs | No fixed period. They are rotated by size (at most 250 MB per service, and 500 MB of system log), so older entries are overwritten as new ones arrive |
+| Nightly backups, and the database copy made before each update | About 14 days, then deleted |
+| Invoices and payment records | At least 5 years from the end of the financial year they belong to, as Norwegian bookkeeping law requires, even after you delete your account |
 | The record that a deletion happened | Kept, so a deleted account cannot be used again by mistake. It holds ids, dates and counts, not your content |`,
     },
     {
@@ -141,20 +153,20 @@ You can ask us for a copy of the safeguards that apply.`,
       heading: "Deleting your data",
       body: `**Correct or forget a memory.** You can open your personas' memory, see what they keep, correct a memory, or forget it. Forgetting removes the memory, anything merged into it, and the conversation memory it came from; you see what will go before you confirm. A forgotten memory is removed, not hidden.
 
-**Delete a conversation.** Deleting a conversation removes its messages. What the persona learned from it stays in memory unless you also tick the option to forget it.
+**Delete a conversation.** Deleting a conversation removes its messages. You can also tick the option to forget the conversation's memory. Facts a persona drew from it stay until you forget them in Memory.
 
-**Delete a persona.** Deleting a persona removes it at once, with its conversations, its files, its tasks, its wellbeing markers and the memories that came only from it. Memories your other personas also hold stay with them, without the deleted persona's part. It cannot be undone.
+**Delete a persona.** Deleting a persona removes it at once, with its conversations, its files, its tasks, its wellbeing markers and the memories that came only from it. Memories your other personas also hold stay with them, without the deleted persona's part. Activity records about it (without their content) stay until you delete your account. It cannot be undone.
 
 **Delete your account.** You can delete your account in Settings, or delete it from the account screen of our sign-in provider; either way starts the same deletion. It happens at once, with no grace period, and removes every persona and everything in it. Your plan is cancelled and your saved cards are removed. If a step fails, the deletion keeps retrying until it finishes.
 
 **What we keep after you delete your account.**
 
-- Invoices and payment records, for the 5 years the law requires. We replace your account id in them with an anonymous deletion id, so they are no longer linked to an account here. They hold amounts, dates and payment ids, never your conversations or personas.
-- Stripe keeps its customer record and invoices, which hold your name, email and billing address, for the same legal reason.
-- Activity records, with your account id replaced and their content removed.
+- Invoices and payment records, for at least the 5 years Norwegian bookkeeping law requires. We replace your account id in them with a pseudonymous deletion id. They still hold the Stripe customer id, and Stripe's customer record still holds your name and email. They hold amounts, dates and payment ids, never your conversations or personas.
+- Stripe keeps its own copy of your invoices and its customer record (name, email, billing address) under its own retention rules.
+- Activity records, with your account id replaced and their content removed, with no end date.
 - The record that the deletion happened (ids, dates and counts).
 
-**Backups.** Deleted data can stay in our nightly backups for up to 14 days, until those backups are deleted. Backups are only used to recover the service after a failure. [[OWNER: the decision is to re-apply every deletion after a restore from an off-site list; that list is not built yet. Add the sentence "If we restore a backup, we delete again everything that was deleted after it was made" once it is.]]`,
+**Backups.** Deleted data can stay in our nightly backups, and in the database copy we make before each update, for about 14 days, until those copies are deleted. Backups are only used to recover the service after a failure. [[OWNER: the decision is to re-apply every deletion after a restore from an off-site list; that list is not built yet. Add the sentence "If we restore a backup, we delete again everything that was deleted after it was made" once it is.]]`,
     },
     {
       id: "wellbeing",
@@ -162,8 +174,8 @@ You can ask us for a copy of the safeguards that apply.`,
       body: `People sometimes tell a persona about hard things. Open Persona has rules for that.
 
 - **Sensitive areas.** The areas we treat as sensitive are: self harm and suicide, eating disorders, a mental health crisis, abuse and violence, and addiction. Serious illness, grief and ordinary health information are not treated this way.
-- **Care with those memories.** A memory in a sensitive area is labelled with its area. A persona brings it up only with care and where it fits the conversation, and it does not repeat details about means or methods of harm.
-- **No initiative after a disclosure.** A persona never starts something on its own (a message or a suggestion you did not ask for) that draws on a memory in a sensitive area. And once you have shared something in a sensitive area in a conversation, the persona takes no initiative in that conversation. This stays in place even if you delete that memory, because deleting it is not a sign that it is fine to bring it up. Only deleting the persona or your account removes it.
+- **Care with those memories.** A memory in a sensitive area is labelled with its area. A persona's memory never keeps details about means or methods of harm.
+- **No initiative after a disclosure.** A persona never starts something on its own (a message or a suggestion you did not ask for) that draws on a memory in a sensitive area. And once you have shared something in a sensitive area in a conversation, the persona takes no initiative in that conversation. This stays in place even if you delete that memory, because deleting it is not a sign that it is fine to bring it up. Only deleting the persona or your account removes it. A message caught by the crisis check below does not, on its own, turn this on.
 - **Crisis.** If a message shows clear signs of a crisis, the persona does not answer in character. Instead you get a fixed message that says it is an AI and points you to a crisis line (findahelpline.com lists one for your country) and to your local emergency number. Softer signs of distress tell the persona to answer gently and put your safety first. This check runs on our own servers. It cannot catch every case.
 
 Open Persona is not a medical or emergency service. If you are in danger, contact your local emergency number.`,
@@ -176,9 +188,9 @@ Open Persona is not a medical or emergency service. If you are in danger, contac
 - **access** your data and get a copy of it;
 - **correct** data that is wrong. You can edit your profile and your personas yourself, and correct or delete what a persona remembers;
 - **delete** your data (see "Deleting your data");
-- **take your data with you** (portability): a copy of the data you gave us in a common machine readable format. Write to us and we will send it. [[OWNER: there is no self-service export yet; confirm how export requests are handled.]]
+- **take your data with you** (portability): a copy of the data you gave us in a common machine readable format. There is no export button yet: email [[OWNER: privacy contact email]] and we send it within one month, as the GDPR requires.
 - **object** to processing we do on the basis of our legitimate interests;
-- **restrict** processing while a question about your data is being settled;
+- **restrict** processing while a question about your data is being settled. Email us and we answer within one month;
 - **withdraw consent** at any time, where we rely on it, without affecting what was done before.
 
 To use any right, write to [[OWNER: privacy contact email]]. We answer within one month, and tell you if we need more time. We may ask you to confirm it is your account.
@@ -199,7 +211,7 @@ We do not use advertising or analytics cookies, and we do not track you across o
     {
       id: "security",
       heading: "How we protect it",
-      body: `Your data is stored on our own servers in the EU. Connections are encrypted with TLS. Access to the servers is limited to the people who run the service. Each request is checked against your account, so one user cannot read another's data. Credentials for tools you connect are stored encrypted. Secrets such as service keys are kept out of the code and away from the tools a persona runs.
+      body: `Your data is stored on our own servers in the EU. Connections are encrypted with TLS. Access to the servers is limited to the people who run the service. Each request is checked against your account, and the database enforces row level security, so one user cannot read another's data. Credentials for tools you connect are stored encrypted. Secrets such as service keys are kept out of the code and away from the tools a persona runs.
 
 No system is perfectly secure. If a breach puts your data at risk, we will tell you and the supervisory authority as the law requires.`,
     },
