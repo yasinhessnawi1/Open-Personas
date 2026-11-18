@@ -33,15 +33,17 @@ from persona.graph.protocol import KnowledgeCandidate, ProposedLink
 from persona.logging import get_logger
 from persona.schema.chunks import WriteSource
 
+from persona_runtime.extraction.disclosure import is_disclosure
 from persona_runtime.extraction.means_guard import contains_self_harm_means
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from persona.backends.protocol import ChatBackend
     from persona.extraction import ExtractionCandidate, ExtractionInput, Extractor
     from persona.graph.protocol import EntityRegistry, GraphStore, MergeOutcome
 
+    from persona_runtime.extraction.disclosure import DisclosureRecorder
     from persona_runtime.extraction.resolution import EntityResolver
     from persona_runtime.extraction.update import UpdateResolver
 
@@ -68,6 +70,9 @@ class Synthesizer:
             interaction's persona still exists (R9-284 review H2). A synthesis already past
             its read can outlive an erasure that has finished, graph step included; the graph
             is owner scoped, so nothing else refuses its writes. ``None`` skips the check.
+        disclosures: Where the durable disclosure fact is recorded (R9-253), once per batch
+            and before any merge, when a candidate is tagged or carries self-harm means.
+            ``None`` records nothing (tests and installs without initiative's gate).
     """
 
     def __init__(
@@ -78,12 +83,14 @@ class Synthesizer:
         update_resolver: UpdateResolver,
         graph_store: GraphStore,
         persona_exists: Callable[[str], bool] | None = None,
+        disclosures: DisclosureRecorder | None = None,
     ) -> None:
         self._extractor = extractor
         self._entities = entity_resolver
         self._updates = update_resolver
         self._store = graph_store
         self._persona_exists = persona_exists
+        self._disclosures = disclosures
 
     def _erased(self, interaction: ExtractionInput) -> bool:
         """Whether the interaction's persona was erased while this synthesis ran."""
@@ -96,10 +103,40 @@ class Synthesizer:
         )
         return True
 
+    def _fact_refused(
+        self, owner_id: str, interaction: ExtractionInput, candidates: Sequence[ExtractionCandidate]
+    ) -> bool:
+        """Record the disclosure fact ahead of the merges; ``True`` when its persona is gone.
+
+        R9-253: the fact is what keeps the interaction gated for initiative after the user
+        forgets the tagged node. Written first, so no tagged node lands without it; a failure
+        raises, so the batch stops before any merge and the job retries.
+        """
+        if self._disclosures is None:
+            return False
+        disclosing = any(
+            is_disclosure(
+                c.content,
+                c.wellbeing_category.value if c.wellbeing_category is not None else None,
+            )
+            for c in candidates
+        )
+        if not disclosing:
+            return False
+        if self._disclosures.record(owner_id, interaction.persona_id, interaction.interaction_id):
+            return False
+        _logger.info(
+            "synthesis stopped: the disclosure fact was refused, its persona is gone",
+            interaction_id=interaction.interaction_id,
+        )
+        return True
+
     async def synthesise(self, owner_id: str, interaction: ExtractionInput) -> list[MergeOutcome]:
         """Extract → resolve → merge for one interaction. Returns the merge outcomes."""
         candidates = await self._extractor.extract(interaction)
         if not candidates or self._erased(interaction):
+            return []
+        if self._fact_refused(owner_id, interaction, candidates):
             return []
 
         base_provenance = NodeProvenance(
@@ -239,6 +276,7 @@ def build_synthesizer(
     registry: EntityRegistry,
     backend: ChatBackend,
     persona_exists: Callable[[str], bool] | None = None,
+    disclosures: DisclosureRecorder | None = None,
 ) -> Synthesizer:
     """Compose a ``Synthesizer`` from the wired graph store, registry, and tier backend.
 
@@ -246,6 +284,7 @@ def build_synthesizer(
     judge run on ``backend`` (the small/mid synthesis tier, D-K2-3 — the tier
     hard-gate-#2's eval re-run validates); entity resolution drives K0's ``registry``;
     updates resolve against the ``graph_store``; everything converges on its ``merge``.
+    ``disclosures`` records the durable disclosure fact (R9-253); the worker root wires it.
     """
     from persona_runtime.extraction.entity_judge import LlmEntityJudge
     from persona_runtime.extraction.pipeline import LlmExtractor
@@ -258,4 +297,5 @@ def build_synthesizer(
         update_resolver=UpdateResolver(store=graph_store),
         graph_store=graph_store,
         persona_exists=persona_exists,
+        disclosures=disclosures,
     )
