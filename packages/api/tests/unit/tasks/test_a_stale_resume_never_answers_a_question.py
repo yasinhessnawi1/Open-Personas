@@ -186,3 +186,111 @@ async def test_a_transient_retry_still_picks_a_stuck_park_up(engine: Engine) -> 
     _, runner = await _claim(engine, AutoRetry(cause="429 rate limit", retried_at=_NOW))
 
     assert runner.runs == 1
+
+
+# --- the reply that arrives while the stale Resume is still queued (round 2, A) -----------
+
+
+def _queued_revived(engine: Engine, *, state: str = "queued") -> str:
+    """Resume's Revived leg at head 0, as A0 holds it before any worker claims it."""
+    from persona_api.db.models import jobs as jobs_t
+    from persona_api.tasks.handler import TASK_LEG_JOB_TYPE, task_leg_idempotency_key
+
+    payload = TaskLegPayload(
+        task_id="t1",
+        predecessor_seq=0,
+        trigger=Revived(reason="you pressed Resume", revived_at=_NOW),
+    )
+    key = task_leg_idempotency_key(payload)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(jobs_t).values(
+                id="job-revived",
+                type=TASK_LEG_JOB_TYPE,
+                owner_id=_OWNER,
+                payload=payload.model_dump(mode="json"),
+                idempotency_key=key,
+                state=state,
+                scheduled_at=_NOW,
+                created_at=_NOW,
+            )
+        )
+    return key
+
+
+def _job_state(engine: Engine, job_id: str) -> str:
+    from persona_api.db.models import jobs as jobs_t
+    from sqlalchemy import select
+
+    with engine.begin() as conn:
+        return str(conn.execute(select(jobs_t.c.state).where(jobs_t.c.id == job_id)).scalar())
+
+
+def _parked_on_its_question(engine: Engine) -> Task:
+    store = TaskStore(engine)
+    store.create(
+        Task(
+            id="t1",
+            owner_id=_OWNER,
+            persona_id=_PERSONA,
+            contract=Contract(goal="find a flat"),
+            head_checkpoint_seq=0,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    store.start(_OWNER, "t1", now=_NOW)
+    return store.begin_wait(_OWNER, "t1", WaitKind.ON_USER, now=_NOW)
+
+
+@pytest.fixture
+def enqueued(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The legs queued, as ``"{key} {trigger kind}"`` (A0's enqueue is Postgres-only)."""
+    from persona_api.jobs.queue import JobQueue
+
+    keys: list[str] = []
+
+    def _enqueue(self: JobQueue, **kwargs: object) -> None:  # noqa: ARG001
+        trigger = dict(kwargs["payload"])["trigger"]  # type: ignore[call-overload]
+        keys.append(f"{kwargs['idempotency_key']} {trigger['kind']}")
+
+    monkeypatch.setattr(JobQueue, "enqueue", _enqueue)
+    return keys
+
+
+def test_a_reply_is_never_absorbed_by_the_stale_resume_still_queued(
+    engine: Engine, enqueued: list[str]
+) -> None:
+    """Resume queued Revived at ``after:0`` while the tripped leg was still settling; the leg
+    then parked on its question, and the user answered before Revived was claimed. The reply's
+    leg took the same key, A0 dropped it as a duplicate, and the claim then consumed Revived:
+    the answer was lost while the user was told it went through. The stale Resume is retired
+    and the reply gets a key of its own, so exactly one leg runs, carrying the reply."""
+    from persona_api.services import task_control_service
+
+    stale_key = _queued_revived(engine)
+    task = _parked_on_its_question(engine)
+
+    outcome = task_control_service.reply_to_task(
+        engine, _OWNER, task, "Grunerlokka, please.", now=_NOW
+    )
+
+    assert outcome.changed is True
+    assert _job_state(engine, "job-revived") != "queued"  # it will never be claimed
+    assert enqueued == [f"{stale_key}:retry:1 user_reply"]  # not the stale key
+
+
+def test_a_stale_resume_already_claimed_still_leaves_the_reply_its_own_key(
+    engine: Engine, enqueued: list[str]
+) -> None:
+    """Claimed but not yet run: it cannot be retired, and its guard will consume it, so it is
+    counted as spent and the reply still does not collide with it."""
+    from persona_api.services import task_control_service
+
+    stale_key = _queued_revived(engine, state="claimed")
+    task = _parked_on_its_question(engine)
+
+    task_control_service.reply_to_task(engine, _OWNER, task, "Grunerlokka, please.", now=_NOW)
+
+    assert _job_state(engine, "job-revived") == "claimed"
+    assert enqueued == [f"{stale_key}:retry:1 user_reply"]

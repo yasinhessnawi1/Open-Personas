@@ -35,6 +35,7 @@ from persona.tasks import (
     ScheduledFire,
     TaskCheckpoint,
     TaskState,
+    UserReply,
     WaitKind,
     build_cancellation_summary,
     build_stuck_report,
@@ -73,6 +74,11 @@ TaskStateSignal = Callable[[str, str, str], None]
 __all__ = ["TaskContinuation", "TaskStateSignal"]
 
 _log = get_logger("api.tasks.continuation")
+
+
+#: The trigger a Resume, a Raise cap and the stranded sweep queue (``persona.tasks.Revived``),
+#: as A0 stores it in a job's payload. A reply retires a still-queued one (R9-239).
+_REVIVED_KIND = "revived"
 
 
 class TaskContinuation:
@@ -300,7 +306,28 @@ class TaskContinuation:
                 task_id=task_id, predecessor_seq=task.head_checkpoint_seq, trigger=trigger
             )
         )
+        if isinstance(trigger, UserReply):
+            # R9-239 (round 2): a Resume queued while a tripped leg was still settling left a
+            # Revived job at this head; the leg then parked on its question. That job will be
+            # consumed at the claim (a Revived never answers a question), but while it is live
+            # it holds this key, and A0 would drop the reply's leg as its duplicate: the answer
+            # lost while the user is told it went through. Retire the queued one (it is spent
+            # from then on, so the suffix below moves past it) and count one a worker already
+            # claimed, so the reply always gets a key of its own.
+            self._queue.retire_queued(
+                owner_id=owner_id,
+                job_type=TASK_LEG_JOB_TYPE,
+                task_id=task_id,
+                trigger_kind=_REVIVED_KIND,
+                reason="retired: the user answered before this resume ran",
+            )
         retry = self._queue.count_spent_attempts(owner_id=owner_id, idempotency_key=base)
+        if isinstance(trigger, UserReply):
+            retry += self._queue.count_live_attempts(
+                owner_id=owner_id,
+                idempotency_key=base,
+                trigger_kind=_REVIVED_KIND,
+            )
         enqueue_task_leg(
             self._queue,
             owner_id=owner_id,
