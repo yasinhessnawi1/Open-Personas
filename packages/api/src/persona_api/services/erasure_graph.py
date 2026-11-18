@@ -91,6 +91,10 @@ __all__ = [
     "unsourced_mirrors",
     "split_alias_list",
     "plan_trails",
+    "plan_trails_from",
+    "persona_source",
+    "Source",
+    "take_source_out",
     "unmerged",
     "without_alias_names",
     "without_aliases",
@@ -98,6 +102,10 @@ __all__ = [
 ]
 
 Trail = list[dict[str, Any]]
+#: What is taken out of the graph: the provenance fields an entry from it carries. A persona
+#: (``{"persona_id": ...}``, the erasure) or one conversation (``{"interaction_id": ...}``,
+#: R9-304's conversation forget). Matched by JSONB containment in SQL and field by field here.
+Source = Mapping[str, str]
 
 # What a stub keeps of an entry: when it was written and by what kind of source.
 _STUB_KEYS = ("source", "written_at")
@@ -115,7 +123,17 @@ class GraphPlan:
 
 
 def _is_persona(entry: object, persona_id: str) -> bool:
-    return isinstance(entry, Mapping) and entry.get("persona_id") == persona_id
+    return _is_from(entry, persona_source(persona_id))
+
+
+def persona_source(persona_id: str) -> Source:
+    """The :data:`Source` of a persona's erasure."""
+    return {"persona_id": persona_id}
+
+
+def _is_from(entry: object, source: Source) -> bool:
+    """Whether a provenance entry came from ``source``: it carries every one of its fields."""
+    return isinstance(entry, Mapping) and all(entry.get(k) == v for k, v in source.items())
 
 
 def _is_consolidation(entry: object) -> bool:
@@ -141,15 +159,22 @@ def plan_trails(
     but the persona's and consolidation's) keeps everything but the persona's. One with none is
     doomed, except the SELF node's, which keeps a stub of each of the persona's entries.
     """
+    return plan_trails_from(trails, source=persona_source(persona_id), self_node_id=self_node_id)
+
+
+def plan_trails_from(
+    trails: Iterable[tuple[str, str, Trail]], *, source: Source, self_node_id: str
+) -> GraphPlan:
+    """:func:`plan_trails` for any :data:`Source`: a persona, or one conversation (R9-304)."""
     plan = GraphPlan()
     for key, node_id, trail in trails:
-        if not any(_is_persona(entry, persona_id) for entry in trail):
+        if not any(_is_from(entry, source) for entry in trail):
             continue
-        others = [entry for entry in trail if not _is_persona(entry, persona_id)]
+        others = [entry for entry in trail if not _is_from(entry, source)]
         if any(not _is_consolidation(entry) for entry in others):
             plan.rewrites[key] = others
         elif node_id == self_node_id:
-            plan.rewrites[key] = [_stub(e) for e in trail if _is_persona(e, persona_id)]
+            plan.rewrites[key] = [_stub(e) for e in trail if _is_from(e, source)]
         else:
             plan.doomed.append(key)
     return plan
@@ -311,9 +336,9 @@ def _any_of(column: Any, values: Iterable[Any], element: Any) -> Any:  # noqa: A
     return column == any_(literal(list(values), ARRAY(element)))
 
 
-def _naming(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressions
-    """A JSONB trail (a list of entries) with an entry from this persona."""
-    return cast(column, JSONB).contains([{"persona_id": persona_id}])
+def _naming(column: Any, source: Source) -> Any:  # noqa: ANN401 - SQL expressions
+    """A JSONB trail (a list of entries) with an entry from this source."""
+    return cast(column, JSONB).contains([dict(source)])
 
 
 def _set_metadata(conn: Connection, owner_id: str, node: Any, metadata: dict[str, Any]) -> None:  # noqa: ANN401 - a Row
@@ -636,7 +661,7 @@ def _drop_alias_names_from_versions(
     return rewritten
 
 
-def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) -> dict[str, int]:
+def _nodes(conn: Connection, owner_id: str, source: Source, mirrors: _Mirrors) -> dict[str, int]:
     rows = conn.execute(
         select(
             nodes_t.c.id,
@@ -645,7 +670,7 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) 
             nodes_t.c.content,
             nodes_t.c.metadata,
         )
-        .where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, persona_id))
+        .where(nodes_t.c.owner_id == owner_id, _naming(nodes_t.c.provenance, source))
         # Locked until the rewrite commits: a concurrent extend (synthesis, consolidation)
         # waits, instead of appending to a trail this is about to overwrite (review L1). In id
         # order, so two erasures locking overlapping rows take them in the same order. Other
@@ -656,13 +681,13 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) 
         .order_by(nodes_t.c.id)
         .with_for_update()
     ).all()
-    plan = plan_trails(
+    plan = plan_trails_from(
         ((r.id, r.id, list(r.provenance)) for r in rows),
-        persona_id=persona_id,
+        source=source,
         self_node_id=make_self_node_id(owner_id),
     )
     doomed = set(plan.doomed)
-    # The persona's entries leave the trails first, so what the doomed members give back is
+    # The source's entries leave the trails first, so what the doomed members give back is
     # taken from the trails as they now are, and not overwritten after.
     for node_id, trail in plan.rewrites.items():
         conn.execute(
@@ -688,16 +713,16 @@ def _nodes(conn: Connection, owner_id: str, persona_id: str, mirrors: _Mirrors) 
     }
 
 
-def _versions(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int]:
+def _versions(conn: Connection, owner_id: str, source: Source) -> dict[str, int]:
     rows = conn.execute(
         select(versions_t.c.version_key, versions_t.c.node_id, versions_t.c.provenance)
-        .where(versions_t.c.owner_id == owner_id, _naming(versions_t.c.provenance, persona_id))
+        .where(versions_t.c.owner_id == owner_id, _naming(versions_t.c.provenance, source))
         .order_by(versions_t.c.version_key)
         .with_for_update()
     ).all()
-    plan = plan_trails(
+    plan = plan_trails_from(
         ((str(r.version_key), r.node_id, list(r.provenance)) for r in rows),
-        persona_id=persona_id,
+        source=source,
         self_node_id=make_self_node_id(owner_id),
     )
     keys = {str(r.version_key): r.version_key for r in rows}
@@ -717,9 +742,9 @@ def _versions(conn: Connection, owner_id: str, persona_id: str) -> dict[str, int
     return {"versions_deleted": len(plan.doomed), "versions_stripped": len(plan.rewrites)}
 
 
-def _asserted(column: Any, persona_id: str) -> Any:  # noqa: ANN401 - SQL expressions
-    """A single JSONB entry (an edge's or an entity's) from this persona."""
-    return cast(column, JSONB).contains({"persona_id": persona_id})
+def _asserted(column: Any, source: Source) -> Any:  # noqa: ANN401 - SQL expressions
+    """A single JSONB entry (an edge's or an entity's) from this source."""
+    return cast(column, JSONB).contains(dict(source))
 
 
 def mirror_id_for(
@@ -967,7 +992,7 @@ class _Mirrors:
     removed: set[int] = field(default_factory=set)
 
 
-def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
+def _read_mirrors(conn: Connection, owner_id: str, source: Source) -> _Mirrors:
     asserted = conn.execute(
         select(
             graph_edges.c.edge_key,
@@ -975,7 +1000,7 @@ def _read_mirrors(conn: Connection, owner_id: str, persona_id: str) -> _Mirrors:
             graph_edges.c.dst_node_id,
             graph_edges.c.link_type,
         )
-        .where(graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id))
+        .where(graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, source))
         .order_by(graph_edges.c.edge_key)
     ).all()
     merged = conn.execute(
@@ -1067,17 +1092,17 @@ def _remove_mirrors(conn: Connection, owner_id: str, mirrors: _Mirrors) -> int:
 
 
 def _edges_and_entities(
-    conn: Connection, owner_id: str, persona_id: str, found: _Mirrors
+    conn: Connection, owner_id: str, source: Source, found: _Mirrors
 ) -> dict[str, int]:
     mirrors = _remove_mirrors(conn, owner_id, found)
     edges = conn.execute(
         delete(graph_edges).where(
-            graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, persona_id)
+            graph_edges.c.owner_id == owner_id, _asserted(graph_edges.c.provenance, source)
         )
     ).rowcount
     established = (
         graph_entities.c.owner_id == owner_id,
-        _asserted(graph_entities.c.provenance, persona_id),
+        _asserted(graph_entities.c.provenance, source),
     )
     linked = exists().where(
         graph_node_entities.c.owner_id == owner_id,
@@ -1087,13 +1112,18 @@ def _edges_and_entities(
     unattributed = conn.execute(
         update(graph_entities).where(*established).values(provenance=None)
     ).rowcount
-    return {
+    counts = {
         "edges_deleted": edges,
         "mirrors_of_asserted_deleted": mirrors,
         "entities_deleted": entities,
         "entities_unattributed": unattributed,
-        "entity_aliases_removed": _strip_entity_aliases(conn, owner_id, persona_id),
     }
+    persona_id = source.get("persona_id")
+    if persona_id is None:
+        # An alias names the persona that gave it and nothing more (no conversation), so only
+        # a persona's erasure can take its surfaces out (R9-304).
+        return counts
+    return {**counts, "entity_aliases_removed": _strip_entity_aliases(conn, owner_id, persona_id)}
 
 
 def without_persona_aliases(aliases: Iterable[Any], persona_id: str) -> list[Any] | None:
@@ -1108,11 +1138,12 @@ def without_persona_aliases(aliases: Iterable[Any], persona_id: str) -> list[Any
 
 
 def _strip_entity_aliases(conn: Connection, owner_id: str, persona_id: str) -> int:
+    """The persona's surfaces leave entity alias lists (an alias names a persona, nothing more)."""
     rows = conn.execute(
         select(graph_entities.c.id, graph_entities.c.aliases)
         .where(
             graph_entities.c.owner_id == owner_id,
-            _naming(graph_entities.c.aliases, persona_id),
+            _naming(graph_entities.c.aliases, persona_source(persona_id)),
         )
         .order_by(graph_entities.c.id)
         .with_for_update(key_share=True)
@@ -1209,11 +1240,23 @@ def erase_persona_graph(
             take_graph_maintenance_lock(conn, owner_id)
         elif not try_graph_maintenance_lock(conn, owner_id):
             raise GraphMaintenanceBusyError(owner_id)
-        mirrors = _read_mirrors(conn, owner_id, persona_id)
-        return {
-            **_nodes(conn, owner_id, persona_id, mirrors),
-            **_versions(conn, owner_id, persona_id),
-            **_edges_and_entities(conn, owner_id, persona_id, mirrors),
-            # Last: whatever lost its every source, here or by another path (round 6 M-1).
-            **_prune_orphans(conn, owner_id, mirrors),
-        }
+        return take_source_out(conn, owner_id, persona_source(persona_id))
+
+
+def take_source_out(conn: Connection, owner_id: str, source: Source) -> dict[str, int]:
+    """Take ``source`` out of the owner's graph inside ``conn``'s transaction; the counts.
+
+    The erasure's graph step for any :data:`Source`: nodes (deleted when only the source fed
+    them, otherwise stripped of its entries; members unmerged and contributions given back),
+    version snapshots, the edges it asserted with their mirrors, the entities it established,
+    then the orphaned mirror listings. The caller holds the owner's graph maintenance lock,
+    taken first in this transaction. Running it again finds nothing (idempotent).
+    """
+    mirrors = _read_mirrors(conn, owner_id, source)
+    return {
+        **_nodes(conn, owner_id, source, mirrors),
+        **_versions(conn, owner_id, source),
+        **_edges_and_entities(conn, owner_id, source, mirrors),
+        # Last: whatever lost its every source, here or by another path (round 6 M-1).
+        **_prune_orphans(conn, owner_id, mirrors),
+    }

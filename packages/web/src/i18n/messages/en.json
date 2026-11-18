@@ -293,7 +293,10 @@
     "endOfList": "End of conversations.",
     "shownOf": "Showing {shown} of {total}",
     "newMessage": "New message",
-    "forgetMemoryCheckbox": "Also forget what {name} learned here"
+    "forgetMemoryCheckbox": "Also forget what {name} learned here",
+    "forgetMemoryFacts": "{count, plural, =0 {No facts in Memory were learned only here.} one {This also removes # fact from Memory that was learned only here.} other {This also removes # facts from Memory that were learned only here.}}",
+    "forgetMemoryFactsKept": "{count, plural, one {# fact also learned elsewhere stays.} other {# facts also learned elsewhere stay.}}",
+    "deleteFailed": "Couldn't delete {name}. Try again in a moment."
   },
   "personaPicker": {
     "choosePersona": "Choose a persona",

@@ -5,7 +5,7 @@ import { ChevronRight, MoreVertical, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useFormatter, useTranslations } from "next-intl";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PersonaAvatar } from "@/components/persona/persona-avatar";
 import { useNotify } from "@/components/providers/notification-provider";
 import { Button } from "@/components/ui/button";
@@ -52,6 +52,13 @@ interface PendingDelete {
   personaName: string | null;
 }
 
+/** What the forget would do to Memory's facts (R9-304), for the dialog. */
+interface FactPreview {
+  forConversation: string;
+  removed: number;
+  kept: number;
+}
+
 export function ConversationList({
   conversations,
   personaById,
@@ -76,6 +83,37 @@ export function ConversationList({
   // this codebase, e.g. `persona-memories-modal.tsx`).
   const [pending, setPending] = useState<PendingDelete | null>(null);
   const [forgetMemory, setForgetMemory] = useState(false);
+  // R9-304: how many Memory facts the "also forget" choice removes. Best
+  // effort: no count is shown when the preview fails, and the delete still
+  // works. Keyed by conversation so a late answer never labels another row.
+  const [facts, setFacts] = useState<FactPreview | null>(null);
+  const previewId = pending?.personaName ? pending.id : null;
+
+  useEffect(() => {
+    if (!previewId) return;
+    let live = true;
+    api
+      .GET("/v1/conversations/{conversation_id}/forget-preview", {
+        params: { path: { conversation_id: previewId } },
+      })
+      .then(({ data }) => {
+        if (live && data) {
+          setFacts({
+            forConversation: previewId,
+            removed: data.facts_removed,
+            kept: data.facts_kept,
+          });
+        }
+      })
+      .catch(() => {
+        // Best effort: the dialog simply shows no count.
+      });
+    return () => {
+      live = false;
+    };
+  }, [api, previewId]);
+  const shownFacts =
+    facts && facts.forConversation === pending?.id ? facts : null;
 
   const filtered = useMemo(() => {
     return conversations.filter((c) => {
@@ -104,12 +142,20 @@ export function ConversationList({
     setPending(null);
     setDeletingId(id);
     try {
-      await api.DELETE("/v1/conversations/{conversation_id}", {
-        params: {
-          path: { conversation_id: id },
-          query: { forget_memory: forgetMemory },
+      const { error } = await api.DELETE(
+        "/v1/conversations/{conversation_id}",
+        {
+          params: {
+            path: { conversation_id: id },
+            query: { forget_memory: forgetMemory },
+          },
         },
-      });
+      );
+      if (error) {
+        // R9-304: a 409 (Memory being reorganised) deleted nothing; say so.
+        notify({ level: "error", title: t("deleteFailed", { name: label }) });
+        return;
+      }
       notify({ level: "success", title: tn("deleted", { name: label }) });
       // R9-012: the shared sidebar-refresh seam — the page list AND the
       // sidebar MESSAGES/badges re-resolve in one soft refresh.
@@ -146,8 +192,25 @@ export function ConversationList({
                 checked={forgetMemory}
                 onChange={(e) => setForgetMemory(e.target.checked)}
               />
-              <span>
-                {t("forgetMemoryCheckbox", { name: pending.personaName })}
+              <span className="flex flex-col gap-1">
+                <span>
+                  {t("forgetMemoryCheckbox", { name: pending.personaName })}
+                </span>
+                {shownFacts ? (
+                  <span
+                    className="flex flex-col text-muted-foreground text-xs"
+                    data-slot="forget-memory-facts"
+                  >
+                    <span>
+                      {t("forgetMemoryFacts", { count: shownFacts.removed })}
+                    </span>
+                    {shownFacts.kept > 0 ? (
+                      <span>
+                        {t("forgetMemoryFactsKept", { count: shownFacts.kept })}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
               </span>
             </label>
           ) : null}

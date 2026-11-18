@@ -308,6 +308,19 @@ class ToolRecommendationResponse(_Output):
 # -- conversations ----------------------------------------------------------
 
 
+class ConversationForgetPreview(_Output):
+    """What forgetting a conversation's memory would do to the facts in Memory (R9-304).
+
+    ``facts_removed``: facts only this conversation supports, which the delete removes.
+    ``facts_kept``: facts another source also supports, which stay without this conversation as
+    a source. Counts only, for the delete dialog; merged duplicates and the user's own node are
+    not counted. Both are 0 where there is no graph.
+    """
+
+    facts_removed: int = Field(ge=0)
+    facts_kept: int = Field(ge=0)
+
+
 class ConversationSummary(_Output):
     """A conversation in a list view.
 

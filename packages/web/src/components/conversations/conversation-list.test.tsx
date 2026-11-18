@@ -4,6 +4,10 @@
  * intact (`forget_memory=false`); checking it threads `forget_memory=true`
  * into the DELETE. No checkbox at all when the row's persona can't be
  * resolved (nothing to label the checkbox with).
+ *
+ * R9-304: the dialog also says how many Memory facts the forget would remove
+ * (from `GET .../forget-preview`), and a delete the API refuses (409 while
+ * Memory is being reorganised) says so instead of claiming it worked.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useSearchParams } from "next/navigation";
@@ -18,12 +22,13 @@ import {
 
 const h = vi.hoisted(() => ({
   del: vi.fn(),
+  get: vi.fn(),
   notify: vi.fn(),
   refresh: vi.fn(),
 }));
 
 vi.mock("@/lib/api/use-api", () => ({
-  useApi: () => ({ DELETE: h.del }),
+  useApi: () => ({ DELETE: h.del, GET: h.get }),
 }));
 vi.mock("@/components/providers/notification-provider", () => ({
   useNotify: () => ({ notify: h.notify }),
@@ -69,6 +74,8 @@ async function openDeleteDialog() {
 beforeEach(() => {
   h.del.mockReset();
   h.del.mockResolvedValue({});
+  h.get.mockReset();
+  h.get.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
   h.notify.mockReset();
   h.refresh.mockReset();
   vi.mocked(useSearchParams).mockReturnValue(
@@ -144,5 +151,79 @@ describe("ConversationList — delete-conversation forget checkbox (K11-T5)", ()
     expect(
       screen.queryByRole("checkbox", { name: /Also forget/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
+  it("asks the preview endpoint for this conversation", async () => {
+    renderList();
+    await openDeleteDialog();
+
+    await waitFor(() =>
+      expect(h.get).toHaveBeenCalledWith(
+        "/v1/conversations/{conversation_id}/forget-preview",
+        { params: { path: { conversation_id: "conv1" } } },
+      ),
+    );
+  });
+
+  it("says how many facts go and how many stay", async () => {
+    h.get.mockResolvedValue({ data: { facts_removed: 3, facts_kept: 1 } });
+    renderList();
+    await openDeleteDialog();
+
+    expect(
+      await screen.findByText(
+        "This also removes 3 facts from Memory that were learned only here.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("1 fact also learned elsewhere stays."),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing is removed when no fact comes only from here", async () => {
+    h.get.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
+    renderList();
+    await openDeleteDialog();
+
+    expect(
+      await screen.findByText("No facts in Memory were learned only here."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/learned elsewhere/)).not.toBeInTheDocument();
+  });
+
+  it("shows no count when the preview fails, and the delete still works", async () => {
+    h.get.mockResolvedValue({
+      error: { error: "x" },
+      response: { status: 500 },
+    });
+    renderList();
+    await openDeleteDialog();
+    await waitFor(() => expect(h.get).toHaveBeenCalled());
+
+    expect(screen.queryByText(/from Memory/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(h.del).toHaveBeenCalled());
+  });
+
+  it("a refused delete says it failed, not that it worked", async () => {
+    h.del.mockResolvedValue({
+      error: { error: "memory_node_changed" },
+      response: { status: 409 },
+    });
+    renderList();
+    await openDeleteDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(h.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "error",
+          title: "Couldn't delete Battery chemistry. Try again in a moment.",
+        }),
+      ),
+    );
+    expect(h.refresh).not.toHaveBeenCalled();
   });
 });

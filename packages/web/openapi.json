@@ -860,7 +860,7 @@
       "delete": {
         "tags": ["conversations"],
         "summary": "Delete Conversation",
-        "description": "Delete a conversation + all its messages + workspace artefacts.\n\nCascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):\n\n1. DB rows (existing): the ``conversations`` row + its ``messages`` /\n   ``turn_logs`` via FK cascade.\n2. **Document workspace + DocumentStore chunks** (T19): every doc\n   attached to the conversation, via\n   :func:`document_service.remove_all_for_conversation` \u2014 the\n   cascade-helper T13 introduced specifically for this reuse.\n3. **Image workspace files** (Spec 13 T12): each image referenced by\n   the conversation's messages. Spec 13 owns this branch; the two\n   cascade extensions coexist additively in this same handler per\n   the D-14-X-cascade-coordination locking decision.\n4. **Episodic memory** (Spec K11, T3, D-K11-9) \u2014 opt-in via\n   ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s\n   docstring for the exact \u222a content-match cascade. A no-op when the\n   memory backend isn't composed (community/no-DB edition) \u2014 the\n   conversation delete itself is unaffected either way.\n\n404 if not the caller's conversation (RLS-scoped).",
+        "description": "Delete a conversation + all its messages + workspace artefacts.\n\nCascade reach (T19 + Spec 13 T12 co-landing per D-14-X-cascade-coordination):\n\n1. DB rows (existing): the ``conversations`` row + its ``messages`` /\n   ``turn_logs`` via FK cascade.\n2. **Document workspace + DocumentStore chunks** (T19): every doc\n   attached to the conversation, via\n   :func:`document_service.remove_all_for_conversation` \u2014 the\n   cascade-helper T13 introduced specifically for this reuse.\n3. **Image workspace files** (Spec 13 T12): each image referenced by\n   the conversation's messages. Spec 13 owns this branch; the two\n   cascade extensions coexist additively in this same handler per\n   the D-14-X-cascade-coordination locking decision.\n4. **Episodic memory** (Spec K11, T3, D-K11-9) \u2014 opt-in via\n   ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s\n   docstring for the exact \u222a content-match cascade. A no-op when the\n   memory backend isn't composed (community/no-DB edition) \u2014 the\n   conversation delete itself is unaffected either way.\n5. **Knowledge-graph facts** (R9-304), with ``forget_memory=true``: in the\n   row delete's own transaction, before the delete: see\n   :mod:`persona_api.services.forget_conversation_graph`. Atomic with the\n   row: a failure (or a 409 while a consolidation holds the graph) leaves\n   the conversation in place, and the delete can be retried.\n\n404 if not the caller's conversation (RLS-scoped).",
         "operationId": "delete_conversation_v1_conversations__conversation_id__delete",
         "parameters": [
           {
@@ -878,16 +878,57 @@
             "required": false,
             "schema": {
               "type": "boolean",
-              "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) \u2014 exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact.",
+              "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised (nothing is deleted then; try again). Off by default: a plain delete leaves the persona's memory intact.",
               "default": false,
               "title": "Forget Memory"
             },
-            "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) \u2014 exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact."
+            "description": "Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised (nothing is deleted then; try again). Off by default: a plain delete leaves the persona's memory intact."
           }
         ],
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/conversations/{conversation_id}/forget-preview": {
+      "get": {
+        "tags": ["conversations"],
+        "summary": "Preview Conversation Forget",
+        "description": "How many Memory facts forgetting this conversation's memory would remove (R9-304).\n\nFor the delete dialog's \"also forget\" choice. A pure read: nothing is deleted. 404 if the\nconversation is not the caller's. Zeros where there is no graph.",
+        "operationId": "preview_conversation_forget_v1_conversations__conversation_id__forget_preview_get",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationForgetPreview"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -6219,6 +6260,25 @@
         ],
         "title": "ConversationDetail",
         "description": "Full conversation history."
+      },
+      "ConversationForgetPreview": {
+        "properties": {
+          "facts_removed": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Facts Removed"
+          },
+          "facts_kept": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Facts Kept"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["facts_removed", "facts_kept"],
+        "title": "ConversationForgetPreview",
+        "description": "What forgetting a conversation's memory would do to the facts in Memory (R9-304).\n\n``facts_removed``: facts only this conversation supports, which the delete removes.\n``facts_kept``: facts another source also supports, which stay without this conversation as\na source. Counts only, for the delete dialog; merged duplicates and the user's own node are\nnot counted. Both are 0 where there is no graph."
       },
       "ConversationSummary": {
         "properties": {

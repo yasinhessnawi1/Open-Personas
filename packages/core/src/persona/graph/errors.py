@@ -15,6 +15,7 @@ from persona.errors import PersonaError
 __all__ = [
     "EntityResolutionError",
     "GraphError",
+    "GraphInteractionGoneError",
     "GraphPersonaGoneError",
     "GraphIndexError",
     "GraphNodeBusyError",
@@ -101,6 +102,18 @@ class GraphPersonaGoneError(GraphError):
     persona's row (``FOR KEY SHARE``) in its own transaction: the erasure's row delete waits for
     it, and a write that comes after the delete is refused with this. ``context`` carries the
     persona id.
+    """
+
+
+class GraphInteractionGoneError(GraphError):
+    """A graph write cites a conversation whose row is gone (R9-304).
+
+    Forgetting a conversation's memory takes its facts out of the graph in the transaction that
+    deletes the conversation's row. With the guard on, every write that adds a provenance entry
+    citing a conversation holds that conversation's row (``FOR KEY SHARE``) in its own
+    transaction: the forget waits for a write in flight and then removes what it wrote, and a
+    write after the delete is refused with this. Never retried: the conversation does not come
+    back. ``context`` carries the ``interaction_id``.
     """
 
 

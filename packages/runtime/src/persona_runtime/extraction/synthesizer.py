@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from persona.graph.errors import GraphInteractionGoneError
 from persona.graph.models import NodeProvenance
 from persona.graph.protocol import KnowledgeCandidate, ProposedLink
 from persona.logging import get_logger
@@ -132,13 +133,39 @@ class Synthesizer:
         return True
 
     async def synthesise(self, owner_id: str, interaction: ExtractionInput) -> list[MergeOutcome]:
-        """Extract → resolve → merge for one interaction. Returns the merge outcomes."""
+        """Extract → resolve → merge for one interaction. Returns the merge outcomes.
+
+        R9-304: a write refused because the interaction's conversation was forgotten meanwhile
+        ends the synthesis quietly with what landed before it. The conversation is gone, so
+        there is nothing to retry; the forget removed (or the guard refused) the rest.
+        """
         candidates = await self._extractor.extract(interaction)
         if not candidates or self._erased(interaction):
             return []
         if self._fact_refused(owner_id, interaction, candidates):
             return []
+        outcomes: list[MergeOutcome] = []
+        try:
+            await self._merge_all(owner_id, interaction, candidates, outcomes)
+        except GraphInteractionGoneError:
+            _logger.info(
+                "synthesis stopped: its conversation was forgotten",
+                interaction_id=interaction.interaction_id,
+            )
+        return outcomes
 
+    async def _merge_all(
+        self,
+        owner_id: str,
+        interaction: ExtractionInput,
+        candidates: Sequence[ExtractionCandidate],
+        outcomes: list[MergeOutcome],
+    ) -> None:
+        """Resolve the entities, then merge each candidate, appending to ``outcomes``.
+
+        An accumulator rather than a return value, so a refusal part way through still leaves
+        the caller the outcomes that landed before it.
+        """
         base_provenance = NodeProvenance(
             # PERSONA_SELF, not SYSTEM: a synthesised fact is something the persona
             # learned FROM the conversation, not a platform seed — so the K5 panel
@@ -165,7 +192,6 @@ class Synthesizer:
         )
 
         concept_to_node: dict[str, str] = {}
-        outcomes: list[MergeOutcome] = []
         for candidate in candidates:
             if contains_self_harm_means(
                 candidate.content,
@@ -190,7 +216,6 @@ class Synthesizer:
             )
             concept_to_node[candidate.concept_name] = outcome.node_id
             outcomes.append(outcome)
-        return outcomes
 
     def _assemble(
         self,

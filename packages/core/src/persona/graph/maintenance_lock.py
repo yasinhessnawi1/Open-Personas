@@ -7,7 +7,10 @@ connection of its own, and reads its candidates only once it holds it; the erasu
 (and the sweep's, which is the same function) takes it in its own transaction, before any row
 lock, so it is released at commit or rollback. A user's forget or delete of a node is the third
 taker (R9-287, D-R9-287-forget-canonical): the node delete takes it the same way, first in its
-transaction, waiting at most its lock timeout.
+transaction, waiting at most its lock timeout. A conversation delete that forgets its memory is
+the fourth (R9-304): first in the row delete's transaction, then the conversation row ``FOR
+UPDATE``, which waits for writers holding that row ``FOR KEY SHARE`` (the write guard). Those
+writers never wait for this lock, so that wait closes no cycle either.
 
 The key is the two-``int4`` form, ``(GRAPH_MAINTENANCE_CLASS, hashtext('graph-maint:' || owner))``.
 Postgres keeps that key space apart from the single ``bigint`` keys the other advisory locks in
