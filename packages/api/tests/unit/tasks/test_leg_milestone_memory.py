@@ -117,8 +117,14 @@ class _Builder:
 class _Sink:
     """The checkpoint store minus its Postgres-only row id: what landed, and the head."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, legs_before: int = 0) -> None:
         self.landed: list[TaskCheckpoint] = []
+        #: The legs the seeded head stands for, which this fake holds no rows for.
+        self._legs_before = legs_before
+
+    def count_legs(self, owner_id: str, task_id: str) -> int:  # noqa: ARG002
+        """The legs that ran (R9-220): the seeded ones plus every leg checkpoint landed here."""
+        return self._legs_before + sum(1 for c in self.landed if ":leg:" in c.leg_id)
 
     def get_latest(self, owner_id: str, task_id: str) -> TaskCheckpoint | None:  # noqa: ARG002
         return self.landed[-1] if self.landed else None
@@ -182,7 +188,7 @@ async def _fire(
     """Run one real leg through the real handler and hand back what it remembered."""
     store = TaskStore(engine)
     task = _task(store, legs_done=legs_done, bounds=bounds)
-    sink = _Sink()
+    sink = _Sink(legs_before=legs_done)
     if prior_conclusions:
         # The head this leg builds on, so ``milestone_for`` has something to compare against.
         sink.landed.append(

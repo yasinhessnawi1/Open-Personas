@@ -50,6 +50,12 @@ const ASTRID = {
 } as const;
 
 const messages = {
+  approvals: {
+    held: {
+      heldAtTheCap:
+        "The task has used its budget, so it carries on from here when you raise the cap with Raise cap on the task page.",
+    },
+  },
   chat: {
     tierLabel: "{tier} tier",
     originatedBadge: "Started this",
@@ -98,6 +104,21 @@ const personaMsg = (
 });
 
 describe("MessageElement", () => {
+  it("says why the task waits when an approval answered in chat was held", () => {
+    // The chat route answers a decision cue with no assistant text of its own; the held
+    // note (D-ORCH-11-18-d (2)) is the only thing that tells the user what happens next.
+    const { container } = renderWithIntl(
+      <MessageElement
+        message={personaMsg("", { approvalHeld: "heldAtTheCap" })}
+        persona={ASTRID}
+      />,
+    );
+    const held = container.querySelector('[data-slot="approval-held"]');
+    expect(held?.textContent).toBe(
+      "The task has used its budget, so it carries on from here when you raise the cap with Raise cap on the task page.",
+    );
+  });
+
   it("renders user messages right-aligned with bg-secondary", () => {
     const { container } = renderWithIntl(
       <MessageElement message={userMsg("Hello Astrid")} persona={ASTRID} />,

@@ -57,6 +57,7 @@ from persona.tasks import (
     LegBox,
     RecentLegSummary,
     ResumeTrigger,
+    Revived,
     ScheduledFire,
     SpendKind,
     TaskState,
@@ -142,9 +143,13 @@ MAX_RECENT_LEG_SUMMARIES = 5
 #: WAITING_USER is the leg stopping on a question only the user can move, whose reply is
 #: refused while paused (D-W1-10). Every other outcome is held until Resume, which
 #: re-enqueues from the head (D-W1-30): CONTINUE's next leg and FAILED's retry would be jobs
-#: the claim consumes, and an approval park would strand the task, because an approval
-#: answered while paused enqueues a leg the claim consumes and Resume only clears a waiting
-#: task's overlay.
+#: the claim consumes. WAITING_APPROVAL was held too because, when this was written, an
+#: approval answered while paused enqueued a leg the claim consumed and Resume only cleared
+#: a waiting task's overlay, which stranded the task. Since R9-239 the resolver holds that
+#: leg instead (``persona_api.tasks.hold``: the decision is carried out and the task moves
+#: to ACTIVE under its pause, where Resume carries it on), so an approval park would no
+#: longer strand here. Keeping it held is unchanged behaviour; moving it into this set is a
+#: separate decision (a held gated leg re-runs on Resume and re-proposes).
 _SETTLED_UNDER_A_PAUSE: Final = frozenset({LegDisposition.COMPLETED, LegDisposition.WAITING_USER})
 
 
@@ -182,9 +187,18 @@ def task_leg_idempotency_key(payload: TaskLegPayload, *, retry: int = 0) -> str:
     appends a checkpoint must re-key or re-enqueue, or the dead-job match is lost. Change the
     shape here and the sweep's prefix together, or a revival silently finds nothing.
     """
-    anchor = "init" if payload.predecessor_seq is None else str(payload.predecessor_seq)
-    base = f"task:{payload.task_id}:after:{anchor}"
+    base = f"task:{payload.task_id}:after:{leg_anchor(payload.predecessor_seq)}"
     return base if retry <= 0 else f"{base}:retry:{retry}"
+
+
+def leg_anchor(seq: int | None) -> str:
+    """The head a leg key is anchored on: ``init`` before the first checkpoint, else the seq.
+
+    One spelling for the three places that must agree on it (R9-173): the key minted here,
+    the revival sweep's dead-job match, and the stuck park's record of the head it parked at
+    (R9-219).
+    """
+    return "init" if seq is None else str(seq)
 
 
 class LegRunnerBuilder(Protocol):
@@ -869,7 +883,20 @@ class TaskLegHandler:
             except CreditsExhaustedError:
                 _log.info("task leg skipped (no credits)", task_id=task.id, state=task.state.value)
                 return
-        # The job firing IS the trigger arriving — resume a waiting task (one resume point).
+        # R9-239 (part 2): a Revived leg is only ever queued for a task that is not waiting
+        # (Resume on a paused live task, Raise cap, the stranded sweep). Finding the task
+        # waiting on the user means it parked on a question after the enqueue: a pause
+        # tripped the leg, Resume was pressed after its checkpoint landed, and the tripped
+        # step then asked. Resuming here would run the next leg without the answer, so the
+        # job is consumed and the task keeps waiting for the reply, which carries it on.
+        if (
+            task.state == TaskState.WAITING
+            and task.wait_kind is WaitKind.ON_USER
+            and isinstance(payload.trigger, Revived)
+        ):
+            _log.info("task leg skipped (stale resume; waiting on the user)", task_id=task.id)
+            return
+        # The job firing IS the trigger arriving: resume a waiting task (one resume point).
         if task.state == TaskState.WAITING:
             task = self._tasks.resume(owner, payload.task_id, now=now)
         # Finding O: the contract's deadline and leg cap, checked at the door for a leg the
@@ -1328,12 +1355,19 @@ class TaskLegHandler:
     def _park_if_bound(self, owner: str, task: Task, *, now: datetime) -> bool:
         """Park the task if a stated contract bound is reached; return whether it was (finding O).
 
-        ``legs_run`` is the head sequence plus one: the checkpoint chain is the durable count
-        of legs that landed. Goes through the continuation's bound park (the approval park's
-        shape); with no continuation wired the bare state change is the floor, as it is for
-        the over-budget checkpoint.
+        ``legs_run`` is the number of checkpoints a LEG wrote (R9-220). The head sequence is
+        not it: the chain also holds the records written between legs (an obstacle, an
+        answered approval, a saved reply), and counting those parked a task that asked for
+        approval at its cap early, for reasons unrelated to the work it did. Read only when
+        a leg cap is set, so a task with none costs no query. Goes through the
+        continuation's bound park (the approval park's shape); with no continuation wired
+        the bare state change is the floor, as it is for the over-budget checkpoint.
         """
-        legs_run = 0 if task.head_checkpoint_seq is None else task.head_checkpoint_seq + 1
+        legs_run = (
+            self._checkpoints.count_legs(owner, task.id)
+            if task.contract.bounds.max_legs is not None
+            else 0
+        )
         reason = bound_reached(task.contract.bounds, legs_run=legs_run, now=now)
         if reason is None:
             return False

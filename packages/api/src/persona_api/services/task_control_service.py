@@ -23,6 +23,16 @@ from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.jobs.queue import JobQueue
 from persona_api.schedules import ScheduleStore
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.hold import (
+    REPLY_RACED_NOTE,
+    REPLY_SAVED_AT_THE_CAP_NOTE,
+    REPLY_SAVED_BUT_NOT_HELD_NOTE,
+    REPLY_TOO_LONG_AT_THE_CAP_NOTE,
+    HoldOutcome,
+    HoldReason,
+    SavedReply,
+    TaskHold,
+)
 from persona_api.tasks.store import CheckpointStore, TaskStore
 
 if TYPE_CHECKING:
@@ -30,6 +40,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
 __all__ = [
+    "PAUSE_RACED_NOTE",
     "PICKUP_AUDIT_ACTION",
     "PICKUP_REPLY",
     "ControlOutcome",
@@ -91,15 +102,29 @@ def mirror_schedule_pause(engine: Engine, owner_id: str, task: Task, *, paused: 
 
 def cancel_task(
     engine: Engine, owner_id: str, task: Task, *, now: datetime | None = None
-) -> CancellationSummary:
+) -> CancellationSummary | None:
     """Cancel ``task`` (terminal) and stop its schedule firing. One cancel for every door.
 
     The kill switch's cancel audits ``task.cancel`` and lands the terminal state; the
     schedule mirror then stops the cadence (R9-108's second half). A running leg finishes
     its current step and then stops (the external cancel seam is T6, D-W1-21).
+
+    Returns ``None`` when the task finished first (R9-247): the door read it live, the leg
+    completed or failed it, and the cancel's transition then judged the finished row. That
+    is the durable truth a moment later, not an error, so every door answers it the way it
+    answers a task that was already finished when the user pressed Cancel.
     """
+    from persona.errors import TaskStateError
+    from persona.tasks import is_terminal
+
     at = now if now is not None else datetime.now(UTC)
-    summary = _kill_switch(engine).cancel_task(owner_id, task.id, now=at)
+    try:
+        summary = _kill_switch(engine).cancel_task(owner_id, task.id, now=at)
+    except TaskStateError:
+        if not is_terminal(TaskStore(engine).get(owner_id, task.id).state):
+            raise
+        _log.info("cancel found the task already finished", task_id=task.id)
+        return None
     mirror_schedule_pause(engine, owner_id, task, paused=True)
     return summary
 
@@ -152,6 +177,15 @@ def _continuation(engine: Engine, queue: JobQueue | None = None) -> TaskContinua
     )
 
 
+#: A reply saved at the cap whose task finished (a cancel) before the hold could move it.
+REPLY_SAVED_TASK_FINISHED_NOTE = (
+    "Your reply is saved, but this task finished before it could carry on with it."
+)
+
+#: What Pause says when the task kept changing under it and the transition gave up (R9-247).
+PAUSE_RACED_NOTE = "This task changed while it was being paused, so it was not paused. Try again."
+
+
 def pause_task(engine: Engine, owner_id: str, task: Task, *, now: datetime) -> ControlOutcome:
     """Pause: no new legs, a running leg stops at its next boundary (D-W1-21), and the schedule
     stops firing (R9-108). One pause for every door (route, chat verb)."""
@@ -162,10 +196,22 @@ def pause_task(engine: Engine, owner_id: str, task: Task, *, now: datetime) -> C
         return ControlOutcome(task=task, changed=False, note="Already paused.")
     if is_terminal(task.state):
         return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+    store = TaskStore(engine)
     try:
-        paused = TaskStore(engine).pause(owner_id, task.id, now=now)
+        paused = store.pause(owner_id, task.id, now=now)
     except TaskStateError:
-        return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+        # The snapshot above was live and unpaused, so something changed before the pause
+        # landed (R9-247: the transition compares, and a lost race decides again). Say what
+        # the row now holds: a finished task, a pause that landed first, or a task that kept
+        # changing until the transition gave up, which is worth one more try.
+        current = store.get(owner_id, task.id)
+        if is_terminal(current.state):
+            note = "This task has already finished."
+        elif current.paused:
+            note = "Already paused."
+        else:
+            note = PAUSE_RACED_NOTE
+        return ControlOutcome(task=current, changed=False, note=note)
     mirror_schedule_pause(engine, owner_id, paused, paused=True)
     return ControlOutcome(task=paused, changed=True)
 
@@ -269,13 +315,15 @@ class TaskControlMutator:
     def get(self, owner_id: str, task_id: str) -> Task:
         return TaskStore(self._engine).get(owner_id, task_id)
 
-    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
-        return pause_task(self._engine, owner_id, self.get(owner_id, task_id), now=now).task
+    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:
+        return pause_task(self._engine, owner_id, self.get(owner_id, task_id), now=now)
 
-    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
+    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:
+        # R9-241: the whole outcome, so the note ("Not paused.", the budget refusal) reaches
+        # the reply instead of being dropped here.
         return resume_task(
             self._engine, owner_id, self.get(owner_id, task_id), now=now, queue=self._queue
-        ).task
+        )
 
     def cancel(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
         task = self.get(owner_id, task_id)
@@ -346,6 +394,11 @@ def reply_to_task(
 ) -> ControlOutcome:
     """Answer a task that waits on the user: the reply rides into its next leg (D-W1-4).
 
+    At the budget cap the reply is saved instead (R9-240, D-ORCH-11-18-d (3)): it becomes
+    the task's head checkpoint and the task takes the budget pause, so Raise cap carries it
+    on from the answer. A further reply before Raise cap is saved the same way, so nothing
+    the user types is lost. A reply to a task the user paused is still refused (D-W1-10).
+
     Raises:
         ApprovalPendingError: The task's wait is a pending approval; that is answered as an
             approval (approve / decline), never as free text past the gate.
@@ -357,6 +410,9 @@ def reply_to_task(
 
     if is_terminal(task.state):
         return ControlOutcome(task=task, changed=False, note="This task has already finished.")
+    hold = TaskHold(engine)
+    if hold.holds_a_saved_reply(owner_id, task):
+        return _save_reply(engine, hold, owner_id, task, reply, now=now)
     if task.state is not TaskState.WAITING or task.wait_kind is not WaitKind.ON_USER:
         return ControlOutcome(task=task, changed=False, note="This task is not waiting on you.")
     pending = ApprovalStore(engine).get_pending_for_task(owner_id, task.id)
@@ -368,9 +424,49 @@ def reply_to_task(
     held, why, owner_paused = _blocked(engine, owner_id, task)
     if held:
         return ControlOutcome(task=task, changed=False, note=why, owner_paused=owner_paused)
+    if hold.reason(owner_id, task) is HoldReason.BUDGET:
+        return _save_reply(engine, hold, owner_id, task, reply, now=now)
     _continuation(engine).resume(owner_id, task.id, UserReply(reply=reply), now=now)
     _log.info("task replied to", task_id=task.id)
     return ControlOutcome(task=task, changed=True)
+
+
+def _save_reply(
+    engine: Engine, hold: TaskHold, owner_id: str, task: Task, reply: str, *, now: datetime
+) -> ControlOutcome:
+    """Keep a reply that arrived at the cap, and hold the task for Raise cap (R9-240).
+
+    Every answer is the truth about what happened (PR 34 review): a reply too long to keep is
+    refused with nothing changed (D-ORCH-11-18-e (2)); a head another write took first is not
+    called saved; a hold that fails after the reply is durable says the reply is kept and how
+    to carry on, instead of a server error; and a hold that finds nothing holding the task
+    any more (Raise cap landed first) carries it on and answers as a reply that ran.
+    """
+    from persona.errors import CheckpointTooLargeError
+
+    store = TaskStore(engine)
+    try:
+        saved = hold.save_reply(owner_id, task, reply, now=now)
+    except CheckpointTooLargeError:
+        _log.info("reply at the cap too long to keep; refused", task_id=task.id)
+        return ControlOutcome(task=task, changed=False, note=REPLY_TOO_LONG_AT_THE_CAP_NOTE)
+    if saved is SavedReply.LOST_RACE:
+        current = store.get(owner_id, task.id)
+        return ControlOutcome(task=current, changed=False, note=REPLY_RACED_NOTE)
+    try:
+        where = hold.hold(owner_id, task.id, HoldReason.BUDGET, now=now)
+    except Exception:  # noqa: BLE001 - the reply is durable; answer truthfully, never a 500
+        _log.exception("reply saved but the hold failed", task_id=task.id)
+        current = store.get(owner_id, task.id)
+        return ControlOutcome(task=current, changed=True, note=REPLY_SAVED_BUT_NOT_HELD_NOTE)
+    current = store.get(owner_id, task.id)
+    if where is HoldOutcome.CARRIED_ON:
+        _log.info("reply saved and the task carried on (the cap was raised first)", task_id=task.id)
+        return ControlOutcome(task=current, changed=True)
+    if where is HoldOutcome.FINISHED:
+        return ControlOutcome(task=current, changed=True, note=REPLY_SAVED_TASK_FINISHED_NOTE)
+    _log.info("reply saved at the budget cap; next leg waits for Raise cap", task_id=task.id)
+    return ControlOutcome(task=current, changed=True, note=REPLY_SAVED_AT_THE_CAP_NOTE)
 
 
 def retry_task(

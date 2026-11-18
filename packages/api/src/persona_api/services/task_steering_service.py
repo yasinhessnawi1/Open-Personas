@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from persona.errors import TaskNotFoundError
 from persona.logging import get_logger
 from persona.tasks import is_terminal
-from persona_runtime.task_origination import SteeringVerb
+from persona_runtime.task_origination import SteeringOutcome, SteeringVerb
 
 from persona_api.approvals.failure import account_for_cancel_failure
 
@@ -31,20 +31,26 @@ if TYPE_CHECKING:
 
     from persona.schema.origination import PersonaIdentityTag
     from persona.tasks import Task
+    from sqlalchemy import Engine
 
     from persona_api.services.origination_service import FailureNotifier
+    from persona_api.services.task_control_service import ControlOutcome
 
-__all__ = ["TaskMutator", "TaskSteeringService"]
+__all__ = ["ControlSteeringPort", "TaskMutator", "TaskSteeringService"]
 
 _logger = get_logger("api.task_steering")
 
 
 class TaskMutator(Protocol):
-    """The owner-scoped task ops steering needs (the real ``TaskStore`` satisfies this)."""
+    """The owner-scoped task ops steering needs (``TaskControlMutator`` is the real one).
+
+    Pause and resume answer the shared controls' :class:`ControlOutcome`, whose note is
+    what the user is told when nothing changed (R9-241).
+    """
 
     def get(self, owner_id: str, task_id: str) -> Task: ...
-    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> Task: ...
-    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> Task: ...
+    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome: ...
+    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome: ...
     def cancel(self, owner_id: str, task_id: str, *, now: datetime) -> Task: ...
 
 
@@ -68,20 +74,25 @@ class TaskSteeringService:
         self._notifier = notifier
         self._resolve_tag = persona_tag_resolver
 
-    async def steer(self, data: Mapping[str, Any]) -> None:
-        """Apply ``verb`` to ``task_id`` for ``owner_id`` (pause / resume / cancel)."""
+    async def steer(self, data: Mapping[str, Any]) -> SteeringOutcome | None:
+        """Apply ``verb`` to ``task_id`` for ``owner_id`` (pause / resume / cancel).
+
+        Returns what a pause or resume did, with the control's own note when nothing changed
+        (R9-241), so the caller can say why; ``None`` for a cancel, which keeps its own flow.
+        """
         owner_id = str(data["owner_id"])
         task_id = str(data["task_id"])
         verb = str(data["verb"])
         now = datetime.now(UTC)
         if verb == SteeringVerb.PAUSE.value:
-            self._tasks.pause(owner_id, task_id, now=now)
-        elif verb == SteeringVerb.RESUME.value:
-            self._tasks.unpause(owner_id, task_id, now=now)
-        elif verb == SteeringVerb.CANCEL.value:
+            return _steered(self._tasks.pause(owner_id, task_id, now=now))
+        if verb == SteeringVerb.RESUME.value:
+            return _steered(self._tasks.unpause(owner_id, task_id, now=now))
+        if verb == SteeringVerb.CANCEL.value:
             await self._cancel(owner_id, task_id, data, now=now)
-        else:  # pragma: no cover - the runtime only emits the three verbs
-            _logger.warning("unknown steering verb {verb!r}", verb=verb)
+            return None
+        _logger.warning("unknown steering verb {verb!r}", verb=verb)  # pragma: no cover
+        return None
 
     async def _cancel(
         self, owner_id: str, task_id: str, data: Mapping[str, Any], *, now: datetime
@@ -127,3 +138,37 @@ class TaskSteeringService:
             _logger.error(
                 "cancel-failure account could not be delivered task_id={tid}", tid=task_id
             )
+
+
+def _steered(outcome: ControlOutcome) -> SteeringOutcome:
+    """A control's outcome as the runtime's steering outcome (R9-241)."""
+    return SteeringOutcome(changed=outcome.changed, note=outcome.note)
+
+
+class ControlSteeringPort:
+    """The loop's :class:`~persona_runtime.task_origination.TaskSteeringPort` (R9-241).
+
+    Applies a chat pause or resume DURING the turn through the same controls the routes
+    use, so the persona's reply can say what happened (D-ORCH-11-18-d (4)). The owner is the
+    request's RLS scope, read when the verb is applied; off-request there is no owner and the
+    task is not found, exactly as the pickup port behaves.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def steer(self, verb: SteeringVerb, task_id: str) -> SteeringOutcome:
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services.task_control_service import TaskControlMutator
+
+        owner = current_user_id.get()
+        if not owner:
+            raise TaskNotFoundError("no task context", context={"id": task_id})
+        mutator = TaskControlMutator(self._engine)
+        now = datetime.now(UTC)
+        if verb is SteeringVerb.PAUSE:
+            return _steered(mutator.pause(owner, task_id, now=now))
+        if verb is SteeringVerb.RESUME:
+            return _steered(mutator.unpause(owner, task_id, now=now))
+        msg = f"the steering port applies pause and resume only, not {verb.value}"
+        raise ValueError(msg)

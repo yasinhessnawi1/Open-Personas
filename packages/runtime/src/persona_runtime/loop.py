@@ -28,6 +28,7 @@ The decisions that shape this file:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -118,6 +119,7 @@ from persona_runtime.task_origination import (
     is_affirmative_confirmation,
     render_clause,
     render_echo,
+    steering_reply,
 )
 from persona_runtime.task_origination.reschedule_flow import assemble_reschedule_echo
 
@@ -156,7 +158,9 @@ if TYPE_CHECKING:
         AmendmentInterpreter,
         RescheduleInterpreter,
         StandingIntentRecognizer,
+        SteeringIntent,
         SteeringInterpreter,
+        TaskSteeringPort,
     )
     from persona_runtime.tier import TierRegistry
     from persona_runtime.unified_recall import UnifiedProjection
@@ -341,6 +345,8 @@ _INITIATIVE_DIAL_TEXT = {
 _STEER_PAUSED_TEXT = "Paused. Just say the word when you want it going again."
 _STEER_RESUMED_TEXT = "Done. It's running again."
 _STEER_CANCELLED_TEXT = "Cancelled. I've stopped that task."
+#: R9-241: what a pause or resume says when applying it raised (the task is unchanged).
+_STEER_FAILED_TEXT = "I couldn't change that task just now. Try again from its task page."
 
 #: Reschedule acknowledgements (Spec A8, T6). The actual retime/rerule happens api-side off the
 #: emitted event, through the CAS-guarded door; this is the immediate honest ack.
@@ -591,6 +597,7 @@ class ConversationLoop:
         amendment_interpreter: AmendmentInterpreter | None = None,
         steering_interpreter: SteeringInterpreter | None = None,
         task_reader_provider: Callable[[], TaskStateReader | None] | None = None,
+        task_steering_port_provider: Callable[[], TaskSteeringPort | None] | None = None,
         reschedule_interpreter: RescheduleInterpreter | None = None,
         timezone_provider: Callable[[], str] | None = None,
         quiet_hours_provider: Callable[[], QuietHours | None] | None = None,
@@ -618,6 +625,10 @@ class ConversationLoop:
         # immediately, cancel asks a consequence-aware confirmation first.
         self._steering_interpreter = steering_interpreter
         self._task_reader_provider = task_reader_provider
+        # R9-241: with a port wired, pause and resume are APPLIED during the turn and the
+        # reply says what happened (the control's own note on a no-op, D-ORCH-11-18-d (4)).
+        # ``None`` → the verb is emitted for the host to apply after the turn, as before.
+        self._task_steering_port_provider = task_steering_port_provider
         # Spec A8 (T6): the conversational reschedule verb — retime/rerule a live task ("move it to
         # 9", "make it weekly", "skip tomorrow's"). ``None`` → inert. When present it joins the
         # steering seam as a propose→confirm flow: resolve the target (honest — ambiguous lists +
@@ -987,17 +998,7 @@ class ConversationLoop:
                         yield _final_chunk(None)
                         return
                     if intent is not None:  # pause / resume — apply immediately, no confirm
-                        if on_event is not None:
-                            await on_event(
-                                RunEvent.task_steering(
-                                    verb=intent.verb.value, task_id=intent.task_id
-                                )
-                            )
-                        ack = (
-                            _STEER_PAUSED_TEXT
-                            if intent.verb is SteeringVerb.PAUSE
-                            else _STEER_RESUMED_TEXT
-                        )
+                        ack = await self._steer_now(intent, on_event)
                         yield _text_chunk(ack)
                         now_st = datetime.now(UTC)
                         conversation.messages.append(
@@ -1887,6 +1888,39 @@ class ConversationLoop:
         yield _final_chunk(usage)
 
     # ----- internals -------------------------------------------------------
+
+    async def _steer_now(
+        self,
+        intent: SteeringIntent,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None,
+    ) -> str:
+        """Pause or resume a live task, and return the reply that says what happened.
+
+        R9-241 (D-ORCH-11-18-d (4)): with the host's port wired the verb is applied here,
+        during the turn, so the reply can carry the control's own note on a no-op (the budget
+        refusal that points to Raise cap, ``Already paused.``, ``Not paused.``). The port is
+        synchronous database work, so it runs off the event loop; the copied context carries
+        the request's owner scope with it. Without a port the verb is emitted for the host to
+        apply after the turn and the reply is the plain acknowledgement, as before.
+        """
+        ack = _STEER_PAUSED_TEXT if intent.verb is SteeringVerb.PAUSE else _STEER_RESUMED_TEXT
+        port = (
+            self._task_steering_port_provider()
+            if self._task_steering_port_provider is not None
+            else None
+        )
+        if port is None:
+            if on_event is not None:
+                await on_event(
+                    RunEvent.task_steering(verb=intent.verb.value, task_id=intent.task_id)
+                )
+            return ack
+        try:
+            outcome = await asyncio.to_thread(port.steer, intent.verb, intent.task_id)
+        except Exception as exc:  # noqa: BLE001 - a steering miss must not fail the turn
+            _logger.warning("task steering failed in the turn: {err}", err=str(exc))
+            return _STEER_FAILED_TEXT
+        return steering_reply(outcome, ack)
 
     def _require_persona_id(self) -> str:
         pid = self._persona.persona_id

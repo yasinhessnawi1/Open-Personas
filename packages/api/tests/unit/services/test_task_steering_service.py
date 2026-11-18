@@ -10,7 +10,9 @@ from persona.errors import TaskNotFoundError, TaskStateError
 from persona.schema.origination import PersonaIdentityTag
 from persona.tasks import Contract, Task, TaskState
 from persona_api.approvals.failure import FailureKind
+from persona_api.services.task_control_service import BUDGET_REACHED_RESUME_NOTE, ControlOutcome
 from persona_api.services.task_steering_service import TaskSteeringService
+from persona_runtime.task_origination import SteeringOutcome
 
 if TYPE_CHECKING:
     from persona_api.approvals.failure import FailureAccount
@@ -37,8 +39,10 @@ class _FakeMutator:
         cancel_raises: Exception | None = None,
         get_task: Task | None = None,
         get_raises: Exception | None = None,
+        outcome: ControlOutcome | None = None,
     ) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        self._outcome = outcome or ControlOutcome(task=_task(), changed=True)
         self._cancel_raises = cancel_raises
         self._get_task = get_task
         self._get_raises = get_raises
@@ -49,13 +53,13 @@ class _FakeMutator:
         assert self._get_task is not None
         return self._get_task
 
-    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:  # noqa: ARG002
+    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:  # noqa: ARG002
         self.calls.append(("pause", owner_id, task_id))
-        return _task()
+        return self._outcome
 
-    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:  # noqa: ARG002
+    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:  # noqa: ARG002
         self.calls.append(("unpause", owner_id, task_id))
-        return _task()
+        return self._outcome
 
     def cancel(self, owner_id: str, task_id: str, *, now: datetime) -> Task:  # noqa: ARG002
         self.calls.append(("cancel", owner_id, task_id))
@@ -149,3 +153,32 @@ async def test_failed_cancel_on_a_vanished_task_is_a_benign_noop() -> None:
         tasks=mutator, notifier=notifier, persona_tag_resolver=lambda _pid: _TAG
     ).steer({"owner_id": "user-1", "task_id": "t1", "verb": "cancel", "persona_id": "astrid"})
     assert notifier.accounts == []
+
+
+# --- R9-241: the outcome reaches the reply ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_resume_hands_back_its_reason() -> None:
+    """The service used to discard the control's note, so the voice turn said "Done"."""
+    refused = ControlOutcome(task=_task(), changed=False, note=BUDGET_REACHED_RESUME_NOTE)
+    result = await TaskSteeringService(tasks=_FakeMutator(outcome=refused)).steer(
+        {"owner_id": "user-1", "task_id": "t1", "verb": "resume"}
+    )
+    assert result == SteeringOutcome(changed=False, note=BUDGET_REACHED_RESUME_NOTE)
+
+
+@pytest.mark.asyncio
+async def test_a_pause_that_took_hands_back_a_change() -> None:
+    result = await TaskSteeringService(tasks=_FakeMutator(get_task=_task())).steer(
+        {"owner_id": "user-1", "task_id": "t1", "verb": "pause"}
+    )
+    assert result == SteeringOutcome(changed=True, note="")
+
+
+@pytest.mark.asyncio
+async def test_cancel_hands_back_nothing_and_keeps_its_own_flow() -> None:
+    result = await TaskSteeringService(tasks=_FakeMutator(get_task=_task())).steer(
+        {"owner_id": "user-1", "task_id": "t1", "verb": "cancel"}
+    )
+    assert result is None

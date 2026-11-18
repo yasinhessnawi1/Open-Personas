@@ -35,6 +35,12 @@ from persona.tasks.checkpoint import (
     checkpoint_token_count,
     enforce_checkpoint_budget,
 )
+from persona.tasks.checkpoint_kind import (
+    CheckpointKind,
+    checkpoint_id,
+    checkpoint_id_prefix,
+    checkpoint_kind,
+)
 from persona.tasks.contract import (
     AcceptanceCriterion,
     AcceptanceStatus,
@@ -130,6 +136,7 @@ __all__ = [
     "settle_criteria",
     "ArtifactPointer",
     "CancellationSummary",
+    "CheckpointKind",
     "CompletionReport",
     "Contract",
     "ContractAttachment",
@@ -185,6 +192,9 @@ __all__ = [
     "build_stuck_report",
     "classify_retryable",
     "can_transition",
+    "checkpoint_id",
+    "checkpoint_id_prefix",
+    "checkpoint_kind",
     "checkpoint_token_count",
     "enforce_checkpoint_budget",
     "is_terminal",

@@ -443,6 +443,50 @@ class JobQueue:
         with rls_connection(self._engine, owner_id) as conn:
             return int(conn.execute(hot).scalar_one()) + int(conn.execute(cold).scalar_one())
 
+    def retire_queued(
+        self, *, owner_id: str, job_type: str, task_id: str, trigger_kind: str, reason: str
+    ) -> int:
+        """Retire this task's still-QUEUED jobs of one trigger kind; return how many (R9-239).
+
+        A retired job is ``succeeded`` without running, the state a job the claim consumes
+        ends in, so :meth:`count_spent_attempts` counts it and a later enqueue at its key is
+        suffixed past it rather than absorbed by it. ``WHERE state = 'queued'`` is the whole
+        guard: a job a worker has already claimed is left to its own handler.
+        """
+        stmt = (
+            update(jobs)
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.type == job_type,
+                jobs.c.state == JobState.QUEUED.value,
+                jobs.c.payload["task_id"].as_string() == task_id,
+                jobs.c.payload[("trigger", "kind")].as_string() == trigger_kind,
+            )
+            .values(state=JobState.SUCCEEDED.value, last_error=reason)
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            return int(conn.execute(stmt).rowcount or 0)
+
+    def count_live_attempts(self, *, owner_id: str, idempotency_key: str, trigger_kind: str) -> int:
+        """Claimed or running jobs of one trigger kind at ``idempotency_key`` or its successors.
+
+        The companion of :meth:`retire_queued` for the job a worker claimed a moment ago: it
+        cannot be retired, and an enqueue at its key would be absorbed by it.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(jobs)
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.state.in_((JobState.CLAIMED.value, JobState.RUNNING.value)),
+                (jobs.c.idempotency_key == idempotency_key)
+                | jobs.c.idempotency_key.like(f"{idempotency_key}:retry:%"),
+                jobs.c.payload[("trigger", "kind")].as_string() == trigger_kind,
+            )
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            return int(conn.execute(stmt).scalar_one())
+
     def latest(
         self, *, owner_id: str, job_type: str, idempotency_key_prefix: str
     ) -> JobRecord | None:

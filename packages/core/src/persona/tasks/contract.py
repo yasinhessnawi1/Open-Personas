@@ -100,7 +100,8 @@ def bound_reached(bounds: ContractBounds, *, legs_run: int, now: datetime) -> st
 
     Args:
         bounds: The contract's stated bounds.
-        legs_run: How many legs have run so far (the head checkpoint sequence plus one).
+        legs_run: How many legs have run so far: checkpoints a leg wrote, not the head
+            sequence, which also counts obstacle, approval and reply records (R9-220).
         now: The current tz-aware instant.
 
     Returns:

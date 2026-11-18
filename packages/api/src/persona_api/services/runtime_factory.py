@@ -116,6 +116,7 @@ if TYPE_CHECKING:
         RescheduleInterpreter,
         StandingIntentRecognizer,
         SteeringInterpreter,
+        TaskSteeringPort,
     )
     from persona_runtime.tier import TierRegistry
     from persona_runtime.unified_recall import UnifiedProjection
@@ -1743,6 +1744,22 @@ class RuntimeFactory:
 
         return _provider
 
+    def _build_task_steering_port_provider(self) -> Callable[[], TaskSteeringPort | None]:
+        """The chat steering port provider (R9-241): owner-scoped per turn, closed off-request.
+
+        Mirrors :meth:`_build_task_reader_provider`: no request owner means no port, and the
+        loop then falls back to emitting the verb for the worker to apply.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services.task_steering_service import ControlSteeringPort
+
+        port = ControlSteeringPort(self._engine)
+
+        def _provider() -> TaskSteeringPort | None:
+            return port if current_user_id.get() else None
+
+        return _provider
+
     def _build_task_pickup_provider(
         self, persona_id: str | None
     ) -> Callable[[], TaskPickupPort | None]:
@@ -2134,6 +2151,9 @@ class RuntimeFactory:
             amendment_interpreter=amendment_interpreter,
             steering_interpreter=steering_interpreter,
             task_reader_provider=self._build_task_reader_provider(),
+            # R9-241: pause and resume are applied during the turn through the shared
+            # controls, so the reply says what happened (D-ORCH-11-18-d (4)).
+            task_steering_port_provider=self._build_task_steering_port_provider(),
             # Spec A8 (T6): the conversational reschedule verb. The interpreter resolves the target
             # + new cadence; the tz/quiet-hours providers resolve the user's frame per turn (the K6
             # seam). Fail-soft: None → the reschedule gate stays inert. Lands with the worker-side

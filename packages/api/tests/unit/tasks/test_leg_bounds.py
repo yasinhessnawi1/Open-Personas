@@ -18,10 +18,12 @@ from persona.tasks import (
     ContractBounds,
     ScheduledFire,
     Task,
+    TaskCheckpoint,
     TaskState,
     UserDispatch,
     WaitKind,
 )
+from persona.tasks.checkpoint_kind import CheckpointKind, checkpoint_id, checkpoint_kind
 from persona_api.db.community import create_community_schema, ensure_owner, make_community_engine
 from persona_api.db.models import personas as personas_t
 from persona_api.tasks import TaskLegHandler, TaskLegPayload, TaskStore
@@ -34,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from pathlib import Path
 
-    from persona.tasks import LegBox, ResumeTrigger, SpendKind, TaskCheckpoint
+    from persona.tasks import LegBox, ResumeTrigger, SpendKind
     from sqlalchemy import Engine
 
 _NOW = datetime(2026, 9, 18, 9, 0, tzinfo=UTC)
@@ -83,8 +85,21 @@ class _Builder:
 class _Sink:
     """The checkpoint store minus its Postgres-only row id: what landed, and the head."""
 
-    def __init__(self) -> None:
-        self.landed: list[TaskCheckpoint] = []
+    def __init__(self, chain: tuple[CheckpointKind, ...] = ()) -> None:
+        self.landed: list[TaskCheckpoint] = [
+            TaskCheckpoint(
+                task_id="t1",
+                leg_id=checkpoint_id("t1", kind, seq),
+                checkpoint_seq=seq,
+                updated_at=_NOW,
+            )
+            for seq, kind in enumerate(chain)
+        ]
+
+    def count_legs(self, owner_id: str, task_id: str) -> int:  # noqa: ARG002
+        return sum(
+            1 for c in self.landed if checkpoint_kind(task_id, c.leg_id) is CheckpointKind.LEG
+        )
 
     def get_latest(self, owner_id: str, task_id: str) -> TaskCheckpoint | None:  # noqa: ARG002
         return self.landed[-1] if self.landed else None
@@ -120,14 +135,14 @@ class _Context:
         return None
 
 
-def _task(store: TaskStore, bounds: ContractBounds, *, legs_done: int = 0) -> Task:
-    """A started task that has already run ``legs_done`` legs (its head says so)."""
+def _task(store: TaskStore, bounds: ContractBounds, *, chain_length: int = 0) -> Task:
+    """A started task whose checkpoint chain is ``chain_length`` long (its head says so)."""
     task = Task(
         id="t1",
         owner_id=_OWNER,
         persona_id=_PERSONA,
         contract=Contract(goal="find a flat", bounds=bounds),
-        head_checkpoint_seq=legs_done - 1 if legs_done else None,
+        head_checkpoint_seq=chain_length - 1 if chain_length else None,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -136,11 +151,15 @@ def _task(store: TaskStore, bounds: ContractBounds, *, legs_done: int = 0) -> Ta
 
 
 async def _fire(
-    engine: Engine, bounds: ContractBounds, trigger: ResumeTrigger, *, legs_done: int = 0
+    engine: Engine,
+    bounds: ContractBounds,
+    trigger: ResumeTrigger,
+    *,
+    chain: tuple[CheckpointKind, ...] = (),
 ) -> tuple[TaskStore, _Sink, _RecordingQueue, _BoxedRunner]:
     store = TaskStore(engine)
-    task = _task(store, bounds, legs_done=legs_done)
-    sink = _Sink()
+    task = _task(store, bounds, chain_length=len(chain))
+    sink = _Sink(chain)
     queue = _RecordingQueue()
     runner = _BoxedRunner()
     handler = TaskLegHandler(
@@ -168,7 +187,7 @@ async def test_a_task_at_its_leg_cap_is_parked_rather_than_re_enqueued(engine: E
         engine,
         ContractBounds(max_legs=2),
         ScheduledFire(schedule_id="s", fire_time=_NOW),
-        legs_done=1,
+        chain=(CheckpointKind.LEG,),
     )
 
     assert runner.runs == 1  # this leg ran; it was the last one allowed
@@ -227,3 +246,69 @@ async def test_a_user_pickup_past_the_deadline_runs_one_more_leg(engine: Engine)
     assert runner.runs == 1
     assert queue.enqueued == []
     assert store.get(_OWNER, "t1").wait_kind is WaitKind.ON_USER
+
+
+@pytest.mark.asyncio
+async def test_records_between_legs_do_not_count_against_the_leg_cap(engine: Engine) -> None:
+    """R9-220: one leg ran, then an approval park recorded its obstacle and the answer was
+    folded in. The head is at 2, but only one leg went at the work, so a cap of three still
+    has room for this leg and the next. Counting the head parked it at the door."""
+    _, _, queue, runner = await _fire(
+        engine,
+        ContractBounds(max_legs=3),
+        ScheduledFire(schedule_id="s", fire_time=_NOW),
+        chain=(CheckpointKind.LEG, CheckpointKind.BLOCKED, CheckpointKind.APPROVAL),
+    )
+
+    assert runner.runs == 1
+    assert len(queue.enqueued) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_saved_reply_does_not_count_against_the_leg_cap_either(engine: Engine) -> None:
+    """The fourth record kind (R9-240's saved reply) is not a leg: two legs plus a reply
+    under a cap of three runs this leg, which is the third, and then parks."""
+    store, _, queue, runner = await _fire(
+        engine,
+        ContractBounds(max_legs=3),
+        ScheduledFire(schedule_id="s", fire_time=_NOW),
+        chain=(CheckpointKind.LEG, CheckpointKind.REPLY, CheckpointKind.LEG),
+    )
+
+    assert runner.runs == 1
+    assert queue.enqueued == []
+    assert store.get(_OWNER, "t1").wait_kind is WaitKind.ON_USER
+
+
+def test_the_store_counts_the_legs_in_a_chain_not_its_length(engine: Engine) -> None:
+    """The real query, on the community engine: five checkpoints, two of them legs.
+
+    The rows are written directly because the community schema has no server default for
+    the checkpoint row id (the Postgres-only part ``_Sink`` stands in for above); the count
+    reads ``leg_id`` out of the stored JSON exactly as it does on Postgres.
+    """
+    from persona_api.db.models import task_checkpoints as checkpoints_t
+    from persona_api.tasks.serde import checkpoint_values
+    from persona_api.tasks.store import CheckpointStore
+
+    _task(TaskStore(engine), ContractBounds(max_legs=9))
+    kinds = (
+        CheckpointKind.LEG,
+        CheckpointKind.BLOCKED,
+        CheckpointKind.APPROVAL,
+        CheckpointKind.LEG,
+        CheckpointKind.REPLY,
+    )
+    with engine.begin() as conn:
+        for seq, kind in enumerate(kinds):
+            checkpoint = TaskCheckpoint(
+                task_id="t1",
+                leg_id=checkpoint_id("t1", kind, seq),
+                checkpoint_seq=seq,
+                updated_at=_NOW,
+            )
+            conn.execute(
+                insert(checkpoints_t).values(id=f"cp{seq}", **checkpoint_values(checkpoint, _OWNER))
+            )
+
+    assert CheckpointStore(engine).count_legs(_OWNER, "t1") == 2

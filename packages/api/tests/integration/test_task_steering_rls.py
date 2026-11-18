@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 import pytest
 from persona.errors import TaskNotFoundError
 from persona.tasks import Contract, Task, TaskState
+from persona_api.services.task_control_service import TaskControlMutator
 from persona_api.services.task_steering_service import TaskSteeringService
 from persona_api.tasks import TaskStore
 from sqlalchemy import create_engine, text
@@ -75,7 +76,9 @@ async def test_cross_channel_steer_is_owner_scoped_and_non_vacuous(
     tasks = TaskStore(app_engine)
     tasks.create(_active_task("t_a", "user_a", "persona_a"))
     tasks.create(_active_task("t_b", "user_b", "persona_b"))
-    steering = TaskSteeringService(tasks=tasks)
+    # The production mutator (task_origination_composition wires exactly this): pause and
+    # resume answer the shared controls' outcome since R9-241, which a bare TaskStore does not.
+    steering = TaskSteeringService(tasks=TaskControlMutator(app_engine))
 
     # Owner A steers A's own task (channel-agnostic — the verb + task id are all it takes).
     await steering.steer({"owner_id": "user_a", "task_id": "t_a", "verb": "cancel"})

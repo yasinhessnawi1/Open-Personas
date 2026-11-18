@@ -29,6 +29,7 @@ from persona_api.jobs.queue import JobQueue
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services.origination_adapters import OriginatorApprovalNotifier
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.hold import TaskHold
 from persona_api.tasks.store import CheckpointStore, TaskStore
 
 if TYPE_CHECKING:
@@ -113,6 +114,9 @@ class ApprovalResolutionService:
                 tasks=tasks,
                 channels=self._channels,
             ),
+            # R9-239 part 1: a decision on a paused task, or one at its cap, is carried out
+            # and its next leg held for Resume or Raise cap (D-ORCH-11-18-d (2)).
+            hold=TaskHold(engine),
         )
 
     async def resolve(

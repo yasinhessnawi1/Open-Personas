@@ -12,6 +12,7 @@ import type {
   ApprovalOut,
   JsonValue,
 } from "@/lib/api/approvals-client";
+import { heldNoteKey } from "@/lib/approvals/held-note";
 import { personaIdentityStyle } from "@/lib/persona-identity";
 import { cn } from "@/lib/utils";
 
@@ -136,6 +137,7 @@ export function ApprovalCard({
   const [edited, setEdited] = useState<Record<string, string>>({});
 
   const reflection = reflectionKey(approval, resolution);
+  const heldKey = heldNoteKey(resolution?.note);
   // The card rests once the record is decided: either the row itself is terminal (a handled
   // card read back on a fresh page) or the live answer settled it. Only the material edit's
   // re-confirm leaves it open, which is exactly the case that still needs the buttons.
@@ -222,6 +224,15 @@ export function ApprovalCard({
         <p className="type-body">{approval.description}</p>
 
         {reflection ? <ResolutionBanner reflection={reflection} t={t} /> : null}
+        {/* D-ORCH-11-18-d (2): the decision ran; say why the task's next step waits. */}
+        {heldKey ? (
+          <p
+            className="text-sm text-muted-foreground"
+            data-slot="approval-held"
+          >
+            {t(`held.${heldKey}`)}
+          </p>
+        ) : null}
 
         {/* see-then-grant: the proposal + actions are gated behind expand — you cannot approve
             without first seeing the exact recorded payload (the informed-consent grammar). */}

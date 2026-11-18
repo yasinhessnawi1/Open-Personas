@@ -540,6 +540,11 @@
       "resolvedGeneric": "Done.",
       "expiredReflection": "This expired before it was answered."
     },
+    "held": {
+      "heldWhilePaused": "The task is paused, so it carries on from here when you resume it.",
+      "heldAtTheCap": "The task has used its budget, so it carries on from here when you raise the cap with Raise cap on the task page.",
+      "holdFailed": "The task could not be set to carry on by itself. Pick it up from the task page when you want it to continue."
+    },
     "valueNone": "Not set"
   },
   "tasks": {

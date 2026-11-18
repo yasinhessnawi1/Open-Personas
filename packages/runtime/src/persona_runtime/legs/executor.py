@@ -33,10 +33,12 @@ from typing import TYPE_CHECKING, Protocol
 from persona.errors import GatedActionProposedError
 from persona.logging import get_logger
 from persona.tasks import (
+    CheckpointKind,
     LegBox,
     LegBoxLimit,
     SpendKind,
     UserReply,
+    checkpoint_id,
     reconstruct_context,
 )
 
@@ -444,7 +446,9 @@ class LegExecutor:
                 blocked_on=_gate_obstacle(exc),
             )
 
-        leg_id = f"{task.id}:leg:{effective_seq}"
+        # R9-220: the leg kind is what the leg cap counts; obstacle, approval and reply
+        # records mint their own kinds through the same helper.
+        leg_id = checkpoint_id(task.id, CheckpointKind.LEG, effective_seq)
         checkpoint = await self._writer.write(
             task=task, prior=prior_checkpoint, run=run, leg_id=leg_id, seq=effective_seq, now=now
         )

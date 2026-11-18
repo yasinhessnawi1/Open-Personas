@@ -56,6 +56,13 @@ class _FakeQueue:
     def count_spent_attempts(self, *, owner_id: str, idempotency_key: str) -> int:  # noqa: ARG002
         return 0  # R9-158: the extension resumes through the continuation's seam
 
+    def retire_queued(self, **_: object) -> int:
+        """R9-239: a reply retires a stale queued Revived; this fake holds none."""
+        return 0
+
+    def count_live_attempts(self, **_: object) -> int:
+        return 0
+
 
 def _seed(engine: Engine, user: str, persona: str) -> None:
     with engine.begin() as conn:
