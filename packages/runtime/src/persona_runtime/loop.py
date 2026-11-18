@@ -2882,7 +2882,7 @@ def _priced_round(
     unrecovered cost, never charged (D-ORCH-11-18-h).
     """
     provider, model = served_identity(backend, served)
-    unrecovered = (
+    failed_tries = (
         tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
         if served is not None
         else ()
@@ -2893,7 +2893,7 @@ def _priced_round(
         cost_usd=usage.cost_usd,
         provider=provider,
         model=model,
-        unrecovered=unrecovered,
+        failed_tries=failed_tries,
     )
 
 

@@ -78,7 +78,7 @@ def _round(
     prompt: int,
     completion: int,
     cost_usd: float | None = None,
-    unrecovered: tuple[BackendAttempt, ...] = (),
+    failed_tries: tuple[BackendAttempt, ...] = (),
 ) -> PricedRound:
     return PricedRound(
         prompt_tokens=prompt,
@@ -86,7 +86,7 @@ def _round(
         cost_usd=cost_usd,
         provider=provider,
         model=model,
-        unrecovered=unrecovered,
+        failed_tries=failed_tries,
     )
 
 
@@ -253,7 +253,7 @@ def test_a_failed_try_with_usage_is_not_charged_but_its_cost_is_logged(
         error_class="EmptyCompletionError",
         usage=TokenUsage(prompt_tokens=9000, completion_tokens=0, total_tokens=9000),
     )
-    rounds = [_round("deepseek", "deepseek-chat", 8000, 200, unrecovered=(wasted,))]
+    rounds = [_round("deepseek", "deepseek-chat", 8000, 200, failed_tries=(wasted,))]
     cents, _ = price_rounds(rounds, source=_SRC, surface="chat")
     assert cents == pytest.approx(0.238)
     lines = [m for level, m in logs if level == "INFO" and "unrecovered model cost" in m]

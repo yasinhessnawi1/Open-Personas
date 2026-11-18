@@ -118,11 +118,11 @@ class VoiceTurnAccumulator:
         cost_usd: float | None,
         provider: str,
         model: str,
-        unrecovered: tuple[BackendAttempt, ...] = (),
+        failed_tries: tuple[BackendAttempt, ...] = (),
     ) -> None:
         """Record one model round's usage under the model that served that round.
 
-        ``unrecovered``: the round's failed tries that reported tokens, logged with
+        ``failed_tries``: the round's failed tries that reported tokens, logged with
         their cost when the turn is priced and never charged (D-ORCH-11-18-h).
         """
         self._rounds.append(
@@ -132,7 +132,7 @@ class VoiceTurnAccumulator:
                 cost_usd=cost_usd,
                 provider=provider,
                 model=model,
-                unrecovered=unrecovered,
+                failed_tries=failed_tries,
             )
         )
 
@@ -233,7 +233,7 @@ class VoiceTurnBillingMeter:
         cost_usd: float | None,
         provider: str,
         model: str,
-        unrecovered: tuple[BackendAttempt, ...] = (),
+        failed_tries: tuple[BackendAttempt, ...] = (),
     ) -> None:
         """Record one model round's usage this turn (delegates to the accumulator)."""
         self._accumulator.note_llm_usage(
@@ -242,7 +242,7 @@ class VoiceTurnBillingMeter:
             cost_usd=cost_usd,
             provider=provider,
             model=model,
-            unrecovered=unrecovered,
+            failed_tries=failed_tries,
         )
 
     # ----- pricing (pure) ----------------------------------------------------

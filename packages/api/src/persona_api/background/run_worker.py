@@ -162,7 +162,7 @@ class _RunBillingWatcher:
                     cost_usd=usage.cost_usd,
                     provider=usage.provider,
                     model=usage.model,
-                    unrecovered=usage.unrecovered,
+                    failed_tries=usage.failed_tries,
                 )
             ],
             source=self._cost_source,

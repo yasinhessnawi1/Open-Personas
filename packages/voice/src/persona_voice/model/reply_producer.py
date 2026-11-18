@@ -106,7 +106,7 @@ _DEFAULT_MAX_TOKENS = 4096
 GATE_BUDGET_S: float = 4.0
 
 
-def _unrecovered(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
+def _failed_tries(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
     """A call's failed tries that reported tokens: logged as unrecovered, never charged."""
     if served is None:
         return ()
@@ -682,7 +682,7 @@ class VoiceModelReplyProducer:
                     cost_usd=chunk.usage.cost_usd,
                     provider=provider,
                     model=model,
-                    unrecovered=_unrecovered(chunk.served),
+                    failed_tries=_failed_tries(chunk.served),
                 )
             tcd = chunk.tool_call_delta
             if tcd is not None:

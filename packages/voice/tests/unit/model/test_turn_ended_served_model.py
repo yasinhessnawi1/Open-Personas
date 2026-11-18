@@ -512,7 +512,7 @@ class _MeterFeed:
         cost_usd: float | None,
         provider: str,
         model: str,
-        unrecovered: tuple[object, ...] = (),
+        failed_tries: tuple[object, ...] = (),
     ) -> None:
         self.llm.append((provider, model))
 
@@ -692,11 +692,11 @@ class _EmptyThenRateLimited(_Backend):
 class _UnrecoveredFeed(_MeterFeed):
     def __init__(self) -> None:
         super().__init__()
-        self.unrecovered: list[tuple[object, ...]] = []
+        self.failed_tries: list[tuple[object, ...]] = []
 
-    def note_llm_usage(self, *, unrecovered: tuple[object, ...] = (), **kw: Any) -> None:
+    def note_llm_usage(self, *, failed_tries: tuple[object, ...] = (), **kw: Any) -> None:
         super().note_llm_usage(**kw)
-        self.unrecovered.append(unrecovered)
+        self.failed_tries.append(failed_tries)
 
 
 async def test_a_concurrent_call_on_the_shared_chain_does_not_rename_the_billed_round(
@@ -801,7 +801,7 @@ async def test_a_failed_try_that_cost_tokens_reaches_the_meter_as_unrecovered(
     await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
 
     assert meter.llm == [("anthropic", "fallback-model")]
-    (wasted,) = meter.unrecovered[0]
+    (wasted,) = meter.failed_tries[0]
     assert (wasted.model, wasted.error_class, wasted.usage.prompt_tokens) == (  # type: ignore[attr-defined]
         "primary-model",
         "EmptyCompletionError",

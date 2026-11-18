@@ -203,7 +203,7 @@ class PricedRound:
         provider: The served provider (the chain's ``ServedCall``, or a bare backend's
             own name). An empty ``model`` means no model served the round.
         model: The served model.
-        unrecovered: Failed tries of this call that reported usage (an empty or
+        failed_tries: Failed tries of this call that reported usage (an empty or
             degenerate completion). NOT charged (D-ORCH-11-18-h); priced only to be
             logged as unrecovered cost.
     """
@@ -213,7 +213,7 @@ class PricedRound:
     cost_usd: float | None
     provider: str
     model: str
-    unrecovered: tuple[BackendAttempt, ...] = ()
+    failed_tries: tuple[BackendAttempt, ...] = ()
 
 
 #: How certain each priced basis is, for labelling a turn whose rounds differ (D3):
@@ -260,7 +260,7 @@ def price_rounds(
       a warning naming its provider and model. A turn with no priced round is
       ``(0.0, "unpriced")``: the existing unpriced path (warn-once, the floor).
     * D3: the turn's basis is the least certain basis among its priced rounds.
-    * D1: a round's ``unrecovered`` failed tries are priced and logged at INFO as
+    * D1: a round's ``failed_tries`` are priced and logged at INFO as
       unrecovered cost, and never added to the total.
 
     Args:
@@ -275,7 +275,7 @@ def price_rounds(
     bases: list[CostBasis] = []
     unpriced: list[PricedRound] = []
     for priced_round in rounds:
-        _log_unrecovered(priced_round, source, surface)
+        _log_failed_tries(priced_round, source, surface)
         if not priced_round.model:
             continue
         round_cents, basis = compute_turn_cost(
@@ -307,9 +307,9 @@ def price_rounds(
     return round(cents, CENTS_ROUND_DECIMALS), least_certain_basis(bases)
 
 
-def _log_unrecovered(priced_round: PricedRound, source: CostSource | None, surface: str) -> None:
+def _log_failed_tries(priced_round: PricedRound, source: CostSource | None, surface: str) -> None:
     """Log each failed try of ``priced_round`` that cost tokens, with its price (D1)."""
-    for attempt in priced_round.unrecovered:
+    for attempt in priced_round.failed_tries:
         usage = attempt.usage
         if usage is None:
             continue

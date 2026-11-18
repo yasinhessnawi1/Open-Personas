@@ -136,7 +136,7 @@ class StepUsage(BaseModel):
         completion_tokens: Completion tokens the step's model call emitted.
         cost_usd: Response-side actual cost in USD (OpenRouter usage.cost), or
             ``None`` — the caller then prices from the token counts.
-        unrecovered: The step's failed tries that reported tokens (an empty or
+        failed_tries: The step's failed tries that reported tokens (an empty or
             degenerate completion before a fallback answered). Never charged; the
             pricer logs their cost as unrecovered (D-ORCH-11-18-h).
     """
@@ -149,7 +149,7 @@ class StepUsage(BaseModel):
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     cost_usd: float | None = Field(default=None, ge=0.0)
-    unrecovered: tuple[BackendAttempt, ...] = ()
+    failed_tries: tuple[BackendAttempt, ...] = ()
 
 
 class CancelToken:

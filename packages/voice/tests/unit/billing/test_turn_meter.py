@@ -639,8 +639,8 @@ def test_a_rounds_failed_tries_ride_to_pricing_to_be_logged_not_charged() -> Non
         cost_usd=None,
         provider="anthropic",
         model="fallback-model",
-        unrecovered=(wasted,),
+        failed_tries=(wasted,),
     )
     (llm_round,) = acc.take_turn().llm_rounds
-    assert llm_round.unrecovered == (wasted,)
+    assert llm_round.failed_tries == (wasted,)
     assert (llm_round.prompt_tokens, llm_round.model) == (10, "fallback-model")
