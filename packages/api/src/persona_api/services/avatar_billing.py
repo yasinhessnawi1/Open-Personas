@@ -18,10 +18,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.billing import BillingConfig, credits_charged
-from persona.billing.image_pricing import image_cents
 from persona.logging import get_logger
-from persona_runtime.cost import compute_turn_cost
 from pydantic import BaseModel, ConfigDict
+
+from persona_api.services.image_cost import generation_cost_cents
 
 if TYPE_CHECKING:
     from persona.imagegen import GenerationResult
@@ -67,7 +67,8 @@ def bill_avatar_owner(
     """Charge the persona owner for a successfully generated avatar (Spec M3, D-M3-11).
 
     Prices the generation like any image (``compute_turn_cost`` over the served
-    model's usage; an OpenRouter ``usage.cost`` actual is preferred), runs it
+    model's usage; an OpenRouter ``usage.cost`` actual is preferred; else the
+    registry's per-image price times the images returned, R9-198), runs it
     through the credit formula (floored; infra rides the floor, D-M3-4 amendment)
     and records the deduct with ``cost_cents`` / ``cost_basis`` under
     ``billing_key``. Returns the charge, or ``None`` when nothing was recorded:
@@ -90,19 +91,10 @@ def bill_avatar_owner(
     if credits_policy is None:
         return None
     try:
-        cost_cents, basis = compute_turn_cost(
-            provider=result.provider,
-            model=result.model,
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
-            actual_cost_usd=result.cost_usd,
-            source=cost_source,
-        )
-        if basis == "unpriced":
-            # The same gap the generated-image true-up had: only the OpenRouter backend
-            # reports its own cost, and per-token pricing over zero tokens floors the charge.
-            # An avatar is an image, so it is priced from the same registry row.
-            cost_cents, basis = image_cents(result.provider, model=result.model)
+        # Priced exactly as the request path's true-up prices an image: the call's own cost
+        # when it has one, else the registry's per-image price times the images returned.
+        # The avatar asks for one image, so today that is one image's price (R9-198).
+        cost_cents, basis = generation_cost_cents(result, cost_source=cost_source)
         if basis == "unpriced":
             _LOG.warning(
                 "avatar billed at the floor: no provider cost and no pricing row "
