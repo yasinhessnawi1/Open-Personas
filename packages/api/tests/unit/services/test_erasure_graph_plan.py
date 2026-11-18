@@ -396,21 +396,22 @@ def test_a_tie_between_readings_goes_to_the_one_naming_more_doomed_names() -> No
 
 
 def test_a_long_legacy_list_is_tokenised_fast() -> None:
-    """Round 5 LOW-3: 1000 known names, about 47k characters, well inside a second."""
+    """Round 5 LOW-3: 1000 known names, about 47k characters, well inside 2 s of CPU."""
     import time  # noqa: PLC0415
 
     names = [f"name {i:04d}, of the place number {i:04d} in a town" for i in range(1000)]
     listed = ",".join(names)
     assert 40_000 < len(listed) < 50_000
 
-    # The best of three runs, in CPU time: a busy CI runner stretches wall time and one run
-    # (R9-307: 1.14 s and 1.26 s against a 1.0 s bound). Locally the scan takes about 0.02 s
-    # of CPU, so 2 s still catches the quadratic scan this guards against.
+    # The best of three runs, in this thread's CPU time: a busy CI runner stretches wall
+    # time, and a single run is exposed to one-off pauses (R9-307: 1.14 s and 1.26 s against
+    # a 1.0 s bound). Locally the scan takes about 0.02 s, and the old per-position scan took
+    # about 7 s (b1ce7af3), so 2 s still catches it.
     timings = []
     for _ in range(3):
-        started = time.process_time()
+        started = time.thread_time()
         found = split_alias_list(listed, names, doomed=names[:10])
-        timings.append(time.process_time() - started)
+        timings.append(time.thread_time() - started)
         assert found == names
 
     assert min(timings) < 2.0, f"took {min(timings):.2f}s of CPU at best"
