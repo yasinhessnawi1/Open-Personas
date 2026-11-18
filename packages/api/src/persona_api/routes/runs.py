@@ -162,7 +162,9 @@ async def cancel(
         task = TaskStore(engine).get(user.id, str(task_id))
         if is_terminal(task.state):  # already done / cancelled: the durable truth, calmly
             return {"status": "finished", "task_id": str(task_id)}
-        task_control_service.cancel_task(engine, user.id, task)
+        if task_control_service.cancel_task(engine, user.id, task) is None:
+            # R9-247: the task finished between the check above and the cancel landing.
+            return {"status": "finished", "task_id": str(task_id)}
         return {"status": "cancelling", "task_id": str(task_id)}
     run_service.cancel_run(
         rls_engine=engine,

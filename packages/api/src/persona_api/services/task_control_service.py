@@ -91,15 +91,29 @@ def mirror_schedule_pause(engine: Engine, owner_id: str, task: Task, *, paused: 
 
 def cancel_task(
     engine: Engine, owner_id: str, task: Task, *, now: datetime | None = None
-) -> CancellationSummary:
+) -> CancellationSummary | None:
     """Cancel ``task`` (terminal) and stop its schedule firing. One cancel for every door.
 
     The kill switch's cancel audits ``task.cancel`` and lands the terminal state; the
     schedule mirror then stops the cadence (R9-108's second half). A running leg finishes
     its current step and then stops (the external cancel seam is T6, D-W1-21).
+
+    Returns ``None`` when the task finished first (R9-247): the door read it live, the leg
+    completed or failed it, and the cancel's transition then judged the finished row. That
+    is the durable truth a moment later, not an error, so every door answers it the way it
+    answers a task that was already finished when the user pressed Cancel.
     """
+    from persona.errors import TaskStateError
+    from persona.tasks import is_terminal
+
     at = now if now is not None else datetime.now(UTC)
-    summary = _kill_switch(engine).cancel_task(owner_id, task.id, now=at)
+    try:
+        summary = _kill_switch(engine).cancel_task(owner_id, task.id, now=at)
+    except TaskStateError:
+        if not is_terminal(TaskStore(engine).get(owner_id, task.id).state):
+            raise
+        _log.info("cancel found the task already finished", task_id=task.id)
+        return None
     mirror_schedule_pause(engine, owner_id, task, paused=True)
     return summary
 

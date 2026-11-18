@@ -33,7 +33,7 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import TaskNotFoundError
+from persona.errors import TaskNotFoundError, TaskStateError
 from persona.logging import get_logger
 from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
@@ -75,6 +75,11 @@ if TYPE_CHECKING:
 __all__ = ["CheckpointStore", "TaskStore"]
 
 _log = get_logger("api.tasks.store")
+
+#: How many times a transition decides again after losing a race (R9-247). A race is a
+#: window of milliseconds between two controls, so a second read almost always settles it;
+#: the bound only stops a pathological flapping row from looping forever.
+_TRANSITION_ATTEMPTS = 3
 
 
 def _as_id_list(value: object) -> list[str]:
@@ -343,19 +348,43 @@ class TaskStore:
     def _transition(
         self, owner_id: str, task_id: str, action: str, apply: Callable[[Task], Task]
     ) -> Task:
-        """Fetch → apply the entity transition (may raise) → persist state → audit."""
-        current = self.get(owner_id, task_id)
-        updated = apply(current)
-        self._persist_state(owner_id, task_id, updated)
-        self._audit(owner_id, action, updated)
-        return updated
+        """Fetch → apply the entity transition (may raise) → compare-and-set → audit.
 
-    def _persist_state(self, owner_id: str, task_id: str, task: Task) -> None:
-        """RLS-scoped UPDATE of the transition columns; raise NotFound if no row matched."""
+        R9-247: the write lands only over the state it was decided from. A writer that
+        committed in between (the leg's ``complete`` under a Pause, the user's Pause under the
+        leg's ``begin_wait``) makes the compare miss; the transition then re-reads and decides
+        again, so the entity's own guards judge the fresh row (a Pause on a task that has just
+        completed raises, a completion on a task that has just been paused still completes).
+        """
+        for _ in range(_TRANSITION_ATTEMPTS):
+            current = self.get(owner_id, task_id)
+            updated = apply(current)
+            if self._persist_state(owner_id, task_id, updated, read=current):
+                self._audit(owner_id, action, updated)
+                return updated
+            _log.info("task transition lost a race; deciding again", task_id=task_id, action=action)
+        raise TaskStateError(
+            "the task kept changing while this transition was decided",
+            context={"task_id": task_id, "action": action},
+        )
+
+    def _persist_state(self, owner_id: str, task_id: str, task: Task, *, read: Task) -> bool:
+        """RLS-scoped compare-and-set of the transition columns over the state ``read`` held.
+
+        Returns whether the write landed. A miss on a row that still exists is a lost race
+        (the caller re-decides); a miss on a row that is gone raises NotFound.
+        """
         with rls_connection(self._engine, owner_id) as conn:
             result = conn.execute(
                 update(tasks_t)
-                .where(tasks_t.c.id == task_id)
+                .where(
+                    tasks_t.c.id == task_id,
+                    tasks_t.c.state == read.state.value,
+                    tasks_t.c.paused.is_(read.paused),
+                    tasks_t.c.wait_kind.is_not_distinct_from(
+                        read.wait_kind.value if read.wait_kind is not None else None
+                    ),
+                )
                 .values(
                     state=task.state.value,
                     paused=task.paused,
@@ -363,8 +392,12 @@ class TaskStore:
                     updated_at=task.updated_at,
                 )
             )
-            if result.rowcount != 1:
-                raise TaskNotFoundError("task not found", context={"task_id": task_id})
+            if result.rowcount == 1:
+                return True
+            exists = conn.execute(select(tasks_t.c.id).where(tasks_t.c.id == task_id)).first()
+        if exists is None:
+            raise TaskNotFoundError("task not found", context={"task_id": task_id})
+        return False
 
     def _audit(self, owner_id: str, action: str, task: Task) -> None:
         audit_service.record(

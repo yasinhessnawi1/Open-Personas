@@ -441,7 +441,11 @@ async def cancel_task(
     if is_terminal(task.state):  # already done/cancelled → the durable truth, no error
         return _command_result(task, changed=False, note="This task has already finished.")
     # Spec W1 (D-W1-14): the ONE cancel every door shares (task detail, review, run viewer).
-    task_control_service.cancel_task(engine, user.id, task, now=datetime.now(UTC))
+    if task_control_service.cancel_task(engine, user.id, task, now=datetime.now(UTC)) is None:
+        # R9-247: the leg finished the task between the check above and the cancel landing.
+        return _command_result(
+            store.get(user.id, task_id), changed=False, note="This task has already finished."
+        )
     return _command_result(
         store.get(user.id, task_id),
         changed=True,
