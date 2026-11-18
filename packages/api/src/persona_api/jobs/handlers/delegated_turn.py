@@ -191,7 +191,7 @@ class DelegatedTurnHandler:
         # that rides the SAME delegation crossing. Apply it through the unchanged steering door.
         steer = _steering_event(events)
         if steer is not None:
-            await self._steering.steer(
+            steered = await self._steering.steer(
                 {
                     **steer,
                     "owner_id": owner_id,
@@ -199,6 +199,10 @@ class DelegatedTurnHandler:
                     "persona_id": persona_id,
                 }
             )
+            # R9-241: a pause or resume that changed nothing says why (the control's note),
+            # rather than "Done" over a refusal.
+            if steered is not None and not steered.changed and steered.note:
+                return DelegatedTurnOutcome.SUCCEEDED, steered.note
             verb = str(steer.get("verb", "updated"))
             return DelegatedTurnOutcome.SUCCEEDED, f"Done. I've {_verb_past(verb)} that task."
         # A cancel / reschedule the frontier surfaced as a pending confirmation (destructive, so it

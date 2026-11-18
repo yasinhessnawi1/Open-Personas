@@ -38,6 +38,7 @@ from persona_runtime.task_origination import (
     StandingJudgment,
     StandingVerdict,
     SteeringIntent,
+    SteeringOutcome,
     SteeringVerb,
 )
 from persona_runtime.tier import TierConfig, TierRegistry
@@ -171,13 +172,19 @@ class _ScriptedSteering:
         low = message.lower()
         if "pause" in low:
             return SteeringIntent(verb=SteeringVerb.PAUSE, task_id="task-fare")
+        if "resume" in low:
+            return SteeringIntent(verb=SteeringVerb.RESUME, task_id="task-fare")
         if "cancel" in low:
             return SteeringIntent(verb=SteeringVerb.CANCEL, task_id="task-fare")
         return None
 
 
 def _make_loop(
-    *, draft: ContractDraft, with_amendment: bool = False, with_steering: bool = False
+    *,
+    draft: ContractDraft,
+    with_amendment: bool = False,
+    with_steering: bool = False,
+    steering_port: object | None = None,
 ) -> ConversationLoop:
     backend = ScriptedBackend([ScriptedRound(text="ordinary reply")])
     registry = TierRegistry(
@@ -209,6 +216,9 @@ def _make_loop(
         amendment_interpreter=_ScriptedAmendment() if with_amendment else None,
         steering_interpreter=_ScriptedSteering() if with_steering else None,
         task_reader_provider=(lambda: _FakeReader()) if with_steering else None,  # type: ignore[arg-type,return-value]
+        task_steering_port_provider=(  # type: ignore[arg-type]
+            (lambda: steering_port) if steering_port is not None else None
+        ),
     )
 
 
@@ -363,12 +373,68 @@ class _ScreedMutator:
 
     def pause(self, owner_id: str, task_id: str, *, now: object) -> object:  # noqa: ARG002
         self.calls.append(("pause", owner_id, task_id))
-        return None
+        return SteeringOutcome(changed=True)
 
     def unpause(self, owner_id: str, task_id: str, *, now: object) -> object:  # noqa: ARG002
         self.calls.append(("unpause", owner_id, task_id))
-        return None
+        return SteeringOutcome(changed=True)
 
     def cancel(self, owner_id: str, task_id: str, *, now: object) -> object:  # noqa: ARG002
         self.calls.append(("cancel", owner_id, task_id))
         return None
+
+
+# --- R9-241: the reply says what the verb actually did -----------------------------------
+
+
+class _Port:
+    """The host's steering port: records what it was asked to do and answers ``outcome``."""
+
+    def __init__(self, outcome: SteeringOutcome) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[str, str]] = []
+
+    def steer(self, verb: SteeringVerb, task_id: str) -> SteeringOutcome:
+        self.calls.append((verb.value, task_id))
+        return self.outcome
+
+
+_AT_THE_CAP = (
+    "This task has used its budget, so resuming it would stop again at once. "
+    "Extend the budget with Raise cap on the task page and it carries on by itself."
+)
+
+
+async def _steer_in_chat(port: _Port, message: str) -> tuple[str, list[Any]]:
+    loop = _make_loop(draft=_standing_draft(), with_steering=True, steering_port=port)
+    conv = Conversation(conversation_id="conv-r9-241", persona_id="astrid", messages=[])
+    events = await _drive(loop, conv, message)
+    return str(conv.messages[-1].content), events
+
+
+@pytest.mark.asyncio
+async def test_a_resume_refused_at_the_cap_says_why_in_chat() -> None:
+    """The persona used to answer "It's running again" to a refused resume."""
+    port = _Port(SteeringOutcome(changed=False, note=_AT_THE_CAP))
+
+    reply, events = await _steer_in_chat(port, "resume the fare check")
+
+    assert port.calls == [("resume", "task-fare")]  # applied during the turn
+    assert reply == _AT_THE_CAP
+    assert all(ev.type != "task_steering" for ev in events)  # never applied twice
+
+
+@pytest.mark.asyncio
+async def test_a_pause_on_a_paused_task_says_it_already_is() -> None:
+    reply, _ = await _steer_in_chat(
+        _Port(SteeringOutcome(changed=False, note="Already paused.")), "pause the fare check"
+    )
+
+    assert reply == "Already paused."
+
+
+@pytest.mark.asyncio
+async def test_a_pause_that_took_gets_the_normal_acknowledgement() -> None:
+    reply, _ = await _steer_in_chat(_Port(SteeringOutcome(changed=True)), "pause the fare check")
+
+    assert reply == "Paused. Just say the word when you want it going again."

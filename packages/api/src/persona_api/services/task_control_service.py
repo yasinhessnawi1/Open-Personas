@@ -284,13 +284,15 @@ class TaskControlMutator:
     def get(self, owner_id: str, task_id: str) -> Task:
         return TaskStore(self._engine).get(owner_id, task_id)
 
-    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
-        return pause_task(self._engine, owner_id, self.get(owner_id, task_id), now=now).task
+    def pause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:
+        return pause_task(self._engine, owner_id, self.get(owner_id, task_id), now=now)
 
-    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
+    def unpause(self, owner_id: str, task_id: str, *, now: datetime) -> ControlOutcome:
+        # R9-241: the whole outcome, so the note ("Not paused.", the budget refusal) reaches
+        # the reply instead of being dropped here.
         return resume_task(
             self._engine, owner_id, self.get(owner_id, task_id), now=now, queue=self._queue
-        ).task
+        )
 
     def cancel(self, owner_id: str, task_id: str, *, now: datetime) -> Task:
         task = self.get(owner_id, task_id)
