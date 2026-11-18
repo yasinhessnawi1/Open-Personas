@@ -3,9 +3,10 @@
 The API launcher (:mod:`persona_api.mcp.builtin_launcher`) spawns built-in
 servers via ``python -m persona.tools.mcp.builtin <name> --host H --port P``.
 Keeping the launch surface a module entrypoint (not a console script) means the
-launcher uses the very interpreter the API runs under — the subprocess inherits
-the parent's user/uid (D-27-12: in production the API runs as the non-root
-persona user, so its children do too).
+launcher uses the very interpreter the API runs under. The subprocess runs as the
+parent's user/uid (D-27-12: in production the API runs as the non-root persona
+user, so its children do too), but it does not inherit the parent's environment:
+the launcher starts it with an allow-listed one (R9-258).
 """
 
 from __future__ import annotations

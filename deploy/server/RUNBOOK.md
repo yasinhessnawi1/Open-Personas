@@ -769,6 +769,15 @@ starting the old image.
 - **Disk:** `docker system df`; old images: `docker image prune` (keeps `:current` and
   `:previous`); build cache: `docker builder prune` after a build.
 - **A new release:** `git -C /opt/open-persona/repo pull`, then `bin/deploy.sh`.
+- **Debugging the api process:** the api marks itself non-dumpable at start (R9-258,
+  D-ORCH-11-18-g), so the built-in MCP servers, which run as the same uid, cannot read
+  its `/proc/<pid>/environ`. The cost: no core dumps, and `py-spy dump`, `gdb -p` or
+  `strace -p` as the api's uid are refused. Use the logs. Only a deliberate root session
+  on the host (with `CAP_SYS_PTRACE`) can still attach. A shell opened with
+  `bin/compose.sh exec api` holds every api secret in its own environment and is not
+  hardened, and the built-in MCP servers run as the same uid. So open it with a cleared
+  env, `bin/compose.sh exec api env -i HOME=/tmp PATH=/opt/venv/bin:/usr/bin:/bin bash`
+  (add only the one variable you need with `NAME=value`), or keep it short.
 
 ## Sizing and the host profile
 

@@ -24,6 +24,7 @@ scripts' text the way test_server_kit.py does.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -427,6 +428,42 @@ def test_the_data_uid_has_a_user_name_in_the_environment(service: str) -> None:
     environment = _compose()["services"][service]["environment"]
     assert environment.get("USER")
     assert environment.get("LOGNAME") == environment.get("USER")
+
+
+def test_the_api_healthcheck_probe_carries_no_container_env() -> None:
+    # R9-258 (D-ORCH-11-18-i): docker runs the probe inside the api container with the
+    # container's whole env (every DSN, key and token), as the api's uid, every 30 s. A
+    # built-in MCP child of the same uid could read it from /proc/<probe pid>/environ.
+    # `env -i` hands curl an empty env; only env itself holds it, for the instant
+    # before it execs curl. Absolute paths: python:3.12-slim (Debian) ships coreutils'
+    # /usr/bin/env, and the Dockerfile installs curl from apt (/usr/bin/curl).
+    check = _compose()["services"]["api"]["healthcheck"]
+    assert check["test"] == [
+        "CMD",
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "/usr/bin/curl",
+        "-fsS",
+        "http://127.0.0.1:8000/livez",
+    ]
+    assert (check["interval"], check["timeout"], check["start_period"], check["retries"]) == (
+        "30s",
+        "5s",
+        "600s",
+        3,
+    )
+    dockerfile = (ROOT / "packages" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    runtime = dockerfile.split("AS runtime", 1)[1]
+    assert re.search(r"apt-get install[^&]*\bcurl\b", runtime)
+    assert "FROM python:3.12-slim@" in dockerfile
+    # The image's own HEALTHCHECK (used by a `docker run` without this compose file):
+    # the same cleared-env probe, in exec form, so no shell holds the env either.
+    image_check = re.search(r"^HEALTHCHECK (.*?)\n(?!\s)", dockerfile, re.M | re.S)
+    assert image_check is not None
+    probe = re.search(r"\bCMD (\[.*?\])", image_check.group(1), re.S)
+    assert probe is not None
+    assert json.loads(probe.group(1)) == check["test"][1:]
 
 
 def test_restore_unpacks_as_the_profiles_data_uid() -> None:
