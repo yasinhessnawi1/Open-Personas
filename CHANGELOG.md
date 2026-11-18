@@ -11,6 +11,16 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Breaking
+- **persona-core (MIT): `Backend.upsert` takes three new keyword arguments, and a transport
+  must honour them (R9-271).** `supersedes` names each stored version a write replaces, with
+  the version number it was read at and the id replacing it; `requires` and `requires_kinds`
+  name the memories the write was built from. The call lands only if all of that still holds,
+  and otherwise raises `ChainConflictError` or `ForgottenEvidenceError` with nothing written.
+  The two shipped transports do this. **Migration for a custom transport:** accept the three
+  arguments, and before writing, check them the way `persona.stores.guarded.guarded_batch`
+  does (or call it, and write the batch it returns in one operation).
+
 ### Added
 - **Voice runs on Linux arm64 and builds as a linux/arm64 image.** A community edition on a
   Raspberry Pi 5, an Ampere or a Graviton host can now install voice with `uv sync` or
@@ -132,6 +142,17 @@ Per-spec entries are added by the close-out phase of each spec.
   Each call now carries the model that served it, and every model call of a turn is
   priced at its own model, the way voice already did. A same-model retry no longer
   counts as a clean first answer when the router measures how fast a model replies.
+- **A forget that lands while a memory is being written now stays forgotten.** A versioned
+  write read its memory, decided, and then wrote the previous version back with its link
+  moved, so a forget that landed in between was undone and the deleted text came back. A
+  forget that renumbered the versions left a gap the history then refused to read. The write
+  now lands only if what it read is still there (R9-271).
+- **A memory summary or a gist written from something you forget during its model call no
+  longer appears.** Both are written by a model call that takes seconds, and a forget inside
+  it could leave a summary of what was forgotten in the prompt, in recall and in the episodic
+  browser, and send a graph candidate built from it. The write now lands only if everything
+  it was built from is still there; otherwise it is dropped and the next background pass
+  rebuilds from what remains.
 - **A persona that a chat channel had in front can be deleted again.** A Telegram,
   Slack or other channel remembers which persona you last talked to there, and
   deleting that persona failed: the database tried to forget the channel's owner

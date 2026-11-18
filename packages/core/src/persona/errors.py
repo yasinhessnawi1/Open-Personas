@@ -164,12 +164,15 @@ class BrokenVersionChainError(PersonaError):
 
 
 class ForgottenEvidenceError(PersonaError):
-    """Raised when a rollback would restore a summary of evidence the person had forgotten.
+    """Raised when a write or a rollback would land text built from evidence that was forgotten.
 
-    A forget deletes every core block version citing what it deleted, so this is rare. Data
-    restored from before that rule can still hold such a version (R9-209). Rolling back to it
-    would put the summary of deleted evidence back in the prompt, so it is refused. ``context``
-    carries counts and never the text.
+    A write that names the memories it was built from (a core block, a gist) lands only if they
+    are all still there, and nothing of it is written otherwise (R9-271): the text was written
+    during a model call, and a forget can land inside it. A rollback to a core block is refused
+    the same way when its target cites evidence that has gone: checked before the write, which
+    catches restored data (R9-209), and required by the write itself on every attempt, which
+    catches a forget landing while the rollback retries a lost race. Either way the summary of
+    deleted evidence would go back in the prompt. ``context`` carries counts and never the text.
     """
 
 
@@ -183,7 +186,10 @@ class ChainConflictError(PersonaError):
     and appending on top of what won, so a caller sees it only once those attempts run out, or
     when it asked to decide for itself (``retry_on_conflict=False``).
 
-    Postgres only: Chroma has no such index, so nothing raises this there.
+    It also means a version this write supersedes was deleted, renumbered or superseded after
+    it was read (R9-271), on every transport: a forget landed in between, and the re-read
+    starts from what the forget left. Chroma has no head index, so two FIRST writes to a new
+    chain do not raise this there.
     """
 
 

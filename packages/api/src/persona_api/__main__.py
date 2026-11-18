@@ -28,6 +28,8 @@ from pathlib import Path
 import uvicorn
 from persona.logging import get_logger
 
+from persona_api.process_hardening import make_non_dumpable
+
 logger = get_logger("persona_api.main")
 
 
@@ -60,6 +62,9 @@ def _flag(name: str, *, default: bool = False) -> bool:
 
 def main() -> None:
     """Run the persona-api HTTP server (portable, community-friendly)."""
+    # R9-258: harden this process too. Under --reload it is the reloader parent,
+    # which holds the env but never runs the app factory.
+    make_non_dumpable()
     _load_env_file()
 
     host = os.environ.get("PERSONA_API_HOST", "127.0.0.1")

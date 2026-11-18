@@ -29,10 +29,13 @@ from persona.errors import (
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.core_memory import CoreMemoryStore
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.self_facts import SelfFactsStore
 from persona.stores.worldview import WorldviewStore
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from persona.stores.base import TypedStore
 
 _NOW = datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
@@ -47,7 +50,25 @@ class _Backend:
         self.rows: dict[str, PersonaChunk] = {}
         self.upserts: list[list[PersonaChunk]] = []
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda _kind, ids: [self.rows[i] for i in ids if i in self.rows],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         _ = (persona_id, store_kind)
         self.upserts.append(list(chunks))
         self.rows.update({chunk.id: chunk for chunk in chunks})

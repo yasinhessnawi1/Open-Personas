@@ -78,6 +78,7 @@ from persona_api.middleware.rate_limit import (
 )
 from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware, TelemetryBuffer
 from persona_api.middleware.rls_context import make_rls_engine
+from persona_api.process_hardening import make_non_dumpable
 from persona_api.realtime.channel import UserEventChannel
 from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
@@ -1230,6 +1231,10 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
         config: An :class:`APIConfig`. Defaults to one loaded from the
             environment. Injected in tests to override DSNs/auth knobs.
     """
+    # R9-258 (D-ORCH-11-18-g): first, before anything is built. This process holds
+    # every api secret in its env and shares its uid and PID namespace with the
+    # built-in MCP children; non-dumpable, its /proc/<pid>/environ is closed to them.
+    make_non_dumpable()
     config = config or APIConfig()
 
     # Spec 33 D-33-4: refuse to start a community/no-auth process on a public

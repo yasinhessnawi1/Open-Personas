@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from persona.logging import get_logger
+from persona_api.process_hardening import make_non_dumpable
 
 from persona_connectors.service import run_standalone
 
@@ -28,6 +29,9 @@ def main() -> None:
     teaches an operator to ignore tracebacks. Catching it HERE is the only place that
     works; ``run_standalone``'s own teardown has already run by then.
     """
+    # R9-258 (D-ORCH-11-18-g): first. This process holds every secret in its env and
+    # builds a RuntimeFactory, whose built-in MCP children run as its uid.
+    make_non_dumpable()
     try:
         asyncio.run(run_standalone())
     except KeyboardInterrupt:

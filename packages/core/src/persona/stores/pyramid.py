@@ -100,11 +100,18 @@ class EpisodicPyramid:
     ) -> PersonaChunk:
         """Store one gist over ``member_ids`` (ordered) and return it.
 
+        The members are required by the write itself (R9-271): it lands only if every one of
+        them is still there when it does, and on Postgres it holds them while it lands. The text
+        was written by a model call that takes seconds, and a forget of a member can land inside
+        it. If the forget goes first, this raises and nothing is written; if the gist goes first,
+        the forget's cascade finds it.
+
         Raises:
             GistMembershipError: empty membership, or a member that is itself
                 a gist (from-originals is structural — never summary-of-summary),
                 or empty gist text (a gist that displays nothing is worse than
                 no gist: the display fallback would be defeated).
+            ForgottenEvidenceError: a member was forgotten before the gist landed.
         """
         if not member_ids:
             raise GistMembershipError(
@@ -138,7 +145,13 @@ class EpisodicPyramid:
         )
         # Only the GIST kind is ever addressed: this path structurally cannot
         # touch a raw chunk's row (text/embedding/lifecycle all untouched).
-        self._backend.upsert(persona_id=persona_id, store_kind=GIST_KIND, chunks=[gist])
+        self._backend.upsert(
+            persona_id=persona_id,
+            store_kind=GIST_KIND,
+            chunks=[gist],
+            requires=list(member_ids),
+            requires_kinds=["episodic"],
+        )
         self._emit(
             persona_id,
             AuditAction.WRITE,

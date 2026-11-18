@@ -19,6 +19,7 @@ Postgres integration suite):
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -29,6 +30,7 @@ from persona.graph.protocol import UpdateIntent
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ORIGINATED_METADATA_KEY
 from persona.stores.engine import EpisodicConsolidationEngine, _episode_label
+from persona.stores.guarded import guarded_batch
 from persona.stores.lifecycle import EpisodicSettings
 from persona.stores.pyramid import EpisodicPyramid
 from persona.stores.summarizer import StubSummarizer, assemble_summarizer_input
@@ -51,7 +53,27 @@ class _SpyBackend:
         self.rows: dict[tuple[str, str], dict[str, PersonaChunk]] = {}
         self.touches: list[tuple[str, str]] = []
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for i, c in self.rows.get((persona_id, kind), {}).items() if i in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         self.touches.append(("upsert", store_kind))
         bucket = self.rows.setdefault((persona_id, store_kind), {})
         for c in chunks:
