@@ -16,10 +16,11 @@ an injected :class:`ImageChargeHook` and drives it in a fixed order:
 3. :meth:`ImageCharge.release` runs instead of settle when the provider call raised, so a
    failed generation charges nothing and anything held is given back.
 
-A ledger failure in settle or release surfaces as :class:`ImageChargeLedgerError`, which
-the tool logs and swallows: the image already exists, and failing the tool would take it
-away without making the charge any more likely to land. Any other exception is a bug and
-is not swallowed. Core defines only these shapes; the api implements them.
+Nothing settle or release raises fails the tool. A ledger failure surfaces as
+:class:`ImageChargeLedgerError` and is logged as a warning; any other exception is a bug
+and is logged at error level. Either way the image is kept: the person has paid the hold,
+and failing the tool would charge them for an image they never get. Core defines only
+these shapes; the api implements them.
 """
 
 from __future__ import annotations

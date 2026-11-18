@@ -76,9 +76,10 @@ def build_chat_turn_registry(
         task_steering_service: Worker side of the A4 steering verbs.
         task_reschedule_service: Worker side of the A8 reschedule verb.
         initiative_verb_service: Worker side of the A5 initiative verbs.
-        delivers_images: Whether this surface can show a generated image (R9-308). The
-            connectors pass ``False``: they send only text, so an image a persona makes
-            there is not charged.
+        delivers_images: Whether this surface can show a generated image (R9-308). A
+            surface that cannot show images MUST pass ``False``, or its users are charged
+            for images they never receive. The connectors pass ``False``: they send only
+            text, so an image a persona makes there is not charged.
 
     Returns:
         The composed :class:`~persona_api.background.chat_turn_worker.ChatTurnRegistry`.

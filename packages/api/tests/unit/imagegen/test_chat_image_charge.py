@@ -15,6 +15,8 @@ backend: no database, no provider, no network, no Stripe.
 # ruff: noqa: ANN401, ARG002 (the fakes mirror real keyword signatures)
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +40,7 @@ from persona.schema.tools import ToolCall
 from persona_api.background.chat_turn_worker import ChatTurnRegistry
 from persona_api.config import APIConfig, Edition
 from persona_api.editions import UnlimitedCreditsPolicy
+from persona_api.imagegen import chat_charge as chat_charge_module
 from persona_api.imagegen.chat_charge import CHAT_IMAGE_REASON, ChatImageChargeHook
 from persona_api.sandbox import (
     SandboxRequestContext,
@@ -121,7 +124,13 @@ class _Ledger:
         self.keys: set[str] = set()
         self.attempts: dict[str, int] = {}
         self.drop_after_commit: set[str] = set()
+        #: Methods whose next call lands, raises, and leaves the method broken after it.
+        self.drop_then_break: set[str] = set()
         self.broken: set[str] = set()
+        #: Methods that wait on ``gate`` before writing; ``entered`` is set on arrival.
+        self.gated: set[str] = set()
+        self.gate = threading.Event()
+        self.entered = threading.Event()
 
     # -- helpers -----------------------------------------------------------------
     def _enter(self, method: str) -> None:
@@ -129,8 +138,16 @@ class _Ledger:
         if method in self.broken:
             msg = f"{method}: database unavailable"
             raise ConnectionError(msg)
+        if method in self.gated:
+            self.entered.set()
+            assert self.gate.wait(timeout=10), "the test never opened the gate"
 
     def _leave(self, method: str) -> None:
+        if method in self.drop_then_break:
+            self.drop_then_break.discard(method)
+            self.broken.add(method)
+            msg = f"{method}: connection dropped after commit, and stays down"
+            raise ConnectionError(msg)
         if method in self.drop_after_commit:
             self.drop_after_commit.discard(method)
             msg = f"{method}: connection dropped after commit"
@@ -564,6 +581,96 @@ async def test_a_settle_write_failure_reaches_the_tool_as_a_ledger_error() -> No
 
     with pytest.raises(ImageChargeLedgerError):
         await charge.settle(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
+async def test_a_stop_pressed_during_the_hold_gives_the_hold_back(
+    audit_rows: list[dict[str, Any]],
+) -> None:
+    """L1: the hold's thread commits after the turn is cancelled; nothing may stay held."""
+    ledger = _Ledger()
+    ledger.gated.add("deduct_idempotent")
+    backend = _Backend()
+    task = asyncio.create_task(_tool(ledger, backend).execute(prompt="a lighthouse at dusk"))
+
+    assert await asyncio.to_thread(ledger.entered.wait, 10), "the hold never started"
+    task.cancel()
+    await asyncio.sleep(0)  # let the cancel land while the hold is still writing
+    ledger.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert backend.calls == [], "a cancelled call reached the provider"
+    assert ledger.net_charged == 0, "the hold was stranded by the cancel"
+    methods = [r["method"] for r in ledger.image_rows()]
+    assert methods == ["deduct_idempotent", "grant_idempotent"]
+    (release,) = [r for r in ledger.image_rows() if r["method"] == "grant_idempotent"]
+    assert release["billing_key"].endswith(":release")
+    assert audit_rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
+async def test_a_stop_pressed_during_a_refused_hold_releases_nothing() -> None:
+    ledger = _Ledger(balance=0)
+    ledger.gated.add("deduct_idempotent")
+    task = asyncio.create_task(_tool(ledger).execute(prompt="a lighthouse at dusk"))
+
+    assert await asyncio.to_thread(ledger.entered.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0)
+    ledger.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ledger.rows == [], "nothing was held, so nothing may be given back"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
+async def test_an_uncertain_hold_is_recorded_not_released(
+    audit_rows: list[dict[str, Any]],
+) -> None:
+    """L2: the hold may have landed before the connection died; reconciliation must find it."""
+    ledger = _Ledger()
+    ledger.drop_then_break.add("deduct_idempotent")
+    backend = _Backend()
+
+    result = await _tool(ledger, backend).execute(prompt="a lighthouse at dusk")
+
+    assert result.is_error is True
+    assert result.metadata["reason"] == "billing_unavailable"
+    assert backend.calls == []
+    assert [r["method"] for r in ledger.rows] == ["deduct_idempotent"], "no blind release"
+    (row,) = audit_rows
+    assert row["action"] == "image_chat_hold_uncertain"
+    assert row["target"].startswith(f"{CHAT_IMAGE_REASON}:")
+    assert row["metadata"]["held"] == str(_ONE_IMAGE)
+    assert row["metadata"]["billing_key"] == row["target"]
+    assert "prompt" not in row["metadata"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
+async def test_a_bug_in_settle_keeps_the_image_and_leaves_a_record(
+    monkeypatch: pytest.MonkeyPatch, audit_rows: list[dict[str, Any]]
+) -> None:
+    """L3: the person paid the hold; a bug must never also take the image away."""
+    ledger = _Ledger()
+
+    def _broken_pricing(*_: Any, **__: Any) -> Any:
+        msg = "pricing bug"
+        raise ZeroDivisionError(msg)
+
+    monkeypatch.setattr(chat_charge_module, "generation_cost_cents", _broken_pricing)
+
+    result = await _tool(ledger).execute(prompt="a lighthouse at dusk")
+
+    assert result.is_error is False, "a bug in settle took the image away"
+    (row,) = audit_rows
+    assert row["action"] == "image_chat_unbilled"
+    assert row["metadata"]["cause"] == "error:ZeroDivisionError"
 
 
 # ---------------------------------------------------------------------------

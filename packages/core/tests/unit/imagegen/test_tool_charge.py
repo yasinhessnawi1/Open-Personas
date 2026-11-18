@@ -25,6 +25,7 @@ from persona.imagegen import (
     ImageProviderError,
     make_generate_image_tool,
 )
+from persona.imagegen import tool as tool_module
 from persona.tools import MemoryToolAuditLogger
 
 
@@ -240,9 +241,29 @@ async def test_a_ledger_failure_on_settle_does_not_take_the_image_away() -> None
     assert log == ["authorize", "generate", "settle"]
 
 
+class _RecordingLog:
+    """Stands in for the tool's logger so a test can read the level of what it said."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def warning(self, message: str, **_: object) -> None:
+        self.records.append(("warning", message))
+
+    def error(self, message: str, **_: object) -> None:
+        self.records.append(("error", message))
+
+    def info(self, message: str, **_: object) -> None:
+        self.records.append(("info", message))
+
+
 @pytest.mark.asyncio
-async def test_a_bug_in_settle_is_not_swallowed() -> None:
-    """Only ledger failures are fail-soft; anything else surfaces as a tool error."""
+async def test_a_bug_in_settle_keeps_the_image_and_is_logged_as_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The person has paid the hold; a bug must not also take the image. It stays visible."""
+    recorder = _RecordingLog()
+    monkeypatch.setattr(tool_module, "_LOG", recorder)
     log: list[str] = []
     tool = make_generate_image_tool(
         backend=_LoggingBackend(log), charge_hook=_Hook(log, settle_fails=TypeError("bug"))
@@ -250,7 +271,25 @@ async def test_a_bug_in_settle_is_not_swallowed() -> None:
 
     result = await tool.execute(prompt="a lighthouse at dusk")
 
-    assert result.is_error is True
+    assert result.is_error is False, "a bug in settle took the image away"
+    assert [level for level, _ in recorder.records] == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_failure_on_settle_is_a_warning_not_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _RecordingLog()
+    monkeypatch.setattr(tool_module, "_LOG", recorder)
+    log: list[str] = []
+    failure = ImageChargeLedgerError("ledger unavailable")
+    tool = make_generate_image_tool(
+        backend=_LoggingBackend(log), charge_hook=_Hook(log, settle_fails=failure)
+    )
+
+    await tool.execute(prompt="a lighthouse at dusk")
+
+    assert [level for level, _ in recorder.records] == ["warning"]
 
 
 @pytest.mark.asyncio

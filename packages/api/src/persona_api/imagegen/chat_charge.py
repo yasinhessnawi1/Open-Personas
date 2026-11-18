@@ -177,7 +177,23 @@ class ChatImageCharge:
         self.held = held
 
     async def hold(self) -> None:
-        """Take the estimate before the provider is called, or refuse the image."""
+        """Take the estimate before the provider is called, or refuse the image.
+
+        The write runs in a thread, and a stop pressed while it runs cancels this
+        coroutine but not the thread, which may still commit. So the write is its own task,
+        shielded from the cancel: on a cancel the hold is waited for, given back under its
+        ``:release`` key if it landed, and the cancel then goes on. Without this a stop at
+        the wrong moment left the estimate held with nothing to release it.
+        """
+        task = asyncio.ensure_future(self._take_hold())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await self._undo_cancelled_hold(task)
+            raise
+
+    async def _take_hold(self) -> None:
+        """The hold itself: one keyed ``deduct_idempotent``, its refusals made plain."""
         try:
             await self._write(
                 self._policy.deduct_idempotent,
@@ -198,14 +214,63 @@ class ChatImageCharge:
                 "The limit resets at midnight UTC.",
             ) from exc
         except _LedgerWriteFailedError as exc:
+            # The first write may have committed before its connection died, and the retry
+            # could not say. Releasing blindly could hand back credits never taken, so the
+            # hold is recorded for reconciliation instead (key and amount, no content).
+            await self._record_miss(
+                "image_chat_hold_uncertain",
+                amount=self.held,
+                cost_cents=None,
+                basis="",
+                cause=exc.cause,
+            )
             raise _refusal(
                 _UNAVAILABLE,
                 "Credits could not be checked just now, so this image was not made. "
                 "Try again in a moment.",
             ) from exc
 
+    async def _undo_cancelled_hold(self, task: asyncio.Future[None]) -> None:
+        """After a cancel: wait for the hold, and give it back if it landed.
+
+        A hold that was refused, or whose outcome is uncertain (already recorded as
+        ``image_chat_hold_uncertain``), took nothing this code can safely give back.
+        """
+        try:
+            await task
+        except Exception:  # noqa: BLE001 (refused or uncertain: nothing to release)
+            return
+        try:
+            await self.release()
+        except ImageChargeLedgerError:
+            return  # already recorded as image_chat_unrefunded
+
     async def settle(self, result: GenerationResult) -> None:
-        """True the hold up to what ``result`` cost; a repeat moves nothing."""
+        """True the hold up to what ``result`` cost; a repeat moves nothing.
+
+        A bug here (anything but a ledger failure) is logged at error level and recorded as
+        ``image_chat_unbilled`` before it goes on to the tool, which keeps the image.
+        """
+        try:
+            await self._settle(result)
+        except ImageChargeLedgerError:
+            raise
+        except Exception as exc:
+            _LOG.error(
+                "chat image settle raised a bug; the image is kept key={key} error={error}",
+                key=self.billing_key,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await self._record_miss(
+                "image_chat_unbilled",
+                amount=None,
+                cost_cents=None,
+                basis="",
+                cause=f"error:{type(exc).__name__}",
+            )
+            raise
+
+    async def _settle(self, result: GenerationResult) -> None:
         cost_cents, basis = generation_cost_cents(result, cost_source=self._cost_source)
         if basis == "unpriced":
             _LOG.warning(
@@ -244,7 +309,7 @@ class ChatImageCharge:
                 )
         except DailySpendCapExceededError:
             # The hold was inside the cap; only the part above the estimate is past it.
-            self._record_miss(
+            await self._record_miss(
                 "image_chat_unbilled",
                 amount=delta,
                 cost_cents=cost_cents,
@@ -252,7 +317,7 @@ class ChatImageCharge:
                 cause="daily_spend_cap",
             )
         except _LedgerWriteFailedError as exc:
-            self._record_miss(
+            await self._record_miss(
                 "image_chat_unbilled",
                 amount=delta,
                 cost_cents=cost_cents,
@@ -274,7 +339,7 @@ class ChatImageCharge:
                 billing_key=f"{self.billing_key}:release",
             )
         except _LedgerWriteFailedError as exc:
-            self._record_miss(
+            await self._record_miss(
                 "image_chat_unrefunded",
                 amount=self.held,
                 cost_cents=None,
@@ -312,8 +377,14 @@ class ChatImageCharge:
             else:
                 return
 
-    def _record_miss(
-        self, action: str, *, amount: int, cost_cents: float | None, basis: str, cause: str
+    async def _record_miss(
+        self,
+        action: str,
+        *,
+        amount: int | None,
+        cost_cents: float | None,
+        basis: str,
+        cause: str,
     ) -> None:
         """Leave a durable audit row for money that did not move; no content, only figures."""
         _LOG.warning(
@@ -324,14 +395,16 @@ class ChatImageCharge:
             amount=amount,
             cause=cause,
         )
-        audit_service.record(
+        # ``record`` is a short sync write that swallows its own failure; off the loop.
+        await asyncio.to_thread(
+            audit_service.record,
             engine=self._engine,
             user_id=self.owner_id,
             action=action,
             target=self.billing_key,
             metadata={
                 "billing_key": self.billing_key,
-                "credits": str(amount),
+                "credits": "" if amount is None else str(amount),
                 "held": str(self.held),
                 "cost_cents": "" if cost_cents is None else str(cost_cents),
                 "cost_basis": basis,

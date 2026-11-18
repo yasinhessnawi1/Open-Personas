@@ -505,7 +505,11 @@ async def _generate(
 
 
 async def _release(charge: ImageCharge, *, persona_id: str | None) -> None:
-    """Release a charge after a failed generation; a ledger failure is logged, not raised."""
+    """Release a charge after a failed generation; nothing it raises replaces that failure.
+
+    The person must see the provider's error, not a billing one, so a ledger failure is a
+    warning and anything else (a bug in the hook) is logged at error level.
+    """
     try:
         await charge.release()
     except ImageChargeLedgerError as exc:
@@ -514,22 +518,39 @@ async def _release(charge: ImageCharge, *, persona_id: str | None) -> None:
             persona_id=persona_id or "<unknown>",
             error=str(exc),
         )
+    except Exception as exc:  # noqa: BLE001 (a hook bug is logged loudly, never surfaced)
+        _LOG.error(
+            "generate_image charge release raised a bug (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
 
 
 async def _settle(charge: ImageCharge, result: GenerationResult, *, persona_id: str | None) -> None:
-    """Settle the charge for ``result``; a ledger failure is logged and never raised.
+    """Settle the charge for ``result``; nothing it raises takes the image away.
 
-    By now the provider has made the images and billed us for them. Failing the tool here
-    would take away an image the person already has without making the charge any more
-    likely to land, so a ledger failure (which the hook reports as
-    :class:`ImageChargeLedgerError` after recording it) is logged loudly instead. Anything
-    else is a bug in the hook and is left to surface.
+    By now the provider has made the images and billed us for them, and the person has
+    paid the hold. Failing the tool here would charge them for an image they never get.
+    A ledger failure (the hook's :class:`ImageChargeLedgerError`, already recorded) is a
+    warning. Anything else is a bug in the hook: it is logged at error level, so it stays
+    visible, and the image is still returned.
     """
     try:
         await charge.settle(result)
     except ImageChargeLedgerError as exc:
         _LOG.warning(
             "generate_image charge failed to settle (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            provider=result.provider,
+            model=result.model,
+            image_count=len(result.images),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 (a hook bug is logged loudly, never surfaced)
+        _LOG.error(
+            "generate_image charge settle raised a bug (fail-soft, image kept)",
             persona_id=persona_id or "<unknown>",
             provider=result.provider,
             model=result.model,
