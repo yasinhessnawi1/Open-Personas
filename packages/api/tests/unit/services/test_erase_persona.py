@@ -481,13 +481,14 @@ def test_the_control_audit_keeps_only_its_action_and_time(seeded: Seeded) -> Non
     from _erase_seed import setting_changes  # noqa: PLC0415
 
     with seeded.engine.connect() as conn:
-        before = dict(
-            conn.execute(
+        before: dict[str, object] = {
+            str(r.id): r.created_at
+            for r in conn.execute(
                 select(audit_log.c.id, audit_log.c.created_at).where(
                     audit_log.c.action == "conversation.setting_changed"
                 )
-            ).all()
-        )
+            )
+        }
     sibling = setting_changes(seeded.engine, SIBLING)
 
     erase_persona(_deps(seeded), _claim(seeded))
@@ -499,11 +500,12 @@ def test_the_control_audit_keeps_only_its_action_and_time(seeded: Seeded) -> Non
     assert setting_changes(seeded.engine, SIBLING) == sibling
     assert sibling[0][2] == {"persona_id": SIBLING}
     with seeded.engine.connect() as conn:
-        after = dict(
-            conn.execute(
+        after: dict[str, object] = {
+            str(r.id): r.created_at
+            for r in conn.execute(
                 select(audit_log.c.id, audit_log.c.created_at).where(
                     audit_log.c.action == "conversation.setting_changed"
                 )
-            ).all()
-        )
+            )
+        }
     assert after == before, "every row stays, with its time"
