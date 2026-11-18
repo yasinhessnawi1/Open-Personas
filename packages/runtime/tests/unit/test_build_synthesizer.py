@@ -111,3 +111,15 @@ async def test_composed_synthesizer_runs_end_to_end_with_fakes() -> None:
     outcomes = await synth.synthesise("u1", window.input)
     assert len(outcomes) == 1
     assert store.merges[0].content == "is vegetarian"
+
+
+def test_build_synthesizer_carries_the_disclosure_recorder() -> None:
+    """R9-253: the worker hands the recorder to the factory; the factory must not drop it."""
+    recorder = object()
+    s = build_synthesizer(
+        graph_store=_Store(),  # type: ignore[arg-type]
+        registry=_Registry(),  # type: ignore[arg-type]
+        backend=_Backend(),  # type: ignore[arg-type]
+        disclosures=recorder,  # type: ignore[arg-type]
+    )
+    assert s._disclosures is recorder  # noqa: SLF001

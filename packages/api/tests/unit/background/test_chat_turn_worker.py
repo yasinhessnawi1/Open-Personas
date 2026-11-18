@@ -21,6 +21,7 @@ T2b adds the streaming-shape parity with the old inline ``stream_chat``:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -31,6 +32,7 @@ from persona_api.errors import TurnAlreadyActiveError
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import get_sandbox_request_context
 from persona_runtime.agentic.events import RunEvent
+from persona_runtime.interaction_scope import InteractionRef, current_interaction
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -53,6 +55,7 @@ class _ScriptedLoop:
         self._usage = usage
         self.seen_owner: str | None = None
         self.seen_conversation_id: str | None = None
+        self.seen_interaction: InteractionRef | None = None
 
     async def turn(
         self,
@@ -62,6 +65,7 @@ class _ScriptedLoop:
         **_kwargs: object,
     ) -> AsyncIterator[StreamChunk]:
         self.seen_owner = current_user_id.get()
+        self.seen_interaction = current_interaction()
         ctx = get_sandbox_request_context()
         self.seen_conversation_id = ctx.conversation_id if ctx is not None else None
         if on_event is not None:
@@ -194,6 +198,8 @@ async def test_binds_owner_and_conversation_contextvars_while_running() -> None:
     await handle.task
     assert loop.seen_owner == _OWNER
     assert loop.seen_conversation_id == _CONV
+    # R9-253: a direct write in the turn names its conversation.
+    assert loop.seen_interaction == InteractionRef(kind="conversation", id=_CONV)
 
 
 @pytest.mark.asyncio
@@ -202,6 +208,7 @@ async def test_resets_contextvars_after_completion() -> None:
     await handle.task
     assert current_user_id.get() is None
     assert get_sandbox_request_context() is None
+    assert current_interaction() is None
 
 
 @pytest.mark.asyncio
@@ -589,3 +596,23 @@ async def test_tool_only_turn_persists_runtime_marker_not_empty_content() -> Non
     assert sink.finalize_calls[0]["content"] == _ToolOnlyMarkerLoop.marker
     kinds = _kinds(_drain(handle))
     assert "done" in kinds
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_raises_still_frees_the_long_op_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-253 review: the interaction bind sits inside the try whose finally does cleanup."""
+    from persona_api.background import chat_turn_worker  # noqa: PLC0415
+
+    def broken(*_a: object) -> object:
+        raise ValueError("an interaction needs a kind and an id")
+
+    monkeypatch.setattr(chat_turn_worker, "bind_interaction", broken)
+    reg = _registry(_RecordingSink())
+    released: list[str] = []
+    monkeypatch.setattr(reg, "_release_op_slot", lambda h: released.append(h.conversation_id))
+    handle = _start(reg, _ScriptedLoop(["x"]))
+    with contextlib.suppress(ValueError):
+        await handle.task
+    assert released == [_CONV]
