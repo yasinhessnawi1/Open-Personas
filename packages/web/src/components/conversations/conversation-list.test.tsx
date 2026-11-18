@@ -22,7 +22,11 @@ import {
 
 const h = vi.hoisted(() => ({
   del: vi.fn(),
+  // Routed by path (see beforeEach): the row menu reads the initiative-hold
+  // control on open (D-ORCH-11-18-u; nothing holds these rows, so it offers no
+  // item), and the delete dialog reads the forget preview (R9-304).
   get: vi.fn(),
+  preview: vi.fn(),
   notify: vi.fn(),
   refresh: vi.fn(),
 }));
@@ -74,8 +78,17 @@ async function openDeleteDialog() {
 beforeEach(() => {
   h.del.mockReset();
   h.del.mockResolvedValue({});
+  h.preview.mockReset();
+  h.preview.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
   h.get.mockReset();
-  h.get.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
+  h.get.mockImplementation(async (path: string, init: unknown) =>
+    path.endsWith("/forget-preview")
+      ? h.preview(path, init)
+      : {
+          data: { state: "not_held", released_at: null, version: "" },
+          response: new Response(null, { status: 200 }),
+        },
+  );
   h.notify.mockReset();
   h.refresh.mockReset();
   vi.mocked(useSearchParams).mockReturnValue(
@@ -168,7 +181,7 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
   });
 
   it("says how many facts go and how many stay", async () => {
-    h.get.mockResolvedValue({ data: { facts_removed: 3, facts_kept: 1 } });
+    h.preview.mockResolvedValue({ data: { facts_removed: 3, facts_kept: 1 } });
     renderList();
     await openDeleteDialog();
 
@@ -183,7 +196,7 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
   });
 
   it("says nothing is removed when no fact comes only from here", async () => {
-    h.get.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
+    h.preview.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 0 } });
     renderList();
     await openDeleteDialog();
 
@@ -194,13 +207,13 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
   });
 
   it("shows no count when the preview fails, and the delete still works", async () => {
-    h.get.mockResolvedValue({
+    h.preview.mockResolvedValue({
       error: { error: "x" },
       response: { status: 500 },
     });
     renderList();
     await openDeleteDialog();
-    await waitFor(() => expect(h.get).toHaveBeenCalled());
+    await waitFor(() => expect(h.preview).toHaveBeenCalled());
 
     expect(screen.queryByText(/from Memory/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));

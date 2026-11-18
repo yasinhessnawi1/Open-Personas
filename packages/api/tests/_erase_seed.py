@@ -271,6 +271,22 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
         target=f"{conv}/doc_{SECRET}",
         metadata={"workspace_path": f"conversations/{conv}/{SECRET}.pdf", "format": "pdf"},
     )
+    # D-ORCH-11-18-u: the "fine to bring this up" control's audit, on a live conversation and
+    # on one already gone. Only a disclosing conversation ever gets one, so the erasures strip
+    # it to its action and its time (the PR #44 review MEDIUM-2 amendment).
+    for setting_id, setting_target in (
+        (f"setting_{pid[-6:]}", conv),
+        (f"setgone_{pid[-6:]}", f"goneconv_{pid[-6:]}"),
+    ):
+        row(
+            conn,
+            "audit_log",
+            id=setting_id,
+            user_id=owner,
+            action="conversation.setting_changed",
+            target=setting_target,
+            metadata={"persona_id": pid},
+        )
     trigger = f"trig_{pid[-6:]}"
     row(
         conn,
@@ -301,22 +317,60 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
     _persona_disclosures(conn, owner, pid)
 
 
+#: When the seeded release was given (D-ORCH-11-18-u).
+RELEASED_AT = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
 def _persona_disclosures(conn: Connection, owner: str, pid: str) -> None:
     """R9-253's disclosure facts: one on a live conversation, one on a conversation now gone.
 
     Postgres editions only (the legacy SQLite build has no graph, so no such table). The second
-    fact names no row that still exists, so only the persona's own cascade can remove it.
+    fact names no row that still exists, so only the persona's own cascade can remove it. The
+    first carries the user's release (D-ORCH-11-18-u), so the erasures are shown to take a
+    released fact with the rest.
     """
     if not inspect(conn).has_table("wellbeing_disclosures"):
         return
-    for interaction in (conversation_of(pid), f"goneconv_{pid[-6:]}"):
-        row(
-            conn,
-            "wellbeing_disclosures",
-            owner_id=owner,
-            persona_id=pid,
-            interaction_id=interaction,
-        )
+    row(
+        conn,
+        "wellbeing_disclosures",
+        owner_id=owner,
+        persona_id=pid,
+        interaction_id=conversation_of(pid),
+        disclosure_seq=2,
+        released_seq=2,
+        released_at=RELEASED_AT,
+    )
+    row(
+        conn,
+        "wellbeing_disclosures",
+        owner_id=owner,
+        persona_id=pid,
+        interaction_id=f"goneconv_{pid[-6:]}",
+    )
+
+
+def setting_changes(engine: Engine, persona_id: str) -> list[tuple[str, str, Any]]:
+    """The persona's seeded ``conversation.setting_changed`` rows: (action, target, metadata)."""
+    t = metadata.tables["audit_log"]
+    ids = [f"setting_{persona_id[-6:]}", f"setgone_{persona_id[-6:]}"]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(t.c.action, t.c.target, t.c.metadata).where(t.c.id.in_(ids)).order_by(t.c.id)
+        ).all()
+    return [(str(r[0]), str(r[1]), r[2]) for r in rows]
+
+
+def released_facts(engine: Engine, persona_id: str) -> int:
+    """How many of the persona's disclosure facts carry a release."""
+    t = metadata.tables["wellbeing_disclosures"]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(t.c.interaction_id).where(
+                t.c.persona_id == persona_id, t.c.released_seq.isnot(None)
+            )
+        ).all()
+    return len(rows)
 
 
 def _persona_memory(memory: Backend, pid: str) -> None:
