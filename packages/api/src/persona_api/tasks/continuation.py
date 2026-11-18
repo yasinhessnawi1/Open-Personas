@@ -321,13 +321,20 @@ class TaskContinuation:
                 trigger_kind=_REVIVED_KIND,
                 reason="retired: the user answered before this resume ran",
             )
-        retry = self._queue.count_spent_attempts(owner_id=owner_id, idempotency_key=base)
-        if isinstance(trigger, UserReply):
-            retry += self._queue.count_live_attempts(
+        # Live BEFORE spent (the review's N1): a claimed Revived that its guard consumes
+        # between the two counts is then seen by one or both, never by neither. Counted
+        # twice, the suffix skips a number, which is harmless; counted by neither, the reply
+        # would take its key.
+        live = (
+            self._queue.count_live_attempts(
                 owner_id=owner_id,
                 idempotency_key=base,
                 trigger_kind=_REVIVED_KIND,
             )
+            if isinstance(trigger, UserReply)
+            else 0
+        )
+        retry = live + self._queue.count_spent_attempts(owner_id=owner_id, idempotency_key=base)
         enqueue_task_leg(
             self._queue,
             owner_id=owner_id,

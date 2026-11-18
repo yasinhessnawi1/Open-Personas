@@ -15,7 +15,7 @@ retry (:class:`AutoRetry`) is a different trigger and still picks a stuck park u
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from persona.tasks import (
@@ -294,3 +294,137 @@ def test_a_stale_resume_already_claimed_still_leaves_the_reply_its_own_key(
 
     assert _job_state(engine, "job-revived") == "claimed"
     assert enqueued == [f"{stale_key}:retry:1 user_reply"]
+
+
+def test_a_claimed_resume_finishing_between_the_two_counts_still_leaves_the_reply_its_key(
+    engine: Engine, enqueued: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's N1: the stale Revived is running when the reply counts, and its guard
+    consumes it (succeeded) between the two counts. Counted spent first, it was still live;
+    counted live second, it had finished: neither saw it, and the reply took its key. Whichever
+    count runs first, the job finishes right after it, and the reply must still miss it."""
+    from persona_api.db.models import jobs as jobs_t
+    from persona_api.jobs.queue import JobQueue
+    from persona_api.services import task_control_service
+    from sqlalchemy import update
+
+    stale_key = _queued_revived(engine, state="running")
+    task = _parked_on_its_question(engine)
+    finished = False
+
+    def _finishes_after(original: Any) -> Any:  # noqa: ANN401
+        def _count(self: JobQueue, **kwargs: object) -> int:
+            nonlocal finished
+            counted = int(original(self, **kwargs))
+            if not finished:
+                finished = True
+                with engine.begin() as conn:
+                    conn.execute(
+                        update(jobs_t).where(jobs_t.c.id == "job-revived").values(state="succeeded")
+                    )
+            return counted
+
+        return _count
+
+    monkeypatch.setattr(
+        JobQueue, "count_spent_attempts", _finishes_after(JobQueue.count_spent_attempts)
+    )
+    monkeypatch.setattr(
+        JobQueue, "count_live_attempts", _finishes_after(JobQueue.count_live_attempts)
+    )
+
+    task_control_service.reply_to_task(engine, _OWNER, task, "Grunerlokka, please.", now=_NOW)
+
+    assert len(enqueued) == 1
+    assert not enqueued[0].startswith(f"{stale_key} ")  # never the stale job's own key
+
+
+# --- the queue's retire and live count touch only what they name (round 3) -----------------
+
+
+def _job(engine: Engine, job_id: str, *, task_id: str, kind: str, state: str, key: str) -> None:
+    from persona.tasks import UserReply
+    from persona_api.db.models import jobs as jobs_t
+    from persona_api.tasks.handler import TASK_LEG_JOB_TYPE
+
+    trigger = (
+        Revived(reason="you pressed Resume", revived_at=_NOW)
+        if kind == "revived"
+        else UserReply(reply="an earlier answer")
+    )
+    payload = TaskLegPayload(task_id=task_id, predecessor_seq=0, trigger=trigger)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(jobs_t).values(
+                id=job_id,
+                type=TASK_LEG_JOB_TYPE,
+                owner_id=_OWNER,
+                payload=payload.model_dump(mode="json"),
+                idempotency_key=key,
+                state=state,
+                scheduled_at=_NOW,
+                created_at=_NOW,
+            )
+        )
+
+
+@pytest.mark.usefixtures("enqueued")
+def test_a_reply_retires_only_its_own_tasks_queued_resumes(engine: Engine) -> None:
+    """Another task's queued Revived, and this task's queued leg of another kind, are not
+    the stale Resume: both stay queued."""
+    from persona_api.services import task_control_service
+
+    _queued_revived(engine)
+    task = _parked_on_its_question(engine)
+    _job(
+        engine,
+        "job-other-task",
+        task_id="t2",
+        kind="revived",
+        state="queued",
+        key="task:t2:after:0",
+    )
+    _job(
+        engine,
+        "job-other-kind",
+        task_id="t1",
+        kind="user_reply",
+        state="queued",
+        key="task:t1:after:7",
+    )
+
+    task_control_service.reply_to_task(engine, _OWNER, task, "Grunerlokka, please.", now=_NOW)
+
+    assert _job_state(engine, "job-revived") == "succeeded"
+    assert _job_state(engine, "job-other-task") == "queued"
+    assert _job_state(engine, "job-other-kind") == "queued"
+
+
+def test_a_claimed_resume_at_a_retry_key_is_counted_too(
+    engine: Engine, enqueued: list[str]
+) -> None:
+    """A Resume that itself had to move past a spent attempt sits at ``after:0:retry:1``. A
+    worker claimed it; the reply must count it and move past it as well."""
+    from persona_api.services import task_control_service
+
+    task = _parked_on_its_question(engine)
+    _job(
+        engine,
+        "job-spent",
+        task_id="t1",
+        kind="revived",
+        state="succeeded",
+        key="task:t1:after:0",
+    )
+    _job(
+        engine,
+        "job-claimed-retry",
+        task_id="t1",
+        kind="revived",
+        state="claimed",
+        key="task:t1:after:0:retry:1",
+    )
+
+    task_control_service.reply_to_task(engine, _OWNER, task, "Grunerlokka, please.", now=_NOW)
+
+    assert enqueued == ["task:t1:after:0:retry:2 user_reply"]
