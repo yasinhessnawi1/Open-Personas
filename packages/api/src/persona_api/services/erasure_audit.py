@@ -20,7 +20,9 @@ from persona.audit import jsonl_file_lock
 from persona.tools._sandbox import require_path_segment
 from sqlalchemy import and_, or_, select, update
 
+from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import store_audit_events as store_audit_t
+from persona_api.initiative.disclosures import SETTING_CHANGED_ACTION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,6 +33,7 @@ __all__ = [
     "FREE_TEXT_FIELDS",
     "rekey_persona_log_in_place",
     "scrub_persona_log_in_place",
+    "scrub_setting_changes",
     "scrub_store_audit_files",
     "scrub_store_audit_rows",
 ]
@@ -290,3 +293,37 @@ def scrub_persona_log_in_place(
                 line, persona_id=persona_id, content_keys=content_keys, rekey=rekey
             ),
         )
+
+
+def scrub_setting_changes(
+    conn: Connection,
+    *,
+    owner_id: str,
+    persona_id: str | None = None,
+    conversations: frozenset[str] = frozenset(),
+) -> int:
+    """Strip the owner's conversation-control audit rows to their action and their time.
+
+    ``conversation.setting_changed`` (D-ORCH-11-18-u) is only ever written for a conversation
+    that held a wellbeing disclosure, so its target and its persona mark one (the PR #44
+    review MEDIUM-2 amendment). The row stays, as D-R9-284-erase ruling 5 keeps the audit; its
+    target becomes empty (the column is NOT NULL) and its metadata empty. With ``persona_id``
+    (a persona erasure) only the rows that name the persona or one of its ``conversations``
+    are stripped; without it (an account erasure) every such row of the owner is.
+    """
+    t = audit_log_t.c
+    rows = conn.execute(
+        select(t.id, t.target, t.metadata).where(
+            t.user_id == owner_id, t.action == SETTING_CHANGED_ACTION
+        )
+    ).all()
+    scrubbed = 0
+    for audit_id, target, meta in rows:
+        named = meta.get("persona_id") if isinstance(meta, Mapping) else None
+        if persona_id is not None and named != persona_id and target not in conversations:
+            continue
+        if target == "" and not meta:
+            continue  # already stripped (a resumed erasure)
+        conn.execute(update(audit_log_t).where(t.id == audit_id).values(target="", metadata={}))
+        scrubbed += 1
+    return scrubbed

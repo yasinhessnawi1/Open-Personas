@@ -271,6 +271,22 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
         target=f"{conv}/doc_{SECRET}",
         metadata={"workspace_path": f"conversations/{conv}/{SECRET}.pdf", "format": "pdf"},
     )
+    # D-ORCH-11-18-u: the "fine to bring this up" control's audit, on a live conversation and
+    # on one already gone. Only a disclosing conversation ever gets one, so the erasures strip
+    # it to its action and its time (the PR #44 review MEDIUM-2 amendment).
+    for setting_id, setting_target in (
+        (f"setting_{pid[-6:]}", conv),
+        (f"setgone_{pid[-6:]}", f"goneconv_{pid[-6:]}"),
+    ):
+        row(
+            conn,
+            "audit_log",
+            id=setting_id,
+            user_id=owner,
+            action="conversation.setting_changed",
+            target=setting_target,
+            metadata={"persona_id": pid},
+        )
     trigger = f"trig_{pid[-6:]}"
     row(
         conn,
@@ -332,6 +348,17 @@ def _persona_disclosures(conn: Connection, owner: str, pid: str) -> None:
         persona_id=pid,
         interaction_id=f"goneconv_{pid[-6:]}",
     )
+
+
+def setting_changes(engine: Engine, persona_id: str) -> list[tuple[str, str, Any]]:
+    """The persona's seeded ``conversation.setting_changed`` rows: (action, target, metadata)."""
+    t = metadata.tables["audit_log"]
+    ids = [f"setting_{persona_id[-6:]}", f"setgone_{persona_id[-6:]}"]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(t.c.action, t.c.target, t.c.metadata).where(t.c.id.in_(ids)).order_by(t.c.id)
+        ).all()
+    return [(str(r[0]), str(r[1]), r[2]) for r in rows]
 
 
 def released_facts(engine: Engine, persona_id: str) -> int:

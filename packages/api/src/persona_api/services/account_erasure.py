@@ -49,6 +49,7 @@ from persona_api.services.account_erasure_audit import (
     rekey_store_audit_file,
     rekey_store_audit_rows,
 )
+from persona_api.services.erasure_audit import scrub_setting_changes
 from persona_api.services.erasure_ledger import Erasure, ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_lock import erasure_lock
 from persona_api.services.erasure_service import (
@@ -404,6 +405,8 @@ def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
             if kept != clean:
                 conn.execute(update(audit_log_t).where(audit.id == audit_id).values(metadata=kept))
                 scrubbed += 1
+        # PR #44 review MEDIUM-2: before the re-key, the control's audit loses what it names.
+        settings = scrub_setting_changes(conn, owner_id=erasure.owner_id)
         rekeyed = conn.execute(
             update(audit_log_t).where(audit.user_id == erasure.owner_id).values(user_id=erasure.id)
         ).rowcount
@@ -422,6 +425,7 @@ def _step_audit(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
     return {
         "rekeyed": int(rekeyed or 0),
         "scrubbed": scrubbed,
+        "settings_scrubbed": settings,
         "store_rekeyed": store_rekeyed,
         "store_lines": store_lines,
     }

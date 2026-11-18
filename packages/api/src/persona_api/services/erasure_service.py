@@ -54,7 +54,11 @@ from persona_api.db.models import tool_audit_events as tool_audit_events_t
 from persona_api.errors import ErasureRecordError
 from persona_api.schedules.store import ScheduleStore
 from persona_api.services import audit_service
-from persona_api.services.erasure_audit import scrub_store_audit_files, scrub_store_audit_rows
+from persona_api.services.erasure_audit import (
+    scrub_setting_changes,
+    scrub_store_audit_files,
+    scrub_store_audit_rows,
+)
 from persona_api.services.erasure_graph import erase_persona_graph
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from persona_api.services.erasure_lock import erasure_lock
@@ -427,6 +431,13 @@ def _step_rows(deps: PersonaEraseDeps, erasure: Erasure) -> dict[str, int]:
                 delete(tool_audit_events_t).where(tool_audit_events_t.c.persona_id == pid)
             ).rowcount,
             "audit_log_scrubbed": _scrub_audit_log(conn, erasure),
+            # PR #44 review MEDIUM-2: the control's audit marks a disclosure.
+            "audit_log_settings_scrubbed": scrub_setting_changes(
+                conn,
+                owner_id=owner,
+                persona_id=pid,
+                conversations=frozenset(erasure.captured.get("conversations", [])),
+            ),
             "store_audit_scrubbed": scrub_store_audit_rows(
                 conn, owner_id=owner, persona_id=pid, content_keys=AUDIT_CONTENT_KEYS
             ),
