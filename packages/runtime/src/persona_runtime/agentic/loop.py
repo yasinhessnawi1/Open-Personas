@@ -85,7 +85,7 @@ from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.prompt import RetrievedContext
 from persona_runtime.question_author import TemplateQuestionAuthor
 from persona_runtime.questions import QuestionRegistry
-from persona_runtime.routing import tier_for
+from persona_runtime.routing import served_identity, tier_for
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 
 if TYPE_CHECKING:
@@ -93,6 +93,7 @@ if TYPE_CHECKING:
 
     from persona.audit import AuditLogger
     from persona.backends import ChatBackend, ChatResponse
+    from persona.backends.types import BackendAttempt
     from persona.sandbox.result import SandboxFile
     from persona.schema.persona import Persona
     from persona.schema.skills import SkillSpec
@@ -187,6 +188,14 @@ def _backend_max_tokens(backend: ChatBackend) -> int:
     """Best-effort context budget (mirrors the conversation loop's helper)."""
     value = getattr(backend, "max_tokens", None)
     return value if isinstance(value, int) and value > 0 else _DEFAULT_MAX_TOKENS
+
+
+def _unrecovered(response: ChatResponse) -> tuple[BackendAttempt, ...]:
+    """The call's failed tries that reported tokens: logged by the pricer, never charged."""
+    served = response.served
+    if served is None:
+        return ()
+    return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
 
 
 class AgenticLoop:
@@ -436,14 +445,18 @@ class AgenticLoop:
                 # the next iteration's boundary check (top of the loop) then stops the
                 # run cleanly, the in-flight step below completes first.
                 if on_step_usage is not None:
+                    # R9-296: the model that SERVED the step, from the response's own
+                    # trace; a chain's ``provider_name`` / ``model_name`` are its primary.
+                    provider, model = served_identity(backend, response.served)
                     await on_step_usage(
                         StepUsage(
                             step=step_num,
-                            provider=backend.provider_name,
-                            model=backend.model_name,
+                            provider=provider,
+                            model=model,
                             prompt_tokens=response.usage.prompt_tokens,
                             completion_tokens=response.usage.completion_tokens,
                             cost_usd=response.usage.cost_usd,
+                            unrecovered=_unrecovered(response),
                         )
                     )
 

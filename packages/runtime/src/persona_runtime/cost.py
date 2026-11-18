@@ -26,6 +26,7 @@ Invariants (spec M2 §2):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
@@ -33,12 +34,23 @@ from persona.billing.basis import CostBasis
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     from persona.backends.model_metadata import ModelMetadata
+    from persona.backends.types import BackendAttempt
 
 # Spec M3 (D-M3-12): ``CostBasis`` now lives in ``persona.billing.basis`` (core)
 # so the billing seam has one authoritative home for the vocabulary; re-exported
 # here so ``from persona_runtime.cost import CostBasis`` importers are unchanged.
-__all__ = ["CENTS_ROUND_DECIMALS", "CostBasis", "CostSource", "compute_turn_cost"]
+__all__ = [
+    "CENTS_ROUND_DECIMALS",
+    "CostBasis",
+    "CostSource",
+    "PricedRound",
+    "compute_turn_cost",
+    "least_certain_basis",
+    "price_rounds",
+]
 
 _logger = get_logger("runtime.cost")
 
@@ -178,3 +190,148 @@ def compute_turn_cost(
         CENTS_ROUND_DECIMALS,
     )
     return cents, "estimate_static" if link == "static" else "estimate_catalog"
+
+
+@dataclass(frozen=True)
+class PricedRound:
+    """One model call of a turn, with the identity that served it (R9-246).
+
+    Attributes:
+        prompt_tokens: The call's prompt tokens.
+        completion_tokens: The call's completion tokens.
+        cost_usd: The call's OpenRouter actual, or ``None``.
+        provider: The served provider (the chain's ``ServedCall``, or a bare backend's
+            own name). An empty ``model`` means no model served the round.
+        model: The served model.
+        unrecovered: Failed tries of this call that reported usage (an empty or
+            degenerate completion). NOT charged (D-ORCH-11-18-h); priced only to be
+            logged as unrecovered cost.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None
+    provider: str
+    model: str
+    unrecovered: tuple[BackendAttempt, ...] = ()
+
+
+#: How certain each priced basis is, for labelling a turn whose rounds differ (D3):
+#: the turn takes the LEAST certain one, so a partial actual never labels the whole
+#: turn as an actual (the M2 review I2 honesty rule).
+_BASIS_CERTAINTY: Final[dict[str, int]] = {
+    "estimate_catalog": 0,
+    "estimate_static": 1,
+    "actual_openrouter": 2,
+}
+
+
+def least_certain_basis(bases: Iterable[CostBasis]) -> CostBasis:
+    """The label for a sum of priced parts whose bases differ (D3, D-ORCH-11-18-h).
+
+    The least certain basis among the PRICED parts (catalog estimate, then static
+    estimate, then actual), so a partial actual never labels the whole as an actual
+    (the M2 review I2 honesty rule). ``unpriced`` parts are ignored; the result is
+    ``unpriced`` only when no part was priced. One rule for a chat or voice turn
+    (:func:`price_rounds`), a task leg's steps and an authoring turn's attempts.
+    """
+    priced = [basis for basis in bases if basis != "unpriced"]
+    if not priced:
+        return "unpriced"
+    return min(priced, key=lambda b: _BASIS_CERTAINTY.get(b, 0))
+
+
+def price_rounds(
+    rounds: Sequence[PricedRound],
+    *,
+    source: CostSource | None = None,
+    surface: str = "turn",
+) -> tuple[float, CostBasis]:
+    """Price a turn round by round, each at the model that served it (R9-246).
+
+    The one per-round pricing function for chat and voice. Each round goes through
+    :func:`compute_turn_cost` at its OWN served pair, with its own OpenRouter actual
+    (gated on that round's provider), and the rounds are summed and rounded ONCE to
+    :data:`CENTS_ROUND_DECIMALS`. The caller charges the sum once, per turn, so the
+    credit ceil is never taken per round.
+
+    * A round with no served model (``model == ""``) is skipped.
+    * D4: an unpriced round inside a turn with a priced round adds 0 cents and logs
+      a warning naming its provider and model. A turn with no priced round is
+      ``(0.0, "unpriced")``: the existing unpriced path (warn-once, the floor).
+    * D3: the turn's basis is the least certain basis among its priced rounds.
+    * D1: a round's ``unrecovered`` failed tries are priced and logged at INFO as
+      unrecovered cost, and never added to the total.
+
+    Args:
+        rounds: The turn's rounds in order.
+        source: The pricing resolver chain (``None``: the static-only default).
+        surface: A label for the log lines (``"chat"``, ``"voice"``).
+
+    Returns:
+        ``(cost_cents, cost_basis)`` for the whole turn.
+    """
+    cents = 0.0
+    bases: list[CostBasis] = []
+    unpriced: list[PricedRound] = []
+    for priced_round in rounds:
+        _log_unrecovered(priced_round, source, surface)
+        if not priced_round.model:
+            continue
+        round_cents, basis = compute_turn_cost(
+            provider=priced_round.provider,
+            model=priced_round.model,
+            prompt_tokens=priced_round.prompt_tokens,
+            completion_tokens=priced_round.completion_tokens,
+            actual_cost_usd=priced_round.cost_usd,
+            source=source,
+        )
+        if basis == "unpriced":
+            unpriced.append(priced_round)
+            continue
+        cents += round_cents
+        bases.append(basis)
+    if not bases:
+        return 0.0, "unpriced"
+    for priced_round in unpriced:
+        _logger.warning(
+            "unpriced round in a priced turn; it adds 0 cents "
+            "surface={surface} provider={provider} model={model} "
+            "prompt_tokens={prompt} completion_tokens={completion}",
+            surface=surface,
+            provider=priced_round.provider,
+            model=priced_round.model,
+            prompt=priced_round.prompt_tokens,
+            completion=priced_round.completion_tokens,
+        )
+    return round(cents, CENTS_ROUND_DECIMALS), least_certain_basis(bases)
+
+
+def _log_unrecovered(priced_round: PricedRound, source: CostSource | None, surface: str) -> None:
+    """Log each failed try of ``priced_round`` that cost tokens, with its price (D1)."""
+    for attempt in priced_round.unrecovered:
+        usage = attempt.usage
+        if usage is None:
+            continue
+        cents, basis = compute_turn_cost(
+            provider=attempt.provider,
+            model=attempt.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            actual_cost_usd=usage.cost_usd,
+            source=source,
+        )
+        _logger.info(
+            "unrecovered model cost: a failed try, not charged "
+            "surface={surface} provider={provider} model={model} error={error} "
+            "prompt_tokens={prompt} completion_tokens={completion} "
+            "cost_cents={cents} basis={basis}",
+            surface=surface,
+            provider=attempt.provider,
+            model=attempt.model,
+            error=attempt.error_class,
+            prompt=usage.prompt_tokens,
+            completion=usage.completion_tokens,
+            cents=cents,
+            basis=basis,
+        )

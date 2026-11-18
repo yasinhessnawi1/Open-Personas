@@ -61,7 +61,7 @@ from persona_runtime.routing import RoutingContext, classifiers
 from persona_runtime.routing.model_selection import (
     first_token_sample_model,
     reorder_primary,
-    resolve_served_model,
+    served_identity,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
 from persona_runtime.schedule_claim import (
@@ -85,10 +85,10 @@ from persona_voice.model.tools import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
     from persona.backends import ChatBackend
-    from persona.backends.types import StreamChunk, ToolSpec
+    from persona.backends.types import BackendAttempt, ServedCall, StreamChunk, ToolSpec
 
     from persona_voice.billing import VoiceTurnBillingMeter
     from persona_voice.loop.streaming import Transcript
@@ -104,6 +104,13 @@ _DEFAULT_MAX_TOKENS = 4096
 #: small-tier model made a caller wait 14.7s for first audio on a cue-matching turn.
 #: Past this budget the ask is handled as ordinary conversation.
 GATE_BUDGET_S: float = 4.0
+
+
+def _unrecovered(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
+    """A call's failed tries that reported tokens: logged as unrecovered, never charged."""
+    if served is None:
+        return ()
+    return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
 
 
 def _is_reply_payload(chunk: StreamChunk) -> bool:
@@ -128,6 +135,46 @@ class _RoundTiming:
 
     t_start: float
     notified: bool = False
+    #: The turn this round belongs to, which records the model that served it.
+    turn: _TurnServed | None = None
+
+
+@dataclass
+class _TurnServed:
+    """The ``(provider, model)`` that answered ONE turn (R9-223, the voice log race).
+
+    Created per turn in ``__call__`` and carried by the turn's own stream, so a cut
+    turn whose ``finally`` runs after the next turn has started still reads its own
+    model, not the next turn's ``None``.
+    """
+
+    served: tuple[str, str] | None = None
+
+
+class _TurnStream:
+    """One turn's spoken-token stream, carrying the model that served that turn.
+
+    Satisfies the streaming loop's ``ServedModelReporter`` seam on the stream itself,
+    so the ``voice turn ended`` line reads the turn it closes (R9-223).
+    """
+
+    def __init__(self, turn: _TurnServed, tokens: AsyncGenerator[str, None]) -> None:
+        self._turn = turn
+        self._tokens = tokens
+
+    def __aiter__(self) -> _TurnStream:
+        return self
+
+    async def __anext__(self) -> str:
+        return await self._tokens.__anext__()
+
+    async def aclose(self) -> None:
+        """Close the underlying generator (its ``finally`` runs now, not at GC)."""
+        await self._tokens.aclose()
+
+    def served_model(self) -> tuple[str, str] | None:
+        """This turn's served pair; ``None`` when no model spoke. Never raises."""
+        return self._turn.served
 
 
 class VoiceModelReplyProducer:
@@ -259,9 +306,13 @@ class VoiceModelReplyProducer:
         # Cleared here, not in the generator body, which only runs once the stream is
         # first pulled: a turn that stalls before that must not report the last turn's model.
         self._served_model = None
-        return self._generate(final_transcript)
+        # R9-223: the turn's own record of who served it, carried by its own stream.
+        turn = _TurnServed()
+        return _TurnStream(turn, self._generate(final_transcript, turn))
 
-    async def _generate(self, final_transcript: Transcript) -> AsyncIterator[str]:
+    async def _generate(
+        self, final_transcript: Transcript, turn: _TurnServed | None = None
+    ) -> AsyncGenerator[str, None]:
         """Stream the persona-conditioned reply token-by-token (spoken text only)."""
         ctx = self._ctx
         user_message = final_transcript.text
@@ -420,7 +471,7 @@ class VoiceModelReplyProducer:
                 safety_directive=safety_directive,
             )
 
-        timing = _RoundTiming(t_start=time.perf_counter())
+        timing = _RoundTiming(t_start=time.perf_counter(), turn=turn)
         tools = self._offered_specs(backend)
 
         # A9 (T8, A9-D-6): accumulate the complete spoken reply so the confabulation guard can run
@@ -541,19 +592,21 @@ class VoiceModelReplyProducer:
         async for delta in self._stream(backend, followup, None, max_tokens, timing, [], []):
             yield delta
 
-    def _record_first_token(self, backend: ChatBackend, timing: _RoundTiming) -> None:
-        """Record this turn's first-token latency unless a fallback answered it (R9-226).
+    def _record_first_token(
+        self, backend: ChatBackend, timing: _RoundTiming, served: ServedCall | None
+    ) -> None:
+        """Record this turn's first-token latency unless a failed try preceded it.
 
-        Called at the round's first text delta, when a chain has committed to the
-        backend that is speaking. A turn a fallback answered measured the failed models
-        too, so it records nothing (:func:`first_token_sample_model`). A same-backend
-        retry that succeeded is still recorded, failed attempt included (see there).
+        Called at the round's first text delta with that chunk's ``served`` trace. A
+        turn a fallback answered measured the failed models too (R9-226), and one the
+        primary answered on a retry measured the failed try and the retry wait
+        (R9-229), so neither records anything (:func:`first_token_sample_model`).
         """
         tracker = self._ctx.latency_tracker
         if tracker is None:
             return
         elapsed_ms = (time.perf_counter() - timing.t_start) * 1000.0
-        sample_model = first_token_sample_model(backend)
+        sample_model = first_token_sample_model(backend, served)
         if sample_model is not None:
             tracker.record(sample_model, elapsed_ms)
 
@@ -595,16 +648,18 @@ class VoiceModelReplyProducer:
             prompt, tools=tools, temperature=0.0, max_tokens=max_tokens
         ):
             if served is None and _is_reply_payload(chunk):
-                # R9-214: the chain is committed to its winner by its first payload chunk, so
-                # the ledger read here names the backend that is actually speaking, including
-                # on a turn a barge-in later cuts short. R9-221: the meter below is fed this
-                # same pair, so a turn a fallback answered is billed at the fallback (D-M2-2).
-                served = resolve_served_model(backend)
+                # R9-214: recorded at the first payload chunk, so a turn a barge-in later
+                # cuts short still names the backend that was speaking. R9-223: read from
+                # the chunk's own trace, never from the chain every call on the tier shares.
+                # R9-221: the meter below is fed this same pair (D-M2-2).
+                served = served_identity(backend, chunk.served)
                 self._served_model = served
+                if timing.turn is not None:
+                    timing.turn.served = served
             if chunk.delta:
                 if not timing.notified:
                     timing.notified = True
-                    self._record_first_token(backend, timing)
+                    self._record_first_token(backend, timing, chunk.served)
                 text_out.append(chunk.delta)
                 spoken = strip_converter.feed(chunk.delta)
                 if spoken:
@@ -617,18 +672,17 @@ class VoiceModelReplyProducer:
             # capture this round's real token usage for the served LLM's meter,
             # one entry per round (a tool round + re-prompt), each priced on its own.
             if chunk.usage is not None and self._turn_meter is not None:
-                # A chain yields nothing until it has committed to a backend, but on commit
-                # it releases the payload-less chunks it held back (usage included) BEFORE
-                # the committing chunk, so ``served`` can still be unset here. The chain's
-                # ledger is already final by then, so resolving now names the same backend.
-                # A bare backend, which has no ledger, resolves to its own identity.
-                provider, model = served if served is not None else resolve_served_model(backend)
+                # Every chunk a chain yields carries the call's own trace (R9-223), the
+                # held-back usage chunk it releases before the committing one included, so
+                # the pair comes from this chunk. A bare backend is its own identity.
+                provider, model = served_identity(backend, chunk.served)
                 self._turn_meter.note_llm_usage(
                     prompt_tokens=chunk.usage.prompt_tokens,
                     completion_tokens=chunk.usage.completion_tokens,
                     cost_usd=chunk.usage.cost_usd,
                     provider=provider,
                     model=model,
+                    unrecovered=_unrecovered(chunk.served),
                 )
             tcd = chunk.tool_call_delta
             if tcd is not None:

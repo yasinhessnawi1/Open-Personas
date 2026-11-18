@@ -78,3 +78,59 @@ async def test_run_is_cut_off_at_a_step_boundary_on_exhaustion() -> None:
     assert len(watcher.usages) == 3
     assert watcher.captured_total == 3  # captured == balance, never more
     assert watcher.balance == 0  # floored at 0, never negative
+
+
+class _DownPrimary:
+    """A chain primary whose ``chat`` first returns an empty completion that cost tokens.
+
+    The chain treats it as a failure and falls through, so the step is served by the
+    fallback while the primary's wasted try is carried in the step's history.
+    """
+
+    provider_name = "anthropic"
+    model_name = "claude-sonnet-4-6"
+    supports_native_tools = False
+    supports_vision = False
+
+    async def chat(self, messages: object, **_kwargs: object) -> object:  # noqa: ARG002
+        from persona.backends.types import ChatResponse, TokenUsage
+
+        return ChatResponse(
+            content="",
+            usage=TokenUsage(prompt_tokens=800, completion_tokens=0, total_tokens=800),
+            model=self.model_name,
+            provider=self.provider_name,
+            latency_ms=1.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_step_a_fallback_served_is_reported_at_the_fallback() -> None:
+    """R9-296: the step meter named the chain's PRIMARY on every fallback step.
+
+    ``StepUsage`` is what the agentic-run watcher and the task leg price, so a step the
+    fallback answered was charged at the primary's rate.
+    """
+    from _fakes import ScriptedBackend  # type: ignore[import-not-found]
+    from persona.backends.multi_model import MultiModelChatBackend
+
+    loop, _stores, _backend = _make_loop([])
+    fallback = ScriptedBackend(
+        [], chat_script=[_resp("[FINAL] done")], provider_name="openai", model_name="gpt-4o"
+    )
+    chain = MultiModelChatBackend([_DownPrimary(), fallback], max_retries_per_backend=0)  # type: ignore[list-item]
+    loop._tiers._cache = {"frontier": chain, "mid": chain, "small": chain}  # type: ignore[attr-defined]  # noqa: SLF001
+    token = CancelToken()
+    watcher = _BalanceWatcher(balance=100, cancel_token=token)
+
+    run = await loop.run("do it", on_step_usage=watcher.on_step_usage, cancel_token=token)
+
+    assert run.status is RunStatus.COMPLETED
+    (usage,) = watcher.usages
+    assert (usage.provider, usage.model) == ("openai", "gpt-4o")
+    assert (usage.prompt_tokens, usage.completion_tokens) == (10, 5)  # the answer's own
+    # D1: the primary's wasted try rides along, to be logged by the pricer, not charged.
+    (wasted,) = usage.unrecovered
+    assert (wasted.model, wasted.error_class) == ("claude-sonnet-4-6", "EmptyCompletionError")
+    assert wasted.usage is not None
+    assert wasted.usage.prompt_tokens == 800

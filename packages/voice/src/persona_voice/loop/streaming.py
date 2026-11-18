@@ -591,6 +591,8 @@ class StreamingLoop:
         self._llm_first_token_at = None
         tts_first_audio_at: datetime | None = None
         audio_first_play_at: datetime | None = None
+        # R9-223: the turn's own stream, which can name the model that served THIS turn.
+        token_stream: object | None = None
         _LOG.info(
             "voice turn started chars={chars} synthetic={synthetic}",
             chars=len(final_transcript.text),
@@ -680,7 +682,7 @@ class StreamingLoop:
                 # CancelledError skips every handler above: a continuation or barge-in
                 # cut the turn. Say so, or the log reads as a reply that never played.
                 outcome = "cancelled"
-            served_provider, served_model = self._served_model_for_log()
+            served_provider, served_model = self._served_model_for_log(token_stream)
             _LOG.info(
                 "voice turn ended outcome={outcome} tokens={tokens} "
                 "first_audio_ms={first} total_ms={total:.0f} "
@@ -722,21 +724,25 @@ class StreamingLoop:
                 audio_first_play_at=audio_first_play_at,
             )
 
-    def _served_model_for_log(self) -> tuple[str, str]:
+    def _served_model_for_log(self, stream: object | None = None) -> tuple[str, str]:
         """The ``(provider, model)`` the turn-ended line names (R9-214).
 
-        The served pair when the producer reports one, ``<none>`` when it can report
-        but no model answered this turn, and ``<unattributed>`` when the producer does
-        not implement :class:`ServedModelReporter` at all, or its read raises.
+        Read from the turn's own token ``stream`` when it implements
+        :class:`ServedModelReporter` (R9-223: a cut turn whose ``finally`` runs after
+        the next turn has started still names its own model), else from the producer.
+        The served pair when one is reported, ``<none>`` when the reporter can report
+        but no model answered this turn, and ``<unattributed>`` when neither implements
+        :class:`ServedModelReporter`, or the read raises.
 
         Never raises: it runs in the invocation's ``finally``, ahead of the
         stopped-speaking notify, the heard-reply listener and the latency row, and a
         log field must not cost the turn any of those.
         """
-        if not isinstance(self._model, ServedModelReporter):
+        reporter: object = stream if isinstance(stream, ServedModelReporter) else self._model
+        if not isinstance(reporter, ServedModelReporter):
             return _UNATTRIBUTED_MODEL, _UNATTRIBUTED_MODEL
         try:
-            served = self._model.served_model()
+            served = reporter.served_model()
         except Exception as exc:  # noqa: BLE001, the seam's MUST NOT raise, enforced here
             _LOG.warning(
                 "voice turn served-model read failed (class={cls}); logging it unattributed",

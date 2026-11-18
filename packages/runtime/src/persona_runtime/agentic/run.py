@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
+from persona.backends.types import BackendAttempt  # noqa: TC002 (Pydantic needs it at runtime)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from persona_runtime.agentic.step import Step  # noqa: TC001 — Pydantic needs runtime ref
@@ -135,6 +136,9 @@ class StepUsage(BaseModel):
         completion_tokens: Completion tokens the step's model call emitted.
         cost_usd: Response-side actual cost in USD (OpenRouter usage.cost), or
             ``None`` — the caller then prices from the token counts.
+        unrecovered: The step's failed tries that reported tokens (an empty or
+            degenerate completion before a fallback answered). Never charged; the
+            pricer logs their cost as unrecovered (D-ORCH-11-18-h).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -145,6 +149,7 @@ class StepUsage(BaseModel):
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     cost_usd: float | None = Field(default=None, ge=0.0)
+    unrecovered: tuple[BackendAttempt, ...] = ()
 
 
 class CancelToken:

@@ -68,7 +68,7 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, compute_turn_cost, least_certain_basis, price_rounds
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -88,6 +88,7 @@ from persona_api.tasks.leg_retrieval import LegRetrieval  # noqa: TC001 (a const
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from persona.billing.basis import CostBasis
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import StuckReport, Task, TaskCheckpoint
     from persona_runtime.agentic.events import RunEvent
@@ -273,7 +274,9 @@ class _LegCost:
         self._cost_source = cost_source
         self._distillation = distillation
         self._step_cents = 0.0
-        self._basis: str | None = None
+        #: Each priced step's basis, in order. The leg is labelled from all of them
+        #: (D3, :meth:`_steps_basis`), never from the last one alone.
+        self._step_bases: list[CostBasis] = []
         #: What tools reported through the leg spend door, in cents, by kind. Every
         #: kind starts present at zero so the ledger is WRITTEN for each of them: a
         #: column that reads zero because a writer recorded zero is a measurement; one
@@ -296,18 +299,35 @@ class _LegCost:
         self._reported[kind] = self._reported.get(kind, 0.0) + max(cost_cents, 0.0)
 
     async def on_step_usage(self, usage: StepUsage) -> None:
-        cost_cents, basis = compute_turn_cost(
-            provider=usage.provider,
-            model=usage.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            actual_cost_usd=usage.cost_usd,
+        # Priced as one round (exactly compute_turn_cost for one round), so the step's
+        # failed tries that cost tokens are logged as unrecovered, never charged (D1).
+        cost_cents, basis = price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cost_usd=usage.cost_usd,
+                    provider=usage.provider,
+                    model=usage.model,
+                    unrecovered=usage.unrecovered,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg",
         )
         self._step_cents += cost_cents
-        # Prefer a genuine basis over ``unpriced`` (same-provider legs share one).
-        if basis != "unpriced" or self._basis is None:
-            self._basis = basis
+        self._step_bases.append(basis)
+
+    def _steps_basis(self) -> str | None:
+        """The steps' label: ``None`` when no step ran, else the least certain priced one.
+
+        Since R9-296 each step is priced at the model that served it, so one leg can hold
+        an OpenRouter actual and a static estimate; it is labelled as a chat turn is (D3),
+        ``unpriced`` only when no step was priced.
+        """
+        if not self._step_bases:
+            return None
+        return least_certain_basis(self._step_bases)
 
     def _distillation_cents(self) -> tuple[float, str | None]:
         """The checkpoint distiller's model call, priced like a step (D-W1-44).
@@ -339,8 +359,9 @@ class _LegCost:
         the steps have none or came back unpriced.
         """
         distilled_cents, distilled_basis = self._distillation_cents()
-        steps_priced = self._basis is not None and self._basis != "unpriced"
-        basis: str | None = self._basis
+        steps_basis = self._steps_basis()
+        steps_priced = steps_basis is not None and steps_basis != "unpriced"
+        basis: str | None = steps_basis
         if not steps_priced and distilled_basis is not None:
             basis = distilled_basis
         return self._step_cents + distilled_cents, basis

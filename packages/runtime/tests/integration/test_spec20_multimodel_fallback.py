@@ -19,8 +19,7 @@ the file exercises BOTH the wrapper (core) and the TurnLog
 """
 
 # ruff: noqa: SLF001, N802, PT012, PT019
-# SLF001: integration test asserts on the wrapper's private last_attempts
-# ledger via the public ``last_attempts`` property surface (documentation
+# SLF001: integration test reads private test-double state (documentation
 # value of the underscore is implicit here).
 # N802: test names embed acceptance-criterion identifiers (e.g.
 # ``AllModelsFailedError``) — the camel-case is load-bearing and matches
@@ -49,12 +48,15 @@ from persona.backends.errors import (
     RateLimitError,
 )
 from persona.backends.multi_model import (
-    AttemptRecord as ChatAttemptRecord,
-)
-from persona.backends.multi_model import (
     MultiModelChatBackend,
 )
-from persona.backends.types import ChatResponse, StreamChunk, TokenUsage
+from persona.backends.types import (
+    BackendAttempt,
+    ChatResponse,
+    ServedCall,
+    StreamChunk,
+    TokenUsage,
+)
 from persona.errors import PersonaError
 from persona.imagegen.errors import ContentRejectedError, ImageProviderError
 from persona.imagegen.multi_model_image import MultiModelImageBackend
@@ -264,7 +266,7 @@ class TestCrossProviderChatFallback:
         """D-20-9 RETRY-THEN-FALLBACK + D-20-10 N=1 retry.
 
         Primary raises twice → wrapper retries once same-model then
-        advances; ``last_attempts`` records ``retried_same_model=True``.
+        advances; the call's own trace records the backend as retried.
         """
         primary = _ScriptedChatBackend(
             provider="openai",
@@ -286,11 +288,12 @@ class TestCrossProviderChatFallback:
         assert response.content == "fb"
         assert primary.call_count == 2  # original + 1 retry
         assert secondary.call_count == 1
-        attempts = wrapper.last_attempts
+        assert response.served is not None
+        attempts = response.served.fell_through()
         assert len(attempts) == 1
         assert attempts[0].provider == "openai"
-        assert attempts[0].last_error_class == "RateLimitError"
-        assert attempts[0].retried_same_model is True
+        assert attempts[0].error_class == "RateLimitError"
+        assert attempts[0].retry is True
 
     @pytest.mark.asyncio
     async def test_primary_rate_limit_long_retry_after_immediate_fallback(self) -> None:
@@ -310,7 +313,8 @@ class TestCrossProviderChatFallback:
 
         assert response.provider == "deepseek"
         assert primary.call_count == 1  # NO retry
-        assert wrapper.last_attempts[0].retried_same_model is False
+        assert response.served is not None
+        assert response.served.fell_through()[0].retry is False
 
     @pytest.mark.asyncio
     async def test_primary_authentication_error_fallback_with_warning(self) -> None:
@@ -421,7 +425,8 @@ class TestCrossProviderChatFallback:
         response = await wrapper.chat([_user()])
         assert response.provider == "anthropic"
         assert primary.call_count == 1  # FALLBACK-NO-RETRY
-        assert wrapper.last_attempts[0].last_error_class == "ProviderCredentialMissingError"
+        assert response.served is not None
+        assert response.served.fell_through()[0].error_class == "ProviderCredentialMissingError"
 
     @pytest.mark.asyncio
     async def test_streaming_fallback_before_first_chunk(self) -> None:
@@ -440,10 +445,13 @@ class TestCrossProviderChatFallback:
             [primary, secondary], tier_name="frontier", max_retries_per_backend=0
         )
         collected: list[str] = []
+        served = None
         async for chunk in wrapper.chat_stream([_user()]):
             collected.append(chunk.delta)
+            served = chunk.served
         assert "".join(collected) == "hello world"
-        assert wrapper.last_attempts[0].provider == "openai"
+        assert served is not None
+        assert served.fell_through()[0].provider == "openai"
 
     @pytest.mark.asyncio
     async def test_streaming_post_first_chunk_error_raises_verbatim(self) -> None:
@@ -593,8 +601,8 @@ class TestCrossProviderImageGenFallback:
 
 # ====================================================================== #
 # TestTurnLogFallbackFields
-# T19 _compute_fallback_fields end-to-end through the wrapper's
-# last_attempts accessor.
+# T19 _compute_fallback_fields end-to-end through the served trace the
+# wrapper stamps on each call's own response (R9-223).
 # ====================================================================== #
 
 
@@ -610,8 +618,8 @@ class TestTurnLogFallbackFields:
             script=[_ok_chat("openai", "gpt-4o")],
         )
         wrapper = MultiModelChatBackend([primary], tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 0
         assert fields["tier_fallback_reasons"] == []
         assert fields["tier_fallback_providers"] == []
@@ -633,8 +641,8 @@ class TestTurnLogFallbackFields:
             script=[_ok_chat("anthropic", "claude-sonnet-4-6")],
         )
         wrapper = MultiModelChatBackend([primary, secondary], tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 1
         assert fields["tier_fallback_reasons"] == ["ModelNotFoundError"]
         assert fields["tier_fallback_providers"] == ["openai"]
@@ -672,8 +680,8 @@ class TestTurnLogFallbackFields:
             ),
         ]
         wrapper = MultiModelChatBackend(list(chain), tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 3
         assert fields["tier_fallback_reasons"] == [
             "ModelNotFoundError",
@@ -687,7 +695,7 @@ class TestTurnLogFallbackFields:
 
     @pytest.mark.asyncio
     async def test_AllModelsFailedError_path_writes_TurnLog_with_full_attempts(self) -> None:
-        """Exhaustion path — ledger fully populated for operator dashboard."""
+        """Exhaustion path: the error carries every attempt for the operator dashboard."""
         chain = [
             _ScriptedChatBackend(
                 provider=p,
@@ -697,44 +705,37 @@ class TestTurnLogFallbackFields:
             for p, m in (("openai", "gpt-4o"), ("anthropic", "claude"))
         ]
         wrapper = MultiModelChatBackend(list(chain), tier_name="frontier")
-        with pytest.raises(AllModelsFailedError):
+        with pytest.raises(AllModelsFailedError) as excinfo:
             await wrapper.chat([_user()])
-        attempts = wrapper.last_attempts
-        assert [a.provider for a in attempts] == ["openai", "anthropic"]
-        assert all(a.last_error_class == "AuthenticationError" for a in attempts)
+        # The per-call records ride the error itself (no ledger on the shared chain).
+        context = excinfo.value.context
+        assert context["attempt_count"] == "2"
+        assert context["final_error_class"] == "AuthenticationError"
+        attempts_json = context["attempts_json"]
+        assert attempts_json.index("'openai'") < attempts_json.index("'anthropic'")
+        assert attempts_json.count("'AuthenticationError'") == 2
 
     def test_privacy_only_class_names_in_reasons_field(self) -> None:
         """D-20-9 privacy — only class names leak; never message/context."""
 
-        # Synthesize a wrapper-shaped backend exposing a hand-built ledger
-        # so the projection helper sees only class-name strings.
-        class _BackendShim:
-            @property
-            def provider_name(self) -> str:
-                return "openai"
+        # A hand-built served trace, so the projection helper sees only the
+        # class-name strings the chain records (it never keeps a message).
+        served = ServedCall(
+            provider="anthropic",
+            model="c",
+            attempts=(
+                BackendAttempt(
+                    index=0,
+                    provider="openai",
+                    model="gpt-4o",
+                    error_class="AuthenticationError",
+                    status_code=401,
+                ),
+                BackendAttempt(index=1, provider="anthropic", model="c"),
+            ),
+        )
 
-            @property
-            def model_name(self) -> str:
-                return "gpt-4o"
-
-            @property
-            def backends(self) -> list[object]:
-                return [self, _ScriptedChatBackend(provider="anthropic", model="c", script=[])]
-
-            @property
-            def last_attempts(self) -> list[ChatAttemptRecord]:
-                return [
-                    ChatAttemptRecord(
-                        provider="openai",
-                        model="gpt-4o",
-                        # Class name only — the field is named for it.
-                        last_error_class="AuthenticationError",
-                        last_error_status_code=401,
-                        retried_same_model=False,
-                    )
-                ]
-
-        fields = _compute_fallback_fields(_BackendShim())  # type: ignore[arg-type]
+        fields = _compute_fallback_fields(None, served)  # type: ignore[arg-type]
         # Only the class-name string leaks; no message / context value.
         assert fields["tier_fallback_reasons"] == ["AuthenticationError"]
         assert fields["tier_fallback_providers"] == ["openai"]
