@@ -1038,8 +1038,19 @@ def test_deploy_never_prunes_images_or_the_whole_system() -> None:
     the database is a volume, which an image or system prune could take with it."""
     deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in deploy.splitlines() if not line.lstrip().startswith("#"))
-    for destroys in ("image prune", "system prune", "volume prune", "volume rm", "image rm"):
+    # Round 3 LOW-3: one logical command per line, so a flag on a continued line still counts.
+    code = code.replace("\\\n", " ")
+    for destroys in (
+        "image prune",
+        "system prune",
+        "volume prune",
+        "volume rm",
+        "volume remove",
+        "image rm",
+        "image remove",
+    ):
         assert destroys not in code, destroys
-    # Round 2 LOW-3: `down -v` drops the database volume; `rmi` the rollback image.
-    assert not re.search(r"\bdown\b[^\n]*\s-v\b", code), "down -v"
+    # Round 2 LOW-3: `down -v` drops the database volume; `rmi` the rollback image. Round 3
+    # LOW-3: so does `-v` inside a flag group (`down -fv`) or spelled `--volumes`.
+    assert not re.search(r"\bdown\b[^\n]*(\s-[a-z]*v\b|--volumes\b)", code), "down -v"
     assert not re.search(r"\brmi\b", code), "rmi"
