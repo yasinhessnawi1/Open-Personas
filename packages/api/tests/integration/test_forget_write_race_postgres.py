@@ -3,7 +3,8 @@
 The unit suite drives the same interleavings over a model of the transport. These prove the model
 is honest about the locks. Nothing here waits for time to pass: a writer is held inside its own
 transaction by a gate, a forget is held inside an explicit transaction on a raw connection, and
-"the other side is now waiting on a lock" is read from ``pg_stat_activity`` rather than assumed.
+"the other side is now waiting on a lock" is read from ``pg_stat_activity`` rather than assumed,
+for the waiting side's own backends only, and with the statement it is waiting in.
 Every connection the code under test uses carries a ``lock_timeout`` and a
 ``statement_timeout``, and every wait on a thread is bounded, so a regression fails instead of
 hanging the job.
@@ -25,7 +26,7 @@ from persona.stores import postgres as pg
 from persona.stores.episodic import EpisodicStore
 from persona.stores.postgres import PostgresBackend
 from persona.stores.self_facts import SelfFactsStore
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -77,19 +78,43 @@ def _texts(engine: Engine, kind: str) -> list[str]:
         )
 
 
-def _waiting_on_a_lock(engine: Engine, expected: int = 1) -> None:
-    """Return once ``expected`` sessions of this database are waiting on a lock."""
+class _Waiter:
+    """An engine for the side expected to wait, recording the backend pid of every connection."""
+
+    def __init__(self, database_url: str) -> None:
+        self.engine = create_engine(database_url, connect_args={"options": _GUARDED})
+        self.pids: set[int] = set()
+        event.listen(self.engine, "checkout", self._record)
+
+    def _record(self, dbapi_connection: Any, *_: object) -> None:  # noqa: ANN401 - the driver's
+        self.pids.add(int(dbapi_connection.info.backend_pid))
+
+    def backend(self, embedder: HashEmbedder384) -> PostgresBackend:
+        return PostgresBackend(engine=self.engine, embedder=embedder)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def waiter(engine: Engine, database_url: str) -> Iterator[_Waiter]:
+    _ = engine  # the schema and the seed rows come first
+    made = _Waiter(database_url)
+    yield made
+    made.engine.dispose()
+
+
+def _waiting_on_a_lock(observer: Engine, waiter: _Waiter) -> str:
+    """Return the statement once one of ``waiter``'s own sessions is waiting on a lock."""
     deadline = time.monotonic() + _WAIT_S
     while time.monotonic() < deadline:
-        with engine.connect() as conn:
+        with observer.connect() as conn:
             waiting = conn.execute(
                 text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                )
-            ).scalar_one()
-        if waiting >= expected:
-            return
+                    "SELECT query FROM pg_stat_activity "
+                    "WHERE pid = ANY(:pids) AND wait_event_type = 'Lock'"
+                ),
+                {"pids": sorted(waiter.pids)},
+            ).scalar_one_or_none()
+        if waiting is not None:
+            return str(waiting)
         time.sleep(0.02)
     pytest.fail("the other session never started waiting on the lock")
 
@@ -175,9 +200,9 @@ def test_a_write_over_a_version_a_forget_renumbered_is_refused(
 
 
 def test_a_write_citing_evidence_a_forget_is_deleting_waits_and_is_refused(
-    engine: Engine, embedder: HashEmbedder384
+    engine: Engine, waiter: _Waiter, embedder: HashEmbedder384
 ) -> None:
-    backend = PostgresBackend(engine=engine, embedder=embedder)  # type: ignore[arg-type]
+    backend = waiter.backend(embedder)
     backend.upsert(
         persona_id=_PERSONA, store_kind="episodic", chunks=[_chunk("a", "a"), _chunk("x", "x")]
     )
@@ -194,7 +219,7 @@ def test_a_write_citing_evidence_a_forget_is_deleting_waits_and_is_refused(
                 requires_kinds=["episodic"],
             )
         )
-        _waiting_on_a_lock(engine)
+        _waiting_on_a_lock(engine, waiter)
         transaction.commit()
         errors = writer.finish()
 
@@ -203,7 +228,7 @@ def test_a_write_citing_evidence_a_forget_is_deleting_waits_and_is_refused(
 
 
 def test_a_forget_waits_for_a_write_holding_its_evidence_and_then_removes_what_it_wrote(
-    engine: Engine, embedder: HashEmbedder384, monkeypatch: pytest.MonkeyPatch
+    engine: Engine, waiter: _Waiter, embedder: HashEmbedder384, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend = PostgresBackend(engine=engine, embedder=embedder)  # type: ignore[arg-type]
     backend.upsert(
@@ -225,11 +250,11 @@ def test_a_forget_waits_for_a_write_holding_its_evidence_and_then_removes_what_i
     assert gate.inside.wait(_WAIT_S), "the writer never locked its evidence"
 
     forget = _Thread(
-        lambda: EpisodicStore(backend=backend, audit_logger=MemoryAuditLogger()).remove_documents(
-            _PERSONA, ["x"]
-        )
+        lambda: EpisodicStore(
+            backend=waiter.backend(embedder), audit_logger=MemoryAuditLogger()
+        ).remove_documents(_PERSONA, ["x"])
     )
-    _waiting_on_a_lock(engine)
+    _waiting_on_a_lock(engine, waiter)
     gate.release.set()
 
     assert writer.finish() == []
@@ -264,7 +289,7 @@ def test_reinforcing_evidence_is_not_held_up_by_a_write_holding_it(
 
 
 def test_a_deadlock_comes_back_as_a_conflict_the_store_can_retry(
-    engine: Engine, embedder: HashEmbedder384
+    engine: Engine, waiter: _Waiter, embedder: HashEmbedder384
 ) -> None:
     """Postgres breaks a lock cycle by failing one side. That side gets the retryable error.
 
@@ -282,7 +307,7 @@ def test_a_deadlock_comes_back_as_a_conflict_the_store_can_retry(
         other.execute(text("SET LOCAL deadlock_timeout = '15s'"))
         other.execute(text("SELECT id FROM memory_chunks WHERE id = 'b' FOR UPDATE"))
         writer = _Thread(
-            lambda: backend.upsert(
+            lambda: waiter.backend(embedder).upsert(
                 persona_id=_PERSONA,
                 store_kind="core_memory",
                 chunks=[_chunk("block", "a summary of a and b")],
@@ -290,10 +315,44 @@ def test_a_deadlock_comes_back_as_a_conflict_the_store_can_retry(
                 requires_kinds=["episodic"],
             )
         )
-        _waiting_on_a_lock(engine)  # the writer holds a and waits for b
+        _waiting_on_a_lock(engine, waiter)  # the writer holds a and waits for b
         other.execute(text("DELETE FROM memory_chunks WHERE id = 'a'"))  # waits on the writer
         errors = writer.finish()
         transaction.rollback()
 
     assert [type(e) for e in errors] == [ChainConflictError]
     assert _texts(engine, "core_memory") == []
+
+
+def test_a_write_waits_on_the_lock_of_a_version_being_renumbered_and_is_refused(
+    engine: Engine, waiter: _Waiter, embedder: HashEmbedder384
+) -> None:
+    """The writer must wait in its own lock on the superseded version, not later in the UPDATE.
+
+    A forget closing up a chain holds the head and renumbers it. The writer read the old number.
+    Waiting at the lock means it compares what the forget committed and is refused there; the
+    version guard on the UPDATE is the second line behind that, not the first (PR #39 review).
+    """
+    store = SelfFactsStore(backend=waiter.backend(embedder), audit_logger=MemoryAuditLogger())
+    store.write(_PERSONA, [_chunk("f1", "first", _FACT)], force=True)
+
+    with engine.connect() as forget:
+        transaction = forget.begin()
+        forget.execute(text("SELECT id FROM memory_chunks WHERE id = 'f1' FOR UPDATE"))
+        forget.execute(text("UPDATE memory_chunks SET version = 2 WHERE id = 'f1'"))
+        writer = _Thread(
+            lambda: waiter.backend(embedder).upsert(
+                persona_id=_PERSONA,
+                store_kind="self_facts",
+                chunks=[_chunk("f2", "second", _FACT)],
+                supersedes={"f1": (1, "f2")},
+            )
+        )
+        statement = _waiting_on_a_lock(engine, waiter)
+        transaction.commit()
+        errors = writer.finish()
+
+    assert statement.lstrip().upper().startswith("SELECT"), statement[:60]
+    assert "FOR UPDATE" in statement.upper()
+    assert [type(e) for e in errors] == [ChainConflictError]
+    assert _texts(engine, "self_facts") == ["first"]

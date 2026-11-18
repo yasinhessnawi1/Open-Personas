@@ -57,6 +57,8 @@ class _Transport:
         self.gate: Callable[[], None] | None = None
         self.gate_kind: str | None = None
         self.writes = 0
+        #: Every write of this kind is refused as a lost race, as a mapped deadlock would be.
+        self.conflict_kind: str | None = None
 
     # -- the gate ------------------------------------------------------------
 
@@ -95,6 +97,8 @@ class _Transport:
     ) -> None:
         self._open_gate(store_kind)
         self.writes += 1
+        if store_kind == self.conflict_kind:
+            raise ChainConflictError("another writer landed on this version chain first")
         present = {
             chunk_id
             for chunk_id, (owner, kind, _) in self.rows.items()
@@ -387,6 +391,51 @@ async def test_a_write_over_a_renumbered_head_leaves_no_gap_in_the_history(
     ]
 
 
+# --- a rollback to a summary whose evidence a forget takes while it lands (round 2) -------
+
+
+@_BOTH_SHAPES
+def test_a_rollback_racing_a_forget_of_its_evidence_puts_nothing_back(head_index: bool) -> None:
+    """The rollback checks its target, then a forget takes the evidence and the target with it.
+
+    The forget renumbers the head as it closes the chain, so the rollback's write is stale and
+    goes round again. The second round must still refuse a summary of what was just forgotten,
+    rather than append its text as the new head (PR #39 review, round 1).
+    """
+    transport = _Transport(head_index=head_index)
+    store, audit = _core(transport)
+    _evidence(transport, "x", "a")
+    _block(store, "summary of x", "x")
+    _block(store, "summary of a", "a")
+    transport.gate_next_write(CORE_MEMORY_KIND, _forget(transport, audit, "x"))
+
+    with pytest.raises(ForgottenEvidenceError):
+        store.rollback(_PERSONA, _CORE, 1, source=WriteSource.SYSTEM)
+
+    assert transport.texts(CORE_MEMORY_KIND) == ["summary of a"]
+    assert "x" not in _cited(transport)
+    validate_chain(transport.chain(CORE_MEMORY_KIND, _CORE))
+
+
+@_BOTH_SHAPES
+def test_a_rollback_whose_evidence_stays_still_lands_after_a_lost_race(head_index: bool) -> None:
+    """The guard must not cost a legitimate rollback: an unrelated forget only makes it retry."""
+    transport = _Transport(head_index=head_index)
+    store, audit = _core(transport)
+    _evidence(transport, "a", "b", "y")
+    _block(store, "summary of a", "a")
+    _block(store, "summary of y", "y")
+    _block(store, "summary of b", "b")
+    transport.gate_next_write(CORE_MEMORY_KIND, _forget(transport, audit, "y"))
+
+    store.rollback(_PERSONA, _CORE, 1, source=WriteSource.SYSTEM)
+
+    current = store.current(_PERSONA)
+    assert current is not None
+    assert current.text == "summary of a"
+    validate_chain(transport.chain(CORE_MEMORY_KIND, _CORE))
+
+
 # --- R2: a block built from evidence forgotten before it landed ----------------------------
 
 
@@ -579,3 +628,20 @@ def test_the_next_pass_gists_what_remains(head_index: bool) -> None:
     assert report.gists_written == 1
     assert [g.member_ids for g in pyramid.gists(_PERSONA)] == [(ids[0], ids[2])]
     assert GIST_KIND in {k for _, k, _ in transport.rows.values()}
+
+
+@_BOTH_SHAPES
+def test_a_gist_write_that_loses_a_race_skips_its_window_and_the_run_goes_on(
+    head_index: bool,
+) -> None:
+    """A lost race on one gist (or a deadlock Postgres broke) must not abort the whole pass."""
+    transport = _Transport(head_index=head_index)
+    _raw(transport, 3)
+    transport.conflict_kind = GIST_KIND
+    engine, pyramid, merges = _engine(transport, _ForgetsDuringTheCall(None))
+
+    report = asyncio.run(engine.run("u1", _PERSONA, now=_NOW))
+
+    assert pyramid.gists(_PERSONA) == []
+    assert merges.candidates == []
+    assert [s.reason for s in report.skipped] == ["gist write conflict"]

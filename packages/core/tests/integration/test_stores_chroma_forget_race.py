@@ -5,6 +5,11 @@ supersedes and cites, and the one upsert after it, run under a lock that every d
 folder and persona also takes. These tests drive real threads through a gate in the embedder,
 which runs inside the upsert and so inside the lock.
 
+The lock is held only for the check and the write: the new version is embedded before it is
+taken, and a superseded version keeps the vector already stored for it (PR #39 review). So the
+gate that holds a writer inside the lock sits where the rows are turned into Chroma metadata,
+which only happens under it.
+
 A forget that waits on the lock is shown to be waiting with a bounded wait that expects nothing to
 happen. That can only fail in one direction: a slow machine can make the broken code look right,
 never the correct code look broken.
@@ -21,6 +26,7 @@ from persona.audit import MemoryAuditLogger
 from persona.errors import ChainConflictError, ForgottenEvidenceError
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores import ChromaBackend, SelfFactsStore
+from persona.stores import chroma as chroma_module
 
 from tests._embedder import HashEmbedder
 
@@ -39,17 +45,37 @@ _STILL_BLOCKED = 0.5  # how long a forget that must be waiting on the lock is wa
 
 
 class _GatedEmbedder(HashEmbedder):
-    """Stops inside the upsert of any text carrying the gate word until it is released."""
+    """Records what it embeds. Once armed, stops on any text carrying the gate word."""
 
     def __init__(self) -> None:
         self.inside = threading.Event()
         self.release = threading.Event()
+        self.embedded: list[str] = []
+        self.armed = False
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
-        if any(_GATE in t for t in texts):
+        self.embedded.extend(texts)
+        if self.armed and any(_GATE in t for t in texts):
             self.inside.set()
             assert self.release.wait(_WAIT), "the gate was never released"
         return super().encode(texts)
+
+
+class _LockGate:
+    """Stops a write of the gate word inside the folder lock, where its rows become metadata."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.inside = threading.Event()
+        self.release = threading.Event()
+        real = chroma_module._chunk_to_metadata
+
+        def held(chunk: PersonaChunk) -> dict[str, str | float | int | bool]:
+            if _GATE in chunk.text:
+                self.inside.set()
+                assert self.release.wait(_WAIT), "the gate was never released"
+            return real(chunk)
+
+        monkeypatch.setattr(chroma_module, "_chunk_to_metadata", held)
 
 
 def _fact(chunk_id: str, text: str) -> PersonaChunk:
@@ -59,6 +85,13 @@ def _fact(chunk_id: str, text: str) -> PersonaChunk:
         created_at=_NOW,
         provenance=ChunkProvenance(source=WriteSource.SYSTEM, logical_id=_FACT, written_at=_NOW),
     )
+
+
+def _vectors(backend: ChromaBackend, kind: str = "self_facts") -> dict[str, list[float]]:
+    raw = backend._collection(_PERSONA, kind).get(include=["embeddings"])  # noqa: SLF001
+    return {
+        str(i): [float(x) for x in e] for i, e in zip(raw["ids"], raw["embeddings"], strict=True)
+    }
 
 
 def _texts(backend: ChromaBackend, kind: str = "self_facts") -> list[str]:
@@ -117,7 +150,7 @@ def test_a_forget_between_the_read_and_the_write_does_not_bring_the_old_version_
 
 
 def _forget_waits_for_the_writer(
-    writer_backend: ChromaBackend, forget_backend: ChromaBackend, embedder: _GatedEmbedder
+    writer_backend: ChromaBackend, forget_backend: ChromaBackend, gate: _LockGate
 ) -> None:
     writer = SelfFactsStore(backend=writer_backend, audit_logger=MemoryAuditLogger())
     forgetter = SelfFactsStore(backend=forget_backend, audit_logger=MemoryAuditLogger())
@@ -126,11 +159,11 @@ def _forget_waits_for_the_writer(
     write, wrote, write_errors = _thread(
         lambda: writer.write(_PERSONA, [_fact("f1", f"{_GATE} update")], force=True)
     )
-    assert embedder.inside.wait(_WAIT), "the writer never reached its upsert"
+    assert gate.inside.wait(_WAIT), "the writer never reached its upsert"
     forget, forgot, forget_errors = _thread(lambda: forgetter.remove_documents(_PERSONA, ["f1"]))
 
     blocked = not forgot.wait(_STILL_BLOCKED)
-    embedder.release.set()
+    gate.release.set()
     assert wrote.wait(_WAIT)
     assert forgot.wait(_WAIT)
     write.join(_WAIT)
@@ -143,17 +176,62 @@ def _forget_waits_for_the_writer(
 
 
 def test_a_forget_waits_for_a_write_that_has_checked_its_chain(
-    backend: ChromaBackend, embedder: _GatedEmbedder
+    backend: ChromaBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _forget_waits_for_the_writer(backend, backend, embedder)
+    _forget_waits_for_the_writer(backend, backend, _LockGate(monkeypatch))
 
 
 def test_two_backends_on_one_folder_share_the_lock(
-    tmp_path: Path, backend: ChromaBackend, embedder: _GatedEmbedder
+    tmp_path: Path,
+    backend: ChromaBackend,
+    embedder: _GatedEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The api and the connectors service each build their own backend on the same folder."""
     other = ChromaBackend(persist_path=tmp_path / "chroma", embedder=embedder)
-    _forget_waits_for_the_writer(backend, other, embedder)
+    _forget_waits_for_the_writer(backend, other, _LockGate(monkeypatch))
+
+
+def test_the_new_version_is_embedded_before_the_lock_is_taken(
+    backend: ChromaBackend, embedder: _GatedEmbedder
+) -> None:
+    """A slow embedder must not hold off a forget of the same persona."""
+    store = SelfFactsStore(backend=backend, audit_logger=MemoryAuditLogger())
+    store.write(_PERSONA, [_fact("f1", "the thing to forget")], force=True)
+    embedder.armed = True
+
+    write, wrote, write_errors = _thread(
+        lambda: store.write(_PERSONA, [_fact("f1", f"{_GATE} update")], force=True)
+    )
+    try:
+        assert embedder.inside.wait(_WAIT), "the writer never reached its embedding"
+        forget, forgot, forget_errors = _thread(lambda: store.remove_documents(_PERSONA, ["f1"]))
+        finished_while_embedding = forgot.wait(_WAIT)
+    finally:
+        embedder.release.set()
+    assert wrote.wait(_WAIT)
+    write.join(_WAIT)
+    forget.join(_WAIT)
+
+    assert finished_while_embedding, "the forget waited for the writer's embedding"
+    assert write_errors == []
+    assert forget_errors == []
+    assert _texts(backend) == [f"{_GATE} update"], "the write lands on a chain that starts again"
+
+
+def test_a_superseded_version_is_not_embedded_again(
+    backend: ChromaBackend, embedder: _GatedEmbedder
+) -> None:
+    store = SelfFactsStore(backend=backend, audit_logger=MemoryAuditLogger())
+    store.write(_PERSONA, [_fact("f1", "first")], force=True)
+    first = backend.get_all(persona_id=_PERSONA, store_kind="self_facts")
+    vector_before = _vectors(backend)[first[0].id]
+
+    store.write(_PERSONA, [_fact("f1", "second")], force=True)
+
+    assert embedder.embedded.count("first") == 1, "the superseded version was embedded again"
+    assert _vectors(backend)[first[0].id] == vector_before
+    assert [c.text for c in store.history(_PERSONA, _FACT)] == ["first", "second"]
 
 
 def test_an_append_citing_evidence_that_is_gone_lands_nothing(backend: ChromaBackend) -> None:
