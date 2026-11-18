@@ -46,6 +46,7 @@ from persona.jobs import (
 )
 from persona.logging import get_logger
 from persona.schema.conversation import Conversation, ConversationMessage
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 from persona_runtime.task_origination import ContractDraft, build_task_originated_event
 from sqlalchemy import insert, select, text
 
@@ -138,10 +139,15 @@ class DelegatedTurnHandler:
                 data = getattr(event, "model_dump", None)
                 events.append(data(mode="json") if callable(data) else {"type": str(event)})
 
-            async for chunk in loop.turn(conversation, payload.verbatim_ask, _on_event):
-                delta = getattr(chunk, "delta", None)
-                if delta:
-                    reply.append(delta)
+            # R9-253: a direct write in this turn names its conversation (initiative's gate).
+            interaction_token = bind_interaction("conversation", conversation_id)
+            try:
+                async for chunk in loop.turn(conversation, payload.verbatim_ask, _on_event):
+                    delta = getattr(chunk, "delta", None)
+                    if delta:
+                        reply.append(delta)
+            finally:
+                reset_interaction(interaction_token)
 
             outcome, grounded = await self._resolve_outcome(
                 conversation=conversation,

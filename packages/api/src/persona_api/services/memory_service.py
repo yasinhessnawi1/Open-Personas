@@ -93,11 +93,13 @@ def _conversation_id(origin: NodeProvenance) -> str | None:
     for agentic-run-sourced ones (R-K5-OPEN-CONV) — routing to ``/chat/{run_id}`` would
     404. We expose the id as ``conversation_id`` ONLY when the source is a conversation.
     A legacy/absent ``interaction_kind`` is treated as a conversation (every persisted
-    memory today is conversation-sourced — the run source is not yet wired).
+    memory today is conversation-sourced; the run source is not yet wired). R9-253: a
+    direct write now names its run or its task leg too, so only a conversation (or a
+    legacy unnamed kind) is linkable; any other kind is not a chat.
     """
     if origin.interaction_id is None:
         return None
-    if origin.interaction_kind == InteractionKind.AGENTIC_RUN.value:
+    if origin.interaction_kind not in (None, InteractionKind.CONVERSATION.value):
         return None
     return origin.interaction_id
 

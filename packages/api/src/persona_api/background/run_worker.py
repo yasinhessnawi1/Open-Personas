@@ -31,6 +31,7 @@ from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
 from persona_runtime.agentic.run import CancelToken, RunStatus
 from persona_runtime.cost import compute_turn_cost
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 from sqlalchemy import text
 
 from persona_api.middleware.rls_context import current_user_id
@@ -332,6 +333,8 @@ class RunRegistry:
         sandbox_token = set_sandbox_request_context(
             SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.run_id)
         )
+        # R9-253: a direct write in this run names the run (initiative's gate).
+        interaction_token = bind_interaction("agentic_run", handle.run_id)
         # Accumulate the per-step event log so a restart mid-run leaves the run
         # VIEWABLE (S08-2: progress visible, not resumable). The final Run (with
         # the authoritative Step objects) overwrites this on completion.
@@ -430,6 +433,7 @@ class RunRegistry:
                 or str(exc),
             )
         finally:
+            reset_interaction(interaction_token)
             reset_sandbox_request_context(sandbox_token)
             # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
             # (clean / cancel / error / shutdown). Best-effort — teardown must never

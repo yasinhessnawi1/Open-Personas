@@ -432,3 +432,20 @@ def test_node_detail_no_conversation_link_for_run_source() -> None:
     assert detail is not None
     assert detail.origin.conversation_id is None
     assert detail.origin.interaction_id == "run-7"  # still shown, just not linkable
+
+
+def test_node_detail_no_conversation_link_for_a_task_leg_source() -> None:
+    """R9-253: a leg's direct write names its task; a task id is not a chat either."""
+    prov = [
+        NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            interaction_id="task-9",
+            interaction_kind="task",
+            written_at=NOW,
+        )
+    ]
+    store = _FakeStore([_node("hub", provenance=prov)], [])
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+    assert detail is not None
+    assert detail.origin.conversation_id is None
+    assert detail.origin.interaction_id == "task-9"

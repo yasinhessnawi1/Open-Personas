@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from persona.billing import BillingConfig, credits_charged
 from persona.logging import get_logger
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 
 from persona_api.errors import (
     CreditsExhaustedError,
@@ -296,6 +297,8 @@ class ChatTurnRegistry:
         sandbox_token = set_sandbox_request_context(
             SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.conversation_id)
         )
+        # R9-253: a direct write in this turn names its conversation (initiative's gate).
+        interaction_token = bind_interaction("conversation", handle.conversation_id)
         handle._last_flush = time.monotonic()
         # R9-020: snapshot the PRE-turn message count now — the loop appends this
         # turn's user+assistant pair to ``conversation.messages`` while it runs, so
@@ -473,6 +476,7 @@ class ChatTurnRegistry:
                     )
                 )
         finally:
+            reset_interaction(interaction_token)
             reset_sandbox_request_context(sandbox_token)
             # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
             # (clean / cancel / error / shutdown) so the per-user cap doesn't ratchet

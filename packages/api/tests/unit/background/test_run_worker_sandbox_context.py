@@ -26,6 +26,7 @@ from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
 from persona_api.sandbox import SandboxRequestContext, get_sandbox_request_context
 from persona_runtime.agentic.run import Run, RunStatus
+from persona_runtime.interaction_scope import InteractionRef, current_interaction
 from sqlalchemy import insert
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ class _RecordingLoop:
 
     def __init__(self) -> None:
         self.seen_ctx: SandboxRequestContext | None = None
+        self.seen_interaction: InteractionRef | None = None
 
     async def run(
         self,
@@ -56,6 +58,7 @@ class _RecordingLoop:
         # Capture the context bound at the moment the loop executes (this is when
         # the file tools resolve their scoped root).
         self.seen_ctx = get_sandbox_request_context()
+        self.seen_interaction = current_interaction()
         now = datetime.now(UTC)
         return Run(
             persona_id=_PERSONA,
@@ -121,3 +124,15 @@ async def test_run_worker_resets_context_even_when_loop_raises(engine: Engine) -
     assert handle.task is not None
     await handle.task  # the worker swallows the error (never crashes silently)
     assert get_sandbox_request_context() is None
+
+
+@pytest.mark.asyncio
+async def test_run_worker_binds_the_run_as_the_interaction(engine: Engine) -> None:
+    """R9-253: a direct write in the run names the run, so a disclosure there gates it."""
+    registry = RunRegistry(engine)
+    loop = _RecordingLoop()
+    handle = registry.start(run_id=_RUN_ID, owner_id=_OWNER, loop=loop, task_text="t")  # type: ignore[arg-type]
+    assert handle.task is not None
+    await handle.task
+    assert loop.seen_interaction == InteractionRef(kind="agentic_run", id=_RUN_ID)
+    assert current_interaction() is None

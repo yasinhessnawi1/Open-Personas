@@ -31,6 +31,7 @@ from persona_api.errors import TurnAlreadyActiveError
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import get_sandbox_request_context
 from persona_runtime.agentic.events import RunEvent
+from persona_runtime.interaction_scope import InteractionRef, current_interaction
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -53,6 +54,7 @@ class _ScriptedLoop:
         self._usage = usage
         self.seen_owner: str | None = None
         self.seen_conversation_id: str | None = None
+        self.seen_interaction: InteractionRef | None = None
 
     async def turn(
         self,
@@ -62,6 +64,7 @@ class _ScriptedLoop:
         **_kwargs: object,
     ) -> AsyncIterator[StreamChunk]:
         self.seen_owner = current_user_id.get()
+        self.seen_interaction = current_interaction()
         ctx = get_sandbox_request_context()
         self.seen_conversation_id = ctx.conversation_id if ctx is not None else None
         if on_event is not None:
@@ -194,6 +197,8 @@ async def test_binds_owner_and_conversation_contextvars_while_running() -> None:
     await handle.task
     assert loop.seen_owner == _OWNER
     assert loop.seen_conversation_id == _CONV
+    # R9-253: a direct write in the turn names its conversation.
+    assert loop.seen_interaction == InteractionRef(kind="conversation", id=_CONV)
 
 
 @pytest.mark.asyncio
@@ -202,6 +207,7 @@ async def test_resets_contextvars_after_completion() -> None:
     await handle.task
     assert current_user_id.get() is None
     assert get_sandbox_request_context() is None
+    assert current_interaction() is None
 
 
 @pytest.mark.asyncio

@@ -1031,7 +1031,9 @@ class RuntimeFactory:
         # is rejected, never stored (D-K2-7).
         if self._graph_store is not None and self._record_user_fact_enabled:
             from persona_runtime.extraction.direct_write import make_record_user_fact_tool
+            from persona_runtime.interaction_scope import current_interaction
 
+            from persona_api.initiative.disclosures import PgDisclosureStore
             from persona_api.middleware.rls_context import current_user_id
 
             extra.append(
@@ -1041,6 +1043,11 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                     # R9-284: an erased persona's late turn must not grow the graph again.
                     persona_exists=self._persona_exists,
+                    # R9-253: the write names the turn's interaction (bound per chat turn,
+                    # delegated turn, run and task leg), and a disclosure records the durable
+                    # fact first, so initiative's gate holds it after the node is forgotten.
+                    interaction_provider=current_interaction,
+                    disclosures=PgDisclosureStore(self._engine),
                 )
             )
         # Spec A4 (A4-D-5) — the read-only ``task_introspect`` tool: the persona's only window

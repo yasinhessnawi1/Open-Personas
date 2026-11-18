@@ -18,6 +18,12 @@ write is for the discrete fact, now.
 The ``@tool`` decorator's envelope turns any body exception into
 ``ToolResult(is_error=True)`` (D-03-5), so a merge failure surfaces as an error
 result and never crashes the live turn.
+
+R9-253: the write names the interaction its turn is bound to
+(:mod:`persona_runtime.interaction_scope`), and a disclosure (a category, or self-harm
+means that get the write rejected) records the durable disclosure fact BEFORE anything is
+written, so initiative's wellbeing gate holds that interaction even after the user forgets
+the node. A fact that cannot be recorded refuses the write.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from persona.schema.tools import ToolResult
 from persona.tools.protocol import tool
 from persona.wellbeing import WellbeingCategory
 
+from persona_runtime.extraction.disclosure import is_disclosure
 from persona_runtime.extraction.means_guard import contains_self_harm_means
 
 if TYPE_CHECKING:
@@ -40,6 +47,9 @@ if TYPE_CHECKING:
 
     from persona.graph.protocol import GraphStore
     from persona.tools.protocol import AsyncTool
+
+    from persona_runtime.extraction.disclosure import DisclosureRecorder
+    from persona_runtime.interaction_scope import InteractionRef
 
 __all__ = ["make_record_user_fact_tool"]
 
@@ -81,12 +91,50 @@ def _coerce_category(category: str | None) -> WellbeingCategory | None:
         return None
 
 
+_NOT_HELD = "Not recorded: this could not be saved safely just now. Do not retry it in this turn."
+
+
+def _fact_refusal(
+    disclosures: DisclosureRecorder | None,
+    interaction: InteractionRef | None,
+    *,
+    owner_id: str,
+    persona_id: str | None,
+) -> ToolResult | None:
+    """Record the disclosure fact first (R9-253); an error result when it is not held.
+
+    No recorder, no persona or no bound interaction: nothing to key the fact by, so the write
+    goes on as before (the node is tagged, and gated by that alone). Logs carry ids only.
+    """
+    if disclosures is None or not persona_id:
+        return None
+    if interaction is None:
+        _logger.warning(
+            "direct write disclosure with no bound interaction: no fact", persona_id=persona_id
+        )
+        return None
+    try:
+        held = disclosures.record(owner_id, persona_id, interaction.id)
+    except Exception:  # noqa: BLE001 - refused below; the turn must not crash
+        _logger.warning(
+            "direct write refused: the disclosure fact failed",
+            persona_id=persona_id,
+            interaction_id=interaction.id,
+        )
+        held = False
+    if held:
+        return None
+    return ToolResult(tool_name="record_user_fact", content=_NOT_HELD, is_error=True)
+
+
 def make_record_user_fact_tool(
     *,
     graph_store: GraphStore,
     owner_provider: Callable[[], str | None],
     persona_id: str | None = None,
     persona_exists: Callable[[str], bool] | None = None,
+    interaction_provider: Callable[[], InteractionRef | None] | None = None,
+    disclosures: DisclosureRecorder | None = None,
 ) -> AsyncTool:
     """Build the ``record_user_fact`` tool bound to a graph store + owner context.
 
@@ -100,6 +148,10 @@ def make_record_user_fact_tool(
             graph is owner scoped, so nothing else refuses a write from a turn that was still
             running when its persona was erased; without this it would put the persona back
             into a graph the erasure took it out of. ``None`` skips the check.
+        interaction_provider: Resolves the turn's bound interaction at DISPATCH time
+            (R9-253); the write's provenance names it. ``None`` names none.
+        disclosures: Records the durable disclosure fact before a tagged or means-rejected
+            write (R9-253). ``None`` records nothing.
     """
 
     @tool(name="record_user_fact", description=_GUIDANCE)
@@ -124,6 +176,13 @@ def make_record_user_fact_tool(
                 is_error=True,
             )
         wellbeing = _coerce_category(category)
+        interaction = interaction_provider() if interaction_provider is not None else None
+        if is_disclosure(fact, wellbeing.value if wellbeing is not None else None):
+            refusal = _fact_refusal(
+                disclosures, interaction, owner_id=owner_id, persona_id=persona_id
+            )
+            if refusal is not None:
+                return refusal
         # Structural means backstop (D-K2-7): self-harm method/means must never
         # enter the graph. Best-effort deterministic scan — reject the write
         # (record the struggle without the means) rather than store specifics.
@@ -147,6 +206,8 @@ def make_record_user_fact_tool(
             provenance=NodeProvenance(
                 source=WriteSource.PERSONA_SELF,
                 persona_id=persona_id,
+                interaction_id=interaction.id if interaction is not None else None,
+                interaction_kind=interaction.kind if interaction is not None else None,
                 written_at=datetime.now(UTC),
                 grounding=fact,
                 reason="direct write",
