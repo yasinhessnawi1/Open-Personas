@@ -130,7 +130,8 @@ describe("ConversationList: the fine to bring this up control", () => {
       within(dialog).getByText("Let Astrid Berg bring this conversation up?"),
     ).toBeTruthy();
     const body = dialog.textContent ?? "";
-    expect(body).toContain("never brings up the sensitive part itself");
+    expect(body).toContain("never brings up what it marked as sensitive");
+    expect(body).not.toContain("sensitive part");
     expect(body).toContain("held back again");
     expect(body).toContain("undo this");
     expect(body.toLowerCase()).not.toContain("task");
@@ -146,6 +147,48 @@ describe("ConversationList: the fine to bring this up control", () => {
     await waitFor(() =>
       expect(h.notify).toHaveBeenCalledWith(
         expect.objectContaining({ level: "success" }),
+      ),
+    );
+  });
+
+  it("says so when the release comes back still held", async () => {
+    // PR #44 review MEDIUM-1: success is the answer, never the attempt.
+    h.get.mockResolvedValue(hold("held"));
+    h.put.mockResolvedValue(hold("held"));
+    renderList();
+    openMenu();
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /bring this up again/ }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow" }));
+    await waitFor(() =>
+      expect(h.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "warning",
+          title: en.conversations.stillHeld,
+        }),
+      ),
+    );
+    expect(h.notify).not.toHaveBeenCalledWith(
+      expect.objectContaining({ level: "success" }),
+    );
+  });
+
+  it("says so when an undo comes back still released", async () => {
+    h.get.mockResolvedValue(hold("released"));
+    h.put.mockResolvedValue(hold("released"));
+    renderList();
+    openMenu();
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /Keep this out/ }),
+    );
+    await waitFor(() =>
+      expect(h.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "error",
+          title: en.conversations.holdFailed,
+        }),
       ),
     );
   });

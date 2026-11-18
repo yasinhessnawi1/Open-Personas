@@ -129,8 +129,16 @@ export function useInitiativeHoldActions() {
     const { conversationId, personaName, version } = pending;
     setPending(null);
     try {
-      await send(conversationId, { released: true, version });
-      notify({ level: "success", title: t("released", { name: personaName }) });
+      const after = await send(conversationId, { released: true, version });
+      // PR #44 review MEDIUM-1: report the state the server answered with.
+      if (after.state === "released") {
+        notify({
+          level: "success",
+          title: t("released", { name: personaName }),
+        });
+      } else {
+        notify({ level: "warning", title: t("stillHeld") });
+      }
     } catch (e) {
       failed(e);
     }
@@ -138,8 +146,15 @@ export function useInitiativeHoldActions() {
 
   async function holdAgain(conversationId: string, personaName: string) {
     try {
-      await send(conversationId, { released: false });
-      notify({ level: "info", title: t("heldAgain", { name: personaName }) });
+      const after = await send(conversationId, { released: false });
+      if (after.state === "released") {
+        notify({ level: "error", title: t("holdFailed") });
+      } else {
+        notify({
+          level: "info",
+          title: t("heldAgain", { name: personaName }),
+        });
+      }
     } catch (e) {
       failed(e);
     }

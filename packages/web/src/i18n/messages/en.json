@@ -297,12 +297,13 @@
     "releaseItem": "Let {name} bring this up again",
     "holdItem": "Keep this out of {name}'s suggestions",
     "releaseTitle": "Let {name} bring this conversation up?",
-    "releaseBody": "You shared something sensitive here, so {name} keeps this conversation out of anything it starts on its own. If you allow it, {name} may draw on the rest of what it learned here when it reaches out to you. It still never brings up the sensitive part itself and never quotes these messages. If you share something sensitive here again, it is held back again. You can undo this from this menu at any time.",
+    "releaseBody": "You shared something sensitive here, so {name} keeps this conversation out of anything it starts on its own. If you allow it, {name} may draw on the rest of what it learned here when it reaches out to you. It still never brings up what it marked as sensitive, and it never quotes these messages. If you share something sensitive here again, it is held back again. You can undo this from this menu at any time.",
     "releaseConfirm": "Allow",
     "released": "{name} may bring this conversation up again.",
     "heldAgain": "{name} will keep this conversation out of its suggestions again.",
     "holdChanged": "Something new was shared in this conversation, so it is still held back. Open the menu to look at it again.",
-    "holdFailed": "That did not save. Try again."
+    "holdFailed": "That did not save. Try again.",
+    "stillHeld": "This conversation is still held back. Open the menu to look at it again."
   },
   "personaPicker": {
     "choosePersona": "Choose a persona",
