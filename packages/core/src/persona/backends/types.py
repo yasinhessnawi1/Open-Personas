@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ChatResponse",
     "ReasoningBlock",
+    "ServedCall",
     "StreamChunk",
     "ToolCallDelta",
     "ToolSpec",
@@ -115,6 +116,29 @@ class ToolCallDelta(BaseModel):
     arguments_delta: str = ""
 
 
+class ServedCall(BaseModel):
+    """Which backend served ONE call, carried on that call's own result (R9-223).
+
+    A multi-model chain (:class:`~persona.backends.multi_model.MultiModelChatBackend`)
+    stamps this on the :class:`ChatResponse` it returns and on every
+    :class:`StreamChunk` it yields. A tier's chain is one object shared by every
+    conversation on the tier, so the served identity must travel with the call rather
+    than be read back afterwards from state on the chain, which a concurrent call can
+    overwrite. A bare backend leaves it ``None``: it is its own served identity.
+
+    Attributes:
+        provider: The serving sub-backend's ``provider_name``.
+        model: The serving sub-backend's configured ``model_name``. This is the id the
+            price tables are keyed on, NOT the provider's echo in
+            :attr:`ChatResponse.model` (which can be a dated variant).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str
+    model: str
+
+
 class ChatResponse(BaseModel):
     """Single-call response from a :class:`ChatBackend`.
 
@@ -130,6 +154,8 @@ class ChatResponse(BaseModel):
             "groq", "together", "nvidia", "ollama", "local").
         latency_ms: Wall-clock time from request send to response complete,
             measured client-side via :func:`time.perf_counter`.
+        served: The backend that served this call, set by a multi-model chain
+            (R9-223); ``None`` from a bare backend, which is its own identity.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -140,6 +166,7 @@ class ChatResponse(BaseModel):
     model: str
     provider: str
     latency_ms: float = Field(ge=0.0)
+    served: ServedCall | None = None
 
 
 class ReasoningBlock(BaseModel):
@@ -209,6 +236,8 @@ class StreamChunk(BaseModel):
               for str-only consumers.
 
             ``None`` when the provider emitted no reasoning on this chunk.
+        served: The backend serving this stream, set by a multi-model chain on
+            every chunk it yields (R9-223); ``None`` from a bare backend.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -218,6 +247,7 @@ class StreamChunk(BaseModel):
     is_final: bool = False
     usage: TokenUsage | None = None
     reasoning: str | list[ReasoningBlock] | None = None
+    served: ServedCall | None = None
 
 
 def reasoning_as_text(r: str | list[ReasoningBlock] | None) -> str | None:

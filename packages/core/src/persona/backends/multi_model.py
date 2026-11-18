@@ -47,6 +47,7 @@ from persona.backends.errors import (
     ProviderError,
     RateLimitError,
 )
+from persona.backends.types import ServedCall
 from persona.errors import PersonaError
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
@@ -334,7 +335,10 @@ class MultiModelChatBackend:
                 attempts=attempts,
             )
             if outcome is not None:
-                return outcome
+                # R9-223 / R9-227: the served identity rides the response itself. It
+                # names the sub-backend that answered, so neither a concurrent call on
+                # this shared object nor a vision walk that skipped a backend can move it.
+                return outcome.model_copy(update={"served": self._served_by(backend)})
         raise self._build_exhausted_error(attempts)
 
     # ------------------------------------------------------------------ #
@@ -407,6 +411,8 @@ class MultiModelChatBackend:
                 # path as any other transient ProviderError (the held-back
                 # chunks are discarded: they carried no user-visible reply).
                 committed = False
+                # R9-223: set at commit, stamped on every chunk yielded from then on.
+                served: ServedCall | None = None
                 pending: list[StreamChunk] = []
                 # R9-090: the streamed half of the repetition guard. Once text has
                 # been yielded it cannot be taken back, so unlike the non-streaming
@@ -434,10 +440,11 @@ class MultiModelChatBackend:
                                 pending.append(chunk)
                                 continue
                             committed = True
+                            served = self._served_by(backend)
                             for held in pending:
-                                yield held
+                                yield held.model_copy(update={"served": served})
                             pending.clear()
-                        yield chunk
+                        yield chunk.model_copy(update={"served": served})
                         if chunk.delta:
                             seen.append(chunk.delta)
                             # The check is O(words), so it runs on a cadence rather
@@ -487,6 +494,17 @@ class MultiModelChatBackend:
                     self._record_attempt(backend, exc, retried, attempts)
                     break  # advance to next backend
         raise self._build_exhausted_error(attempts)
+
+    @staticmethod
+    def _served_by(backend: ChatBackend) -> ServedCall:
+        """The served identity of ``backend`` for one call (R9-223).
+
+        The configured ``provider_name`` / ``model_name`` of the sub-backend that
+        answered, which is what the price tables key on. A chain is never nested inside
+        another chain (the tier registry composes sub-backends only), so the identity
+        of the answering sub-backend is the identity of the call.
+        """
+        return ServedCall(provider=backend.provider_name, model=backend.model_name)
 
     @staticmethod
     def _chunk_has_payload(chunk: StreamChunk) -> bool:

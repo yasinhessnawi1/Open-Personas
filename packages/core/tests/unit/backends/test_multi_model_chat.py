@@ -752,7 +752,9 @@ class TestStreaming:
 
         with pytest.raises(BackendTimeoutError):
             await _consume()
-        assert received == [_chunk("partial")]
+        # The chain stamps the served model on what it relays (R9-223); the payload is verbatim.
+        assert [c.model_copy(update={"served": None}) for c in received] == [_chunk("partial")]
+        assert received[0].served is not None
         assert secondary.stream_call_count == 0
 
     @pytest.mark.asyncio
