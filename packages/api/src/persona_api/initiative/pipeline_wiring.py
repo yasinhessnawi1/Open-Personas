@@ -21,7 +21,11 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import users as users_t
 from persona_api.initiative.store import InitiativeLedger, NoticeDisposition
-from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate, node_sources
+from persona_api.initiative.wellbeing_gate import (
+    ConversationWellbeingGate,
+    DisclosureReader,
+    node_sources,
+)
 from persona_api.services import audit_service
 
 if TYPE_CHECKING:
@@ -95,11 +99,20 @@ class ApiWellbeingSubjectCheck:
       conversation is.
     """
 
-    def __init__(self, store: GraphStore, engine: Engine) -> None:
-        """Bind the graph store and the owner-scoped engine (freshness, task origins)."""
+    def __init__(
+        self,
+        store: GraphStore,
+        engine: Engine,
+        *,
+        disclosures: DisclosureReader | None = None,
+    ) -> None:
+        """Bind the graph store and the owner-scoped engine (freshness, task origins).
+
+        ``disclosures`` replaces the gate's fact table over ``engine`` (tests).
+        """
         self._store = store
         self._engine = engine
-        self._gate = ConversationWellbeingGate(store, engine)
+        self._gate = ConversationWellbeingGate(store, engine, disclosures=disclosures)
 
     def tagged_refs(
         self,

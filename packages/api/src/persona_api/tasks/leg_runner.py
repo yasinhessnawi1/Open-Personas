@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
+
 from persona_api.errors import LegGateMissingTaskError
 from persona_api.tasks.gate import LegGate
 
@@ -45,10 +47,18 @@ __all__ = ["RuntimeFactoryLegRunnerBuilder"]
 class _DeferredLoopRunner:
     """An :class:`AgenticRunner` that builds its :class:`AgenticLoop` on first ``run`` (async)."""
 
-    def __init__(self, factory: RuntimeFactory, persona_id: str, *, gate: LegGate | None) -> None:
+    def __init__(
+        self,
+        factory: RuntimeFactory,
+        persona_id: str,
+        *,
+        gate: LegGate | None,
+        task_id: str | None = None,
+    ) -> None:
         self._factory = factory
         self._persona_id = persona_id
         self._gate = gate
+        self._task_id = task_id
 
     async def run(
         self,
@@ -72,9 +82,20 @@ class _DeferredLoopRunner:
             # question parks the task instead of being answered on their behalf.
             park_on_question=True,
         )
-        return await loop.run(
-            task, on_event=on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
-        )
+        if not self._task_id:
+            return await loop.run(
+                task, on_event=on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+            )
+        # R9-253: a direct write in this leg names its task (initiative's gate judges a task by
+        # its own id, so a disclosure here keeps the task and what the leg learned out of the
+        # unprompted scan).
+        interaction_token = bind_interaction("task", self._task_id)
+        try:
+            return await loop.run(
+                task, on_event=on_event, cancel_token=cancel_token, on_step_usage=on_step_usage
+            )
+        finally:
+            reset_interaction(interaction_token)
 
 
 class RuntimeFactoryLegRunnerBuilder:
@@ -122,4 +143,4 @@ class RuntimeFactoryLegRunnerBuilder:
             gate = LegGate.for_task(
                 task, recorder=self._recorder, network_enabled=self._network_enabled
             )
-        return _DeferredLoopRunner(self._factory, persona_id, gate=gate)
+        return _DeferredLoopRunner(self._factory, persona_id, gate=gate, task_id=task_id)
