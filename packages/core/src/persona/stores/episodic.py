@@ -127,7 +127,8 @@ class EpisodicStore(TypedStore):
         evidence. That order is what a refresh in flight relies on (R9-271). Its write requires
         the evidence it cites and holds it while it lands. If the write commits first, this waits
         for it, then sees the block and removes it. If this commits first, the write finds its
-        evidence gone and lands nothing.
+        evidence gone and lands nothing. A gist is written the same way
+        (:meth:`persona.stores.pyramid.EpisodicPyramid.write_gist`).
         """
         if not doc_ids:
             return

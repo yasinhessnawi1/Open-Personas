@@ -148,6 +148,12 @@ def _raw(cid: str | None = None, *, minutes: int = 0, band: int = 0) -> PersonaC
     )
 
 
+def _members(backend: _SpyBackend, *ids: str) -> None:
+    """Seed the raw chunks a gist covers: a gist over members that are not there is refused."""
+    for chunk_id in ids:
+        backend.write_raw("p1", _raw(chunk_id))
+
+
 def _pyramid(backend: _SpyBackend | None = None) -> tuple[EpisodicPyramid, _SpyBackend]:
     b = backend or _SpyBackend()
     return EpisodicPyramid(backend=b, audit_logger=MemoryAuditLogger()), b
@@ -207,6 +213,7 @@ def test_write_gist_rejects_empty_members_and_empty_text() -> None:
 
 def test_write_gist_regeneration_is_idempotent() -> None:
     pyramid, backend = _pyramid()
+    _members(backend, "a", "b")
     g1 = pyramid.write_gist("p1", text="summary v1", member_ids=["a", "b"], created_at=_NOW)
     g2 = pyramid.write_gist("p1", text="summary v2", member_ids=["b", "a"], created_at=_NOW)
     assert g1.id == g2.id  # same members ⇒ same identity ⇒ replace, not duplicate
@@ -217,7 +224,9 @@ def test_write_gist_regeneration_is_idempotent() -> None:
 
 def test_write_gist_is_audited_with_the_gist_store_kind() -> None:
     audit = MemoryAuditLogger()
-    pyramid = EpisodicPyramid(backend=_SpyBackend(), audit_logger=audit)
+    backend = _SpyBackend()
+    _members(backend, "a")
+    pyramid = EpisodicPyramid(backend=backend, audit_logger=audit)
     pyramid.write_gist("p1", text="s", member_ids=["a"], created_at=_NOW)
     assert [e.action for e in audit.events] == [AuditAction.WRITE]
     assert audit.events[0].store == GIST_KIND
@@ -277,6 +286,7 @@ def test_deleting_a_member_removes_the_covering_gist_and_reports_count() -> None
 def test_cascade_with_no_intersection_returns_zero_and_audits_nothing() -> None:
     audit = MemoryAuditLogger()
     backend = _SpyBackend()
+    _members(backend, "a")
     pyramid = EpisodicPyramid(backend=backend, audit_logger=audit)
     pyramid.write_gist("p1", text="s", member_ids=["a"], created_at=_NOW)
     events_before = len(audit.events)
