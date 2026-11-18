@@ -10,16 +10,16 @@ one deduct per committed turn plus a LiveKit infra tick at call end:
 STT and TTS are priced at the configured backend's own registry rate through the pure
 ``persona.billing`` helpers; neither has a runtime failover, so the configured backend
 is the one that served. The LLM arm is priced at the model that SERVED each round: the
-producer feeds this meter the pair ``persona_runtime.routing.resolve_served_model``
-reads from the tier's fallback chain, the resolution the text loop prices from (Spec
+producer feeds this meter the pair the tier chain stamps on each call's own chunks
+(``persona_runtime.routing.served_identity``), the resolution the text loop prices from (Spec
 M2, D-M2-2) and the pair the ``voice turn ended`` line names (R9-214). So a turn a
 fallback answered is billed at the fallback, and the OpenRouter actual-cost arm applies
 exactly when the fallback was an OpenRouter route (R9-221). Each round of a tool turn is
 priced on its own, at the model that served it, and the rounds are summed; one round's
 OpenRouter actual is used for that round even when another round has none. (The text
 turn is priced by the same function, ``persona_runtime.cost.price_rounds``, since
-R9-246.) The pair is read from a ledger on a tier wrapper that concurrent calls
-share, so a concurrent call can still misattribute a turn (R9-223). The deduct rides
+R9-246.) The pair rides the call itself, so a concurrent call on the same shared
+chain cannot misattribute a turn (R9-223). The deduct rides
 :meth:`~persona.billing.metered.MeteredBilling.charge` in ``capture`` mode with a
 per-turn idempotency ``billing_key`` (``voice:{call_id}:{turn_seq}``) so a
 re-fired tick never double-charges.
@@ -58,6 +58,7 @@ from persona_runtime.cost import CENTS_ROUND_DECIMALS, PricedRound, price_rounds
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from persona.backends.types import BackendAttempt
     from persona.billing import LedgerPort
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
@@ -117,8 +118,13 @@ class VoiceTurnAccumulator:
         cost_usd: float | None,
         provider: str,
         model: str,
+        unrecovered: tuple[BackendAttempt, ...] = (),
     ) -> None:
-        """Record one model round's usage under the model that served that round."""
+        """Record one model round's usage under the model that served that round.
+
+        ``unrecovered``: the round's failed tries that reported tokens, logged with
+        their cost when the turn is priced and never charged (D-ORCH-11-18-h).
+        """
         self._rounds.append(
             LlmRound(
                 prompt_tokens=max(0, prompt_tokens),
@@ -126,6 +132,7 @@ class VoiceTurnAccumulator:
                 cost_usd=cost_usd,
                 provider=provider,
                 model=model,
+                unrecovered=unrecovered,
             )
         )
 
@@ -226,6 +233,7 @@ class VoiceTurnBillingMeter:
         cost_usd: float | None,
         provider: str,
         model: str,
+        unrecovered: tuple[BackendAttempt, ...] = (),
     ) -> None:
         """Record one model round's usage this turn (delegates to the accumulator)."""
         self._accumulator.note_llm_usage(
@@ -234,6 +242,7 @@ class VoiceTurnBillingMeter:
             cost_usd=cost_usd,
             provider=provider,
             model=model,
+            unrecovered=unrecovered,
         )
 
     # ----- pricing (pure) ----------------------------------------------------

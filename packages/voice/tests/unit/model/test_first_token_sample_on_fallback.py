@@ -154,3 +154,33 @@ async def test_a_turn_the_primary_answered_records_one_sample_for_the_primary() 
         1,
         0,
     )
+
+
+class _RetriedPrimary(_Speaker):
+    """A primary that returns a short 429 once, then answers: the chain retries it."""
+
+    async def chat_stream(self, messages: list[Any], **_kwargs: Any) -> AsyncIterator[StreamChunk]:
+        if self.stream_calls == 0:
+            self.stream_calls += 1
+            raise RateLimitError(
+                "scripted 429", context={"provider": self.provider_name, "retry_after_s": "0.01"}
+            )
+        async for chunk in super().chat_stream(messages):
+            yield chunk
+
+
+async def test_a_turn_the_primary_answered_on_a_retry_records_no_sample() -> None:
+    """R9-229 (D-R9-226 option ii): the time includes the failed try and the retry wait."""
+    primary = _RetriedPrimary("nvidia", "primary-model")
+    fallback = _Speaker("anthropic", "fallback-model")
+    chain = MultiModelChatBackend([primary, fallback], tier_name="frontier")  # type: ignore[list-item]
+    tracker = FirstTokenLatencyTracker()
+
+    spoken = await _spoken(_producer(chain, tracker))
+
+    assert spoken == "Hi from primary-model. "
+    assert (primary.stream_calls, fallback.stream_calls) == (2, 0)
+    assert (tracker.sample_count("primary-model"), tracker.sample_count("fallback-model")) == (
+        0,
+        0,
+    )
