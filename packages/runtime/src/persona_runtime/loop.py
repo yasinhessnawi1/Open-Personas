@@ -95,7 +95,7 @@ from persona_runtime.routing import (
     classifiers,
     first_token_sample_model,
     reorder_primary,
-    resolve_served_model,
+    served_identity,
     tier_for,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
@@ -128,6 +128,7 @@ if TYPE_CHECKING:
 
     from persona.audit import AuditLogger
     from persona.backends import ChatBackend, StreamChunk, TokenUsage
+    from persona.backends.types import ServedCall
     from persona.history import ConversationHistoryManager
     from persona.sandbox.result import SandboxFile
     from persona.schedules import QuietHours
@@ -524,6 +525,9 @@ class _RoundOutcome:
     calls: list[ToolCall] = field(default_factory=list)
     usage: TokenUsage | None = None
     reasoning_text: str = ""
+    #: The backend that served this round (R9-223), from the round's own chunks;
+    #: ``None`` from a bare backend, which is its own served identity.
+    served: ServedCall | None = None
 
 
 @dataclass(frozen=True)
@@ -1410,6 +1414,10 @@ class ConversationLoop:
         # last-writer-wins (see that function for the summing + mixed-round
         # actual honesty rule).
         round_usages: list[TokenUsage] = []
+        # R9-223: the served identity of the last round that ran, from that round's own
+        # chunks. It names the turn and fills the TurnLog fallback fields (D5: the
+        # last round, as before; only where it is read from changed).
+        last_served: ServedCall | None = None
         assistant_text = ""
         # Turn-resilience buffer: every text delta yielded to the client this
         # turn is appended here, across ALL rounds. ``assistant_text`` holds only
@@ -1479,6 +1487,7 @@ class ConversationLoop:
                 if safe:
                     yield _text_chunk(safe)
             round_text, round_calls, round_usage = outcome.text, outcome.calls, outcome.usage
+            last_served = outcome.served
             assistant_text = round_text
             reasoning_buffer += outcome.reasoning_text
             # M2 review (I2): accumulate THIS round's usage unconditionally —
@@ -1603,6 +1612,7 @@ class ConversationLoop:
                     if safe:
                         yield _text_chunk(safe)
                 assistant_text = final_outcome.text
+                last_served = final_outcome.served
                 reasoning_buffer += final_outcome.reasoning_text
                 # M2 review (I2): the cap-forced final generation is its OWN
                 # separately-billed round — accumulate it too (pre-fix this
@@ -1667,6 +1677,7 @@ class ConversationLoop:
                         yield _text_chunk(safe)
                 if retry_outcome.text:
                     assistant_text = retry_outcome.text
+                last_served = retry_outcome.served
                 # M2 review (I2): the refusal-retry is ALSO a separately
                 # billed round — accumulate rather than overwrite.
                 if retry_outcome.usage is not None:
@@ -1797,6 +1808,7 @@ class ConversationLoop:
             conversation=conversation,
             tier=tier,
             backend=backend,
+            served=last_served,
             usage=usage,
             latency_ms=latency_ms,
             tool_calls=tool_call_count,
@@ -2466,12 +2478,11 @@ class ConversationLoop:
         :class:`FirstTokenLatencyTracker` is wired into the loop, the FIRST
         non-empty ``chunk.delta`` records ``(perf_counter() - t_start) * 1000``
         as the first-token latency of the model that answered (R9-226,
-        :func:`first_token_sample_model`). A round a FALLBACK served records
-        nothing, since its time includes the failed backends. A same-backend RETRY
-        that succeeded is still recorded, including the failed attempt and the
-        retry wait, because the chain leaves no ledger entry for it (registered
-        alongside R9-223). V5 reads the registry field; :class:`UnifiedRouter`
-        reads it for Layer 2 latency scoring.
+        :func:`first_token_sample_model`). A round answered after any failed try
+        records nothing: a FALLBACK's time includes the failed backends, and a
+        same-backend RETRY's includes the failed try and the retry wait (R9-229).
+        V5 reads the registry field; :class:`UnifiedRouter` reads it for Layer 2
+        latency scoring.
         """
         names: dict[str, str] = {}
         args_json: dict[str, str] = {}
@@ -2479,14 +2490,14 @@ class ConversationLoop:
         t_start = time.perf_counter()
         first_token_recorded = False
         async for chunk in backend.chat_stream(prompt_messages, tools=self._toolbox.get_specs()):
+            if outcome.served is None and chunk.served is not None:
+                outcome.served = chunk.served
             if chunk.delta:
                 if not first_token_recorded and self._latency_tracker is not None:
                     first_token_ms = (time.perf_counter() - t_start) * 1000.0
-                    # A chain releases no chunk before it commits to a backend, so by
-                    # the first delta its ledger lists every backend that failed this
-                    # round. It does not list a same-backend retry, and it is shared
-                    # across conversations (R9-223).
-                    sample_model = first_token_sample_model(backend)
+                    # The chunk carries this call's own served identity and attempt
+                    # history (R9-223, R9-229): no sample unless it answered first time.
+                    sample_model = first_token_sample_model(backend, chunk.served)
                     if sample_model is not None:
                         self._latency_tracker.record(sample_model, first_token_ms)
                     first_token_recorded = True
@@ -2656,6 +2667,7 @@ class ConversationLoop:
         tool_consent_granted: list[str] | None = None,
         mcp_invocations: list[str] | None = None,
         mcp_unavailable_requested: list[str] | None = None,
+        served: ServedCall | None = None,
     ) -> None:
         # M2 review (I2): ``usage`` arrives ALREADY summed across every round
         # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
@@ -2663,12 +2675,10 @@ class ConversationLoop:
         # the SUM of all 5 rounds, never just the last one. Attribution
         # (WHICH model/provider names the turn, just below) is a SEPARATE
         # axis and stays last-round-served: on a multi-round turn the served
-        # pair reflects only the FINAL round's resolution (the wrapper's
-        # ``last_attempts`` ledger resets on every ``chat_stream`` call —
-        # see ``MultiModelChatBackend.last_attempts``); earlier rounds may
+        # pair is the FINAL round's ``served`` (R9-223: read from that round's
+        # own chunks, never from state on the shared chain); earlier rounds may
         # have served/fallen-back differently and that detail is not
-        # attributed per-round (out of scope — one TurnLog row per turn,
-        # not one per round).
+        # attributed per-round (one TurnLog row per turn, not one per round).
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
         # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.
@@ -2677,7 +2687,7 @@ class ConversationLoop:
         # via ``getattr(..., None) or []``, yielding the zero-fallback
         # default shape (backward compat). Computed FIRST (Spec M2, D-M2-2):
         # the served-model identity below derives from this projection.
-        fallback_kwargs = _compute_fallback_fields(backend)
+        fallback_kwargs = _compute_fallback_fields(backend, served)
         # Spec M2 (D-M2-2): the turn is priced and NAMED as the model that
         # ACTUALLY served it. On a fallback-engaged turn the wrapper's own
         # ``provider_name`` / ``model_name`` report the PRIMARY by design
@@ -2843,8 +2853,8 @@ class _FallbackFields(TypedDict):
     fallback_engaged: bool
 
 
-def _compute_fallback_fields(backend: ChatBackend) -> _FallbackFields:
-    """Project ``MultiModelChatBackend.last_attempts`` into TurnLog T19 fields.
+def _compute_fallback_fields(backend: ChatBackend, served: ServedCall | None) -> _FallbackFields:
+    """Project the last round's :class:`ServedCall` into TurnLog T19 fields.
 
     Per D-20-9 privacy: only class names reach the log (NEVER error
     messages or context dict values). Per D-20-7 the operator-dashboard
@@ -2859,19 +2869,23 @@ def _compute_fallback_fields(backend: ChatBackend) -> _FallbackFields:
     chain that ``TierRegistry`` short-circuits past the wrapper entirely
     (D-20-17 case (a)).
 
-    For :class:`MultiModelChatBackend` callers, the served identity comes
-    from :func:`~persona_runtime.routing.resolve_served_model`, the one
-    resolution this loop shares with the voice turn log (R9-214): the
-    wrapper's own ``provider_name`` / ``model_name`` report the PRIMARY,
-    so the winner is read from ``backends[len(last_attempts)]``, and an
-    over-length ledger (the exhaustion case, which never reaches here)
-    falls back to the wrapper's reported identity.
+    For a multi-model chain, ``served`` is the round's own
+    :class:`~persona.backends.types.ServedCall` (R9-223): the served identity and
+    one record per backend that fell through (``fell_through()``, the old
+    ledger's shape: a same-backend retry is not a fallback, R9-229). It is read
+    from the round's chunks, never from state on the chain, which every
+    conversation on the tier shares.
     """
-    attempts = getattr(backend, "last_attempts", None) or []
-    fallback_reasons: list[str] = [a.last_error_class for a in attempts]
-    fallback_providers: list[str] = [a.provider for a in attempts]
+    if served is not None:
+        fell = served.fell_through()
+        fallback_reasons = [a.error_class or "" for a in fell]
+        fallback_providers = [a.provider for a in fell]
+    else:
+        attempts = getattr(backend, "last_attempts", None) or []
+        fallback_reasons = [a.last_error_class for a in attempts]
+        fallback_providers = [a.provider for a in attempts]
     count = len(fallback_reasons)
-    chosen_provider, chosen_model = resolve_served_model(backend)
+    chosen_provider, chosen_model = served_identity(backend, served)
     return _FallbackFields(
         tier_model_chosen=chosen_model,
         tier_provider_used=chosen_provider,

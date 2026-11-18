@@ -49,12 +49,15 @@ from persona.backends.errors import (
     RateLimitError,
 )
 from persona.backends.multi_model import (
-    AttemptRecord as ChatAttemptRecord,
-)
-from persona.backends.multi_model import (
     MultiModelChatBackend,
 )
-from persona.backends.types import ChatResponse, StreamChunk, TokenUsage
+from persona.backends.types import (
+    BackendAttempt,
+    ChatResponse,
+    ServedCall,
+    StreamChunk,
+    TokenUsage,
+)
 from persona.errors import PersonaError
 from persona.imagegen.errors import ContentRejectedError, ImageProviderError
 from persona.imagegen.multi_model_image import MultiModelImageBackend
@@ -593,8 +596,8 @@ class TestCrossProviderImageGenFallback:
 
 # ====================================================================== #
 # TestTurnLogFallbackFields
-# T19 _compute_fallback_fields end-to-end through the wrapper's
-# last_attempts accessor.
+# T19 _compute_fallback_fields end-to-end through the served trace the
+# wrapper stamps on each call's own response (R9-223).
 # ====================================================================== #
 
 
@@ -610,8 +613,8 @@ class TestTurnLogFallbackFields:
             script=[_ok_chat("openai", "gpt-4o")],
         )
         wrapper = MultiModelChatBackend([primary], tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 0
         assert fields["tier_fallback_reasons"] == []
         assert fields["tier_fallback_providers"] == []
@@ -633,8 +636,8 @@ class TestTurnLogFallbackFields:
             script=[_ok_chat("anthropic", "claude-sonnet-4-6")],
         )
         wrapper = MultiModelChatBackend([primary, secondary], tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 1
         assert fields["tier_fallback_reasons"] == ["ModelNotFoundError"]
         assert fields["tier_fallback_providers"] == ["openai"]
@@ -672,8 +675,8 @@ class TestTurnLogFallbackFields:
             ),
         ]
         wrapper = MultiModelChatBackend(list(chain), tier_name="frontier")
-        await wrapper.chat([_user()])
-        fields = _compute_fallback_fields(wrapper)
+        response = await wrapper.chat([_user()])
+        fields = _compute_fallback_fields(wrapper, response.served)
         assert fields["tier_fallback_count"] == 3
         assert fields["tier_fallback_reasons"] == [
             "ModelNotFoundError",
@@ -706,35 +709,24 @@ class TestTurnLogFallbackFields:
     def test_privacy_only_class_names_in_reasons_field(self) -> None:
         """D-20-9 privacy — only class names leak; never message/context."""
 
-        # Synthesize a wrapper-shaped backend exposing a hand-built ledger
-        # so the projection helper sees only class-name strings.
-        class _BackendShim:
-            @property
-            def provider_name(self) -> str:
-                return "openai"
+        # A hand-built served trace, so the projection helper sees only the
+        # class-name strings the chain records (it never keeps a message).
+        served = ServedCall(
+            provider="anthropic",
+            model="c",
+            attempts=(
+                BackendAttempt(
+                    index=0,
+                    provider="openai",
+                    model="gpt-4o",
+                    error_class="AuthenticationError",
+                    status_code=401,
+                ),
+                BackendAttempt(index=1, provider="anthropic", model="c"),
+            ),
+        )
 
-            @property
-            def model_name(self) -> str:
-                return "gpt-4o"
-
-            @property
-            def backends(self) -> list[object]:
-                return [self, _ScriptedChatBackend(provider="anthropic", model="c", script=[])]
-
-            @property
-            def last_attempts(self) -> list[ChatAttemptRecord]:
-                return [
-                    ChatAttemptRecord(
-                        provider="openai",
-                        model="gpt-4o",
-                        # Class name only — the field is named for it.
-                        last_error_class="AuthenticationError",
-                        last_error_status_code=401,
-                        retried_same_model=False,
-                    )
-                ]
-
-        fields = _compute_fallback_fields(_BackendShim())  # type: ignore[arg-type]
+        fields = _compute_fallback_fields(None, served)  # type: ignore[arg-type]
         # Only the class-name string leaks; no message / context value.
         assert fields["tier_fallback_reasons"] == ["AuthenticationError"]
         assert fields["tier_fallback_providers"] == ["openai"]

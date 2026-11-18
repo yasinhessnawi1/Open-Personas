@@ -22,12 +22,14 @@ from persona.backends.multi_model import MultiModelChatBackend
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
+    from persona.backends.types import ServedCall
 
 __all__ = [
     "canonical_model_id",
     "first_token_sample_model",
     "reorder_primary",
     "resolve_served_model",
+    "served_identity",
 ]
 
 
@@ -77,11 +79,37 @@ def resolve_served_model(backend: ChatBackend) -> tuple[str, str]:
     return backend.provider_name, backend.model_name
 
 
-def first_token_sample_model(backend: ChatBackend) -> str | None:
+def served_identity(backend: ChatBackend, served: ServedCall | None) -> tuple[str, str]:
+    """The ``(provider, model)`` that served ONE call, from that call's own result.
+
+    ``served`` is the :class:`~persona.backends.types.ServedCall` a multi-model chain
+    stamps on its response and on every chunk it yields (R9-223): the identity travels
+    with the call, so a concurrent call on the same shared chain cannot change it, and
+    an image request whose walk skipped a backend still names the one that answered
+    (R9-227). ``None`` means a bare backend, which is its own served identity.
+
+    Args:
+        backend: The backend the call went through.
+        served: The call's ``served`` field (``ChatResponse.served`` or
+            ``StreamChunk.served``).
+
+    Returns:
+        The served ``(provider, model)`` pair.
+    """
+    if served is not None:
+        return served.provider, served.model
+    return resolve_served_model(backend)
+
+
+def first_token_sample_model(backend: ChatBackend, served: ServedCall | None = None) -> str | None:
     """The model a first-token latency sample for this call belongs to, or ``None``.
 
     Call it once the call has produced its first reply text, when a chain has
-    committed to the backend that is answering.
+    committed to the backend that is answering, with the chunk's ``served`` field.
+
+    With ``served`` (R9-229): a sample only when the call was answered with no failed
+    try before it, a same-backend retry included (D-R9-226 option ii). The measured
+    time of a retried or fallen-back call includes the failed tries and the retry wait.
 
     What it excludes (R9-226): a FALLBACK call, one where an earlier backend in the
     chain failed and a later one answered. The time measured includes every earlier
@@ -108,6 +136,8 @@ def first_token_sample_model(backend: ChatBackend) -> str | None:
         The model name the latency tracker keys on, or ``None`` when an earlier
         backend in the chain failed before the one that answered.
     """
+    if served is not None:
+        return served.model if served.first_attempt else None
     if getattr(backend, "last_attempts", None):
         return None
     return resolve_served_model(backend)[1]
