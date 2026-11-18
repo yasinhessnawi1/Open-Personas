@@ -192,8 +192,11 @@ services:
     restart: unless-stopped
     # Liveness only, DB-free, as on Fly (/livez). bin/deploy.sh also checks the deep
     # /healthz. The long start period covers the first boot's model download into HF_HOME.
+    # R9-258: docker runs the probe in this container with its whole env (every secret),
+    # as the api's uid, so `env -i` hands curl an empty one: a built-in MCP child cannot
+    # read the probe's /proc/<pid>/environ for a secret. Absolute paths, no PATH lookup.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/livez"]
+      test: ["CMD", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "/usr/bin/curl", "-fsS", "http://127.0.0.1:8000/livez"]
       interval: 30s
       timeout: 5s
       start_period: 600s

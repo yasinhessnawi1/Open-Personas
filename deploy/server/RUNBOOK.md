@@ -775,7 +775,9 @@ starting the old image.
   `strace -p` as the api's uid are refused. Use the logs. Only a deliberate root session
   on the host (with `CAP_SYS_PTRACE`) can still attach. A shell opened with
   `bin/compose.sh exec api` holds every api secret in its own environment and is not
-  hardened, so keep such sessions short.
+  hardened, and the built-in MCP servers run as the same uid. So open it with a cleared
+  env, `bin/compose.sh exec api env -i HOME=/tmp PATH=/opt/venv/bin:/usr/bin:/bin bash`
+  (add only the one variable you need with `NAME=value`), or keep it short.
 
 ## Sizing and the host profile
 
