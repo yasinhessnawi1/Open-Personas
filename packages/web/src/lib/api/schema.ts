@@ -614,6 +614,30 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/conversations/{conversation_id}/initiative-hold": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Initiative Hold
+     * @description Whether a disclosure keeps this conversation out of unprompted initiative.
+     */
+    get: operations["get_initiative_hold_v1_conversations__conversation_id__initiative_hold_get"];
+    /**
+     * Set Initiative Hold
+     * @description Release the conversation for initiative, or hold it back again; the new state.
+     */
+    put: operations["set_initiative_hold_v1_conversations__conversation_id__initiative_hold_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/calls": {
     parameters: {
       query?: never;
@@ -4100,6 +4124,25 @@ export interface components {
        */
       dial: "off" | "propose_only" | "act_within_envelope";
     };
+    /**
+     * InitiativeHoldResponse
+     * @description A conversation's "fine to bring this up" control (D-ORCH-11-18-u).
+     *
+     *     ``held``: a disclosure keeps the conversation out of the persona's unprompted
+     *     initiative. ``released``: the user said it may be drawn on again (``released_at``).
+     *     ``not_held``: nothing keeps it out. ``version`` goes back with a release.
+     */
+    InitiativeHoldResponse: {
+      /**
+       * State
+       * @enum {string}
+       */
+      state: "held" | "released" | "not_held";
+      /** Released At */
+      released_at: string | null;
+      /** Version */
+      version: number;
+    };
     JsonValue: unknown;
     /**
      * LedgerEntry
@@ -5586,6 +5629,20 @@ export interface components {
       granted?: boolean | null;
     };
     /**
+     * SetInitiativeHoldRequest
+     * @description Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).
+     *
+     *     ``released`` true says the persona may draw on what it learned in the conversation when it
+     *     reaches out unprompted; false undoes that. A release carries ``version``, the count the
+     *     user saw in the control's read, so a disclosure recorded since is never released unseen.
+     */
+    SetInitiativeHoldRequest: {
+      /** Released */
+      released: boolean;
+      /** Version */
+      version?: number | null;
+    };
+    /**
      * SetSkillConsentRequest
      * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
      *
@@ -7070,6 +7127,72 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["TurnIntoFileResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_initiative_hold_v1_conversations__conversation_id__initiative_hold_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeHoldResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_initiative_hold_v1_conversations__conversation_id__initiative_hold_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetInitiativeHoldRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeHoldResponse"];
         };
       };
       /** @description Validation Error */
