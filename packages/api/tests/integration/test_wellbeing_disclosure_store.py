@@ -253,3 +253,36 @@ def test_a_release_for_a_persona_that_is_gone_writes_nothing(
     assert got is ReleaseOutcome.GONE
     assert _state(app_engine) is None
     assert _audit(migrated_engine) == []
+
+
+def test_a_release_lifts_the_sibling_but_never_the_conversation_or_the_tagged_node(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """D-ORCH-11-18-u end to end, as persona_app: the node half and the fact half both lift."""
+    _seed(migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
+    vec = [1.0] + [0.0] * (_DIM - 1)
+    backend.insert_node_if_absent(_OWNER, _node(_TAGGED, "disordered_eating"), vec)
+    backend.insert_node_if_absent(_OWNER, _node(_DINNER, None), vec)
+    store = build_graph_store(
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
+    )
+    facts = PgDisclosureStore(app_engine)
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    _as(_OWNER, lambda: facts.release(_OWNER, _PERSONA, "conv-d", version=1, at=_AT))
+    check = ApiWellbeingSubjectCheck(store, app_engine)
+    cited = (
+        GroundingCitation(kind=CitationKind.NODE, ref=_DINNER),
+        GroundingCitation(kind=CitationKind.NODE, ref=_TAGGED),
+        GroundingCitation(kind=CitationKind.CONVERSATION, ref="conv-d"),
+    )
+    gated = _as(_OWNER, lambda: check.tagged_refs(_OWNER, cited, include_unsynthesised=True))
+    assert gated == {_TAGGED, "conv-d"}
+
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    again = _as(_OWNER, lambda: check.tagged_refs(_OWNER, cited, include_unsynthesised=True))
+    assert again == {_DINNER, _TAGGED, "conv-d"}, "a disclosure after the release holds it again"

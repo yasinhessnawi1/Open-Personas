@@ -136,7 +136,8 @@ def judge_context(
             },
         ).all()
     sources = {src for row in rows for src in _row_sources(row.provenance)}
-    gated = gate.gated(owner_id, sources, include_unsynthesised=True)
+    # D-ORCH-11-18-u: a note is what a conversation taught, so a release lifts its source.
+    gated = gate.gated(owner_id, sources, include_unsynthesised=True, honour_releases=True)
     kept = [row for row in rows if not _row_sources(row.provenance) & gated]
     return [
         ContextNote(written_on=row.created_at.date(), content=str(row.content))
@@ -185,7 +186,11 @@ class ApiScanGraphReader:
             for item in (node, *(t for _, t in targets))
             for src in node_sources(item)
         }
-        gated = self._gate.gated(owner_id, sources, include_unsynthesised=True)
+        # D-ORCH-11-18-u: pool nodes and lens targets are what a conversation taught, so a
+        # release lifts their sources; a tagged node is still dropped by its own tag.
+        gated = self._gate.gated(
+            owner_id, sources, include_unsynthesised=True, honour_releases=True
+        )
         out: list[ScanNode] = []
         for node, targets in expanded:
             if node_sources(node) & gated:
@@ -228,7 +233,8 @@ class ApiScanTaskReader:
 
         A task is dropped when its id or one of its runs is gated (a flagged node learned
         from its run) or its originating conversation is (``Task.conversation_id``,
-        where recorded).
+        where recorded). Strict: a release never lifts a task (D-ORCH-11-18-u), since its
+        goal text is never checked against tags.
         """
         reader = APITaskStateReader(self._tasks, self._checkpoints, owner_id)
         active = reader.list_active()
