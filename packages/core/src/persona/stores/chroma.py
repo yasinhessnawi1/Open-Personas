@@ -13,16 +13,22 @@ This module is the transport layer only. Policy, versioning, and audit
 emission live in :class:`persona.stores.base.TypedStore`. The transport
 exposes a narrow ``ChromaBackend`` that the typed stores compose with.
 
-Two writers racing on one version chain both win here: there is no head index, so
-``ChainConflictError`` never fires and the store never retries. The chain then needs
-``persona repair --resolve-raced``. This is the local, single-process transport, so the race
-needs two processes on one folder. See :mod:`persona.stores.backend` for the full list.
+There is no head index here. Two updates racing on one chain in one process are still
+caught, because an update names the version it supersedes and that is checked under the lock
+below, so the loser re-reads and lands on top (R9-271). Two first writes to a new chain, or two
+processes on one folder, both win, and the chain then needs ``persona repair --resolve-raced``.
+See :mod:`persona.stores.backend` for the full list.
+
+Every write and delete takes a lock per folder and persona (R9-271), shared by every backend in
+the process on the same folder, so a forget cannot land between a write's check of what it read
+and the one upsert that follows it.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import threading
 from datetime import datetime  # noqa: TC003 — reinforce() takes a runtime datetime
 from pathlib import Path  # noqa: TC003 — used at runtime by ChromaBackend.__init__
 from typing import TYPE_CHECKING, Any
@@ -35,8 +41,11 @@ from persona.schema.chunks import (
     WriteSource,
     verify_content_hash,
 )
+from persona.stores.guarded import check_requires_kinds, guarded_batch
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from persona.stores.embedder import Embedder
 
 _log = get_logger("stores.chroma")
@@ -47,6 +56,25 @@ __all__ = ["CHROMA_QUERY_BATCH_CAP", "ChromaBackend", "collection_name_for"]
 # batches (~3,452 BEIR/NQ queries broke at scale). Not a problem at persona
 # scale, but the constant survives so the constraint is in one place.
 CHROMA_QUERY_BATCH_CAP: int = 64
+
+
+_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _persona_lock(persist_path: Path, persona_id: str) -> threading.RLock:
+    """The one lock for this folder and persona in this process, whichever backend asks.
+
+    Keyed on the resolved folder rather than held by the backend, because the api and the
+    connectors service each build their own backend on the same folder. Reentrant, because
+    ``excise_versions`` deletes and relinks through the methods that take it too.
+    """
+    key = (str(persist_path.resolve()), persona_id)
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = _LOCKS[key] = threading.RLock()
+        return lock
 
 
 def collection_name_for(persona_id: str, store_kind: str) -> str:
@@ -104,20 +132,39 @@ class ChromaBackend:
         persona_id: str,
         store_kind: str,
         chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
     ) -> None:
-        if not chunks:
+        """One ``collection.upsert``, after checking under the lock what the write read (R9-271).
+
+        The superseded versions go into the same call with their links moved, as whole rows,
+        because a link moved by a second call would tear the chain on a crash (Spec K13).
+        """
+        if not chunks and not supersedes:
             return
+        check_requires_kinds(requires, requires_kinds)
         # Before the embedder: a stale chunk must not be paid for, and must not land (R9-210).
         for chunk in chunks:
             verify_content_hash(chunk)
-        collection = self._collection(persona_id, store_kind)
-        embeddings = self.embedder.encode([c.text for c in chunks])
-        collection.upsert(
-            ids=[c.id for c in chunks],
-            documents=[c.text for c in chunks],
-            embeddings=embeddings,
-            metadatas=[_chunk_to_metadata(c) for c in chunks],
-        )
+        with _persona_lock(self.persist_path, persona_id):
+            batch = guarded_batch(
+                lambda kind, ids: self.get_by_ids(persona_id=persona_id, store_kind=kind, ids=ids),
+                persona_id=persona_id,
+                store_kind=store_kind,
+                chunks=chunks,
+                supersedes=supersedes,
+                requires=requires,
+                requires_kinds=requires_kinds,
+            )
+            collection = self._collection(persona_id, store_kind)
+            embeddings = self.embedder.encode([c.text for c in batch])
+            collection.upsert(
+                ids=[c.id for c in batch],
+                documents=[c.text for c in batch],
+                embeddings=embeddings,
+                metadatas=[_chunk_to_metadata(c) for c in batch],
+            )
 
     def reinforce(
         self,
@@ -135,19 +182,20 @@ class ChromaBackend:
         """
         if not ids:
             return
-        collection = self._collection(persona_id, store_kind)
-        raw = collection.get(ids=ids, include=["metadatas"])
-        got_ids = raw.get("ids") or []
-        metas = raw.get("metadatas") or []
-        if not got_ids:
-            return
-        bumped = []
-        for meta in metas:
-            md = dict(meta or {})
-            md["k8_strength"] = int(md.get("k8_strength", 1)) + 1
-            md["k8_last_recalled_at"] = recalled_at.isoformat()
-            bumped.append(md)
-        collection.update(ids=list(got_ids), metadatas=bumped)
+        with _persona_lock(self.persist_path, persona_id):
+            collection = self._collection(persona_id, store_kind)
+            raw = collection.get(ids=ids, include=["metadatas"])
+            got_ids = raw.get("ids") or []
+            metas = raw.get("metadatas") or []
+            if not got_ids:
+                return
+            bumped = []
+            for meta in metas:
+                md = dict(meta or {})
+                md["k8_strength"] = int(md.get("k8_strength", 1)) + 1
+                md["k8_last_recalled_at"] = recalled_at.isoformat()
+                bumped.append(md)
+            collection.update(ids=list(got_ids), metadatas=bumped)
 
     def set_bands(
         self,
@@ -159,19 +207,20 @@ class ChromaBackend:
         """Batched band materialization (K8 T7) — metadata-only, never a re-embed."""
         if not bands:
             return
-        collection = self._collection(persona_id, store_kind)
-        ids = list(bands.keys())
-        raw = collection.get(ids=ids, include=["metadatas"])
-        got_ids = raw.get("ids") or []
-        metas = raw.get("metadatas") or []
-        if not got_ids:
-            return
-        updated = []
-        for chunk_id, meta in zip(got_ids, metas, strict=False):
-            md = dict(meta or {})
-            md["k8_band"] = int(bands[str(chunk_id)])
-            updated.append(md)
-        collection.update(ids=list(got_ids), metadatas=updated)
+        with _persona_lock(self.persist_path, persona_id):
+            collection = self._collection(persona_id, store_kind)
+            ids = list(bands.keys())
+            raw = collection.get(ids=ids, include=["metadatas"])
+            got_ids = raw.get("ids") or []
+            metas = raw.get("metadatas") or []
+            if not got_ids:
+                return
+            updated = []
+            for chunk_id, meta in zip(got_ids, metas, strict=False):
+                md = dict(meta or {})
+                md["k8_band"] = int(bands[str(chunk_id)])
+                updated.append(md)
+            collection.update(ids=list(got_ids), metadatas=updated)
 
     def band_histogram(
         self,
@@ -192,7 +241,10 @@ class ChromaBackend:
         # file on Windows or a broken store, has left the memory on disk and has to say so.
         from chromadb.errors import NotFoundError  # noqa: PLC0415 - optional dependency
 
-        with contextlib.suppress(NotFoundError):
+        with (
+            _persona_lock(self.persist_path, persona_id),
+            contextlib.suppress(NotFoundError),
+        ):
             self._client.delete_collection(collection_name_for(persona_id, store_kind))
 
     def relink(
@@ -219,22 +271,23 @@ class ChromaBackend:
         touched = [*links, *(i for i in (versions or {}) if i not in links)]
         if not touched:
             return
-        collection = self._collection(persona_id, store_kind)
-        raw = collection.get(ids=touched, include=["metadatas"])
-        got_ids = [str(i) for i in (raw.get("ids") or [])]
-        metas = raw.get("metadatas") or []
-        if not got_ids:
-            return
-        updated: list[dict[str, Any]] = []
-        for chunk_id, meta in zip(got_ids, metas, strict=False):
-            md = dict(meta or {})
-            # Explicit None deletes the key; omitting it would leave the old link in place.
-            if chunk_id in links:
-                md["prov_superseded_by"] = links[chunk_id]
-            if versions and chunk_id in versions:
-                md["prov_version"] = versions[chunk_id]
-            updated.append(md)
-        collection.update(ids=got_ids, metadatas=updated)
+        with _persona_lock(self.persist_path, persona_id):
+            collection = self._collection(persona_id, store_kind)
+            raw = collection.get(ids=touched, include=["metadatas"])
+            got_ids = [str(i) for i in (raw.get("ids") or [])]
+            metas = raw.get("metadatas") or []
+            if not got_ids:
+                return
+            updated: list[dict[str, Any]] = []
+            for chunk_id, meta in zip(got_ids, metas, strict=False):
+                md = dict(meta or {})
+                # Explicit None deletes the key; omitting it would leave the old link in place.
+                if chunk_id in links:
+                    md["prov_superseded_by"] = links[chunk_id]
+                if versions and chunk_id in versions:
+                    md["prov_version"] = versions[chunk_id]
+                updated.append(md)
+            collection.update(ids=got_ids, metadatas=updated)
 
     def excise_versions(
         self,
@@ -251,29 +304,36 @@ class ChromaBackend:
 
         Two calls, because Chroma has no transaction (documented Liskov, see ``backend.py``).
         The delete goes first so a killed process cannot leave the forgotten text on disk. The
-        chain is compared with ``expected`` just before, which catches a writer that landed
-        after the plan was read, though not one landing between this check and the calls.
+        chain is compared with ``expected`` under the folder's lock, which every write in this
+        process also takes (R9-271), so no writer in the process lands between the check and
+        the calls. One in another process on the same folder still can.
         """
         if not doomed_ids:
             return
-        found = {
-            c.id: (c.provenance.version, c.provenance.superseded_by)
-            for c in self.get_by_logical_ids(
-                persona_id=persona_id, store_kind=store_kind, logical_ids=[logical_id]
+        with _persona_lock(self.persist_path, persona_id):
+            found = {
+                c.id: (c.provenance.version, c.provenance.superseded_by)
+                for c in self.get_by_logical_ids(
+                    persona_id=persona_id, store_kind=store_kind, logical_ids=[logical_id]
+                )
+                if c.provenance is not None
+            }
+            if found != expected:
+                msg = "the chain moved since the plan was made"
+                raise ChainConflictError(
+                    msg, context={"persona_id": persona_id, "store": store_kind}
+                )
+            self.delete_documents(persona_id=persona_id, store_kind=store_kind, ids=doomed_ids)
+            self.relink(
+                persona_id=persona_id, store_kind=store_kind, links=links, versions=versions
             )
-            if c.provenance is not None
-        }
-        if found != expected:
-            msg = "the chain moved since the plan was made"
-            raise ChainConflictError(msg, context={"persona_id": persona_id, "store": store_kind})
-        self.delete_documents(persona_id=persona_id, store_kind=store_kind, ids=doomed_ids)
-        self.relink(persona_id=persona_id, store_kind=store_kind, links=links, versions=versions)
 
     def delete_documents(self, *, persona_id: str, store_kind: str, ids: list[str]) -> None:
         if not ids:
             return
-        collection = self._collection(persona_id, store_kind)
-        collection.delete(ids=ids)
+        with _persona_lock(self.persist_path, persona_id):
+            collection = self._collection(persona_id, store_kind)
+            collection.delete(ids=ids)
 
     # -- read ---------------------------------------------------------------
 

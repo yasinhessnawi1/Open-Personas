@@ -30,10 +30,11 @@ from persona.errors import (
 )
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.schema.persona import Persona
+from persona.stores.guarded import guarded_batch
 from persona.stores.self_facts import SelfFactsStore
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping, Sequence
 
 PERSONA_ID = "p_learn"
 
@@ -44,7 +45,27 @@ class _StatefulBackend:
     def __init__(self) -> None:
         self._chunks: dict[tuple[str, str], dict[str, PersonaChunk]] = {}
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for i, c in self._chunks.get((persona_id, kind), {}).items() if i in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         bucket = self._chunks.setdefault((persona_id, store_kind), {})
         for chunk in chunks:
             bucket[chunk.id] = chunk

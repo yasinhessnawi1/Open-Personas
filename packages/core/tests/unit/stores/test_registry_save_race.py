@@ -16,6 +16,7 @@ must not land on the row version 1 of A already holds.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from pathlib import Path
 
 from persona.audit import MemoryAuditLogger
@@ -23,6 +24,7 @@ from persona.registry import PersonaRegistry
 from persona.schema.chunks import PersonaChunk, make_chunk_id, version_chunk_id
 from persona.schema.persona import Persona
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.identity import IdentityStore
 from persona.stores.self_facts import SelfFactsStore
 from persona.stores.versioning import ChainDefect, diagnose_chain
@@ -53,11 +55,31 @@ class _TableKeyedBackend:
             if owner == persona_id and kind == store_kind
         ]
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
         if store_kind == self.hook_kind:
             hook, self.before_next_upsert = self.before_next_upsert, None
             if callable(hook):
                 hook()
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for p, k, c in self.rows.values() if p == persona_id and k == kind and c.id in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         for chunk in chunks:
             self.rows[chunk.id] = (persona_id, store_kind, chunk)
 
@@ -146,8 +168,9 @@ def test_the_persona_can_still_be_saved_after_the_race() -> None:
 def test_two_racing_different_saves_stay_visible_as_two_rows() -> None:
     """Different content must never collapse: that would be a lost update nobody could see.
 
-    On Postgres the second one hits the head index and retries. This fake has no index, which is
-    the Chroma shape, so both rows are here and the chain says what happened.
+    The save that lands second names a version the first has already superseded, so it is
+    refused, reads again and lands on top (R9-271). This fake has no head index, which is the
+    Chroma shape: both saves are in the history either way.
     """
     backend = _TableKeyedBackend()
     registry, store = _registry(backend)
@@ -159,7 +182,8 @@ def test_two_racing_different_saves_stay_visible_as_two_rows() -> None:
     backend.before_next_upsert = lambda: registry.load_persona(second)
     registry.load_persona(first)
 
-    assert {c.text for c in store.get_all(_PERSONA) if "save" in c.text.lower()} == {
+    history = store.history(_PERSONA, _FIRST_FACT)  # validates the chain
+    assert {c.text for c in history if "save" in c.text.lower()} == {
         "self_fact: One save",
         "self_fact: Another save",
     }

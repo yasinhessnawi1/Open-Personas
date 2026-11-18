@@ -23,11 +23,13 @@ predecessor, chains never accumulated superseded rows, so the recall loss stayed
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime
 from typing import Any
 
 from persona.audit import MemoryAuditLogger
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, make_chunk_id
+from persona.stores.guarded import guarded_batch
 from persona.stores.self_facts import SelfFactsStore
 
 _NOW = datetime(2026, 9, 19, 9, 0, tzinfo=UTC)
@@ -52,7 +54,25 @@ class _IdKeyedBackend:
     def _bucket(self, persona_id: str, store_kind: str) -> dict[str, PersonaChunk]:
         return self.rows.setdefault((persona_id, store_kind), {})
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda kind, ids: self.get_by_ids(persona_id=persona_id, store_kind=kind, ids=ids),
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         self.upsert_batches.append(list(chunks))
         bucket = self._bucket(persona_id, store_kind)
         for chunk in chunks:

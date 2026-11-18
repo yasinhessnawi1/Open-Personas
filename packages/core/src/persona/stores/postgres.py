@@ -45,9 +45,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
-from persona.errors import ChainConflictError, MemoryOwnerMissingError
+from persona.errors import ChainConflictError, ForgottenEvidenceError, MemoryOwnerMissingError
 from persona.logging import get_logger
 from persona.schema.chunks import (
     ChunkProvenance,
@@ -55,9 +55,12 @@ from persona.schema.chunks import (
     WriteSource,
     verify_content_hash,
 )
+from persona.stores.guarded import check_requires_kinds
 from persona.stores.orphans import OrphanSweep, role_sees_every_tenant
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from sqlalchemy import Connection, Engine
 
     from persona.stores.embedder import Embedder
@@ -109,6 +112,8 @@ _memory_chunks = Table(
 
 #: How the guard in migration 062 identifies itself.
 _FOREIGN_KEY_VIOLATION = "23503"
+#: Postgres broke a lock cycle by failing this transaction. Nothing of it landed.
+_DEADLOCK_DETECTED = "40P01"
 _OWNER_GUARD_PREFIX = "memory_chunks_owner_guard:"
 
 
@@ -148,13 +153,27 @@ class PostgresBackend:
         persona_id: str,
         store_kind: str,
         chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
     ) -> None:
-        if not chunks:
+        """Write ``chunks`` in one transaction, after checking what the write read (R9-271).
+
+        Inside that transaction, in this order: the cited evidence is locked ``FOR KEY SHARE``,
+        so a forget deleting it waits for this to commit and then finds what it wrote; the
+        superseded versions are locked ``FOR UPDATE`` and compared with what the write read;
+        their links move, and only their links (the prior head's text is never sent or embedded
+        again); then the new rows. Each lock is taken in id order, which every delete of memory
+        rows also uses, so two of these cannot wait on each other in a circle. Embedding happens
+        before the transaction, so no lock is held while a model runs.
+        """
+        if not chunks and not supersedes:
             return
+        check_requires_kinds(requires, requires_kinds)
         # Before the embedder: a stale chunk must not be paid for, and must not land (R9-210).
         for chunk in chunks:
             verify_content_hash(chunk)
-        embeddings = self._embedder.encode([c.text for c in chunks])
+        embeddings = self._embedder.encode([c.text for c in chunks]) if chunks else []
         rows: list[dict[str, Any]] = []
         for chunk, embedding in zip(chunks, embeddings, strict=True):
             if len(embedding) != EMBEDDING_DIM:
@@ -164,14 +183,19 @@ class PostgresBackend:
                 )
                 raise ValueError(msg)
             rows.append(self._chunk_to_row(persona_id, store_kind, chunk, embedding))
-        # INSERT ... ON CONFLICT (id) DO UPDATE — upsert by chunk id, matching
+        # INSERT ... ON CONFLICT (id) DO UPDATE: upsert by chunk id, matching
         # ChromaBackend.upsert's replace-on-same-id semantics.
         stmt = insert(_memory_chunks)
         update_cols = {c.name: stmt.excluded[c.name] for c in _memory_chunks.c if c.name != "id"}
         stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols)
         try:
             with self._engine.begin() as conn:
-                conn.execute(stmt, rows)
+                if requires:
+                    _lock_evidence(conn, persona_id, store_kind, requires, requires_kinds)
+                if supersedes:
+                    _move_links(conn, persona_id, store_kind, supersedes)
+                if rows:
+                    conn.execute(stmt, rows)
         except IntegrityError as exc:
             if _is_owner_guard_refusal(exc):
                 raise MemoryOwnerMissingError(
@@ -181,6 +205,11 @@ class PostgresBackend:
             if not _is_chain_head_conflict(exc):
                 raise
             # The whole statement list rolled back, so nothing landed.
+            raise _chain_conflict(persona_id, store_kind) from None
+        except OperationalError as exc:
+            if not _is_deadlock(exc):
+                raise
+            # Rolled back whole. The store reads again and retries, as for any conflict.
             raise _chain_conflict(persona_id, store_kind) from None
 
     def reinforce(
@@ -345,6 +374,7 @@ class PostgresBackend:
                         _memory_chunks.c.kind == store_kind,
                         _memory_chunks.c.logical_id == logical_id,
                     )
+                    .order_by(_memory_chunks.c.id)
                     .with_for_update()
                 ).all()
                 if {str(i): (int(v), s) for i, v, s in found} != expected:
@@ -405,15 +435,27 @@ class PostgresBackend:
         store_kind: str,
         ids: list[str],
     ) -> None:
+        """Delete the listed rows, locking them first in id order (R9-271).
+
+        The lock goes first, and in the order a guarded write locks its evidence, so a forget
+        and a write citing several of the same rows queue behind each other instead of each
+        holding half and waiting for the other.
+        """
         if not ids:
             return
-        stmt = delete(_memory_chunks).where(
+        where = (
             _memory_chunks.c.persona_id == persona_id,
             _memory_chunks.c.kind == store_kind,
             _memory_chunks.c.id.in_(ids),
         )
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            conn.execute(
+                select(_memory_chunks.c.id)
+                .where(*where)
+                .order_by(_memory_chunks.c.id)
+                .with_for_update()
+            )
+            conn.execute(delete(_memory_chunks).where(*where))
 
     # -- read ---------------------------------------------------------------
 
@@ -637,6 +679,91 @@ def _chain_conflict(persona_id: str, store_kind: str) -> ChainConflictError:
         msg,
         context={"persona_id": persona_id, "store": store_kind, "constraint": CHAIN_HEAD_INDEX},
     )
+
+
+def _lock_evidence(
+    conn: Connection,
+    persona_id: str,
+    store_kind: str,
+    requires: Sequence[str],
+    requires_kinds: Sequence[str],
+) -> None:
+    """Lock the cited rows ``FOR KEY SHARE`` in id order, and refuse if any is gone (R9-271).
+
+    ``FOR KEY SHARE`` is what a foreign key check takes: it holds off a DELETE of the row until
+    this transaction ends, and lets ``reinforce`` and ``set_bands`` through, since they only
+    update columns that are not the key.
+    """
+    wanted = sorted(set(requires))
+    found = set(
+        conn.execute(
+            select(_memory_chunks.c.id)
+            .where(
+                _memory_chunks.c.persona_id == persona_id,
+                _memory_chunks.c.kind.in_(list(requires_kinds)),
+                _memory_chunks.c.id.in_(wanted),
+            )
+            .order_by(_memory_chunks.c.id)
+            .with_for_update(read=True, key_share=True)
+        )
+        .scalars()
+        .all()
+    )
+    missing = len(set(wanted) - found)
+    if missing:
+        raise ForgottenEvidenceError(
+            "the evidence this memory was built from has been forgotten",
+            context={"persona_id": persona_id, "store": store_kind, "missing": str(missing)},
+        )
+
+
+def _move_links(
+    conn: Connection,
+    persona_id: str,
+    store_kind: str,
+    supersedes: Mapping[str, tuple[int, str]],
+) -> None:
+    """Compare-and-set each superseded version's link, under its row lock (R9-271).
+
+    Each version must still be there, current, and at the number the writer read. A forget that
+    deleted it, or renumbered it while closing up a chain, makes the write stale, and a stale
+    write raises rather than landing a copy of a row the person asked to be rid of.
+    """
+    priors = sorted(supersedes)
+    found = {
+        str(chunk_id): (version, superseded_by)
+        for chunk_id, version, superseded_by in conn.execute(
+            select(
+                _memory_chunks.c.id,
+                _memory_chunks.c.version,
+                _memory_chunks.c.superseded_by,
+            )
+            .where(
+                _memory_chunks.c.persona_id == persona_id,
+                _memory_chunks.c.kind == store_kind,
+                _memory_chunks.c.id.in_(priors),
+            )
+            .order_by(_memory_chunks.c.id)
+            .with_for_update()
+        ).all()
+    }
+    if found != {prior: (supersedes[prior][0], None) for prior in priors}:
+        raise _chain_conflict(persona_id, store_kind)
+    for prior in priors:
+        conn.execute(
+            _memory_chunks.update()
+            .where(
+                _memory_chunks.c.persona_id == persona_id,
+                _memory_chunks.c.kind == store_kind,
+                _memory_chunks.c.id == prior,
+            )
+            .values(superseded_by=supersedes[prior][1])
+        )
+
+
+def _is_deadlock(exc: OperationalError) -> bool:
+    """Whether Postgres failed this transaction to break a lock cycle."""
+    return getattr(exc.orig, "sqlstate", None) == _DEADLOCK_DETECTED
 
 
 def _is_owner_guard_refusal(exc: IntegrityError) -> bool:
