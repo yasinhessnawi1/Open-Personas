@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from persona.logging import get_logger
-from sqlalchemy import literal, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -48,26 +48,35 @@ class PgDisclosureStore:
         longer exists for this owner (it was erased): nothing is written for it, and the caller
         must write nothing either. A database error other than that propagates, so the caller
         fails closed.
+
+        The persona's row is read ``FOR KEY SHARE`` first, in the same transaction, so an
+        erasure deleting it waits for this commit (and its cascade then takes the fact) or has
+        already won (and nothing is written). Nothing here trusts ``rowcount``: psycopg reports
+        -1 for an ``INSERT ... SELECT ... ON CONFLICT DO NOTHING``, which once made a gone
+        persona's fact look held (the PR #40 CI failure).
         """
-        source = select(literal(owner_id), personas_t.c.id, literal(interaction_id)).where(
-            personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id
+        persona = (
+            select(personas_t.c.id)
+            .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
+            .with_for_update(read=True, key_share=True)
         )
         stmt = (
             pg_insert(wellbeing_disclosures)
-            .from_select(["owner_id", "persona_id", "interaction_id"], source)
+            .values(owner_id=owner_id, persona_id=persona_id, interaction_id=interaction_id)
             .on_conflict_do_nothing()
-        )
-        held = select(wellbeing_disclosures.c.interaction_id).where(
-            wellbeing_disclosures.c.owner_id == owner_id,
-            wellbeing_disclosures.c.interaction_id == interaction_id,
         )
         try:
             with rls_connection(self._engine, owner_id) as conn:
-                if conn.execute(stmt).rowcount:
-                    return True
-                return conn.execute(held).first() is not None
+                if conn.execute(persona).first() is None:
+                    _log.info(
+                        "disclosure fact refused: its persona is gone persona_id={pid}",
+                        pid=persona_id,
+                    )
+                    return False
+                conn.execute(stmt)
+                return True
         except IntegrityError:
-            # The persona's row went between the read above and the key check: it was erased.
+            # Belt and braces: the key check refused the persona all the same.
             _log.info(
                 "disclosure fact refused: its persona is gone persona_id={pid}", pid=persona_id
             )

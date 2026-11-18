@@ -14,7 +14,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from persona_api.initiative import disclosures
 from persona_api.initiative.disclosures import PgDisclosureStore
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError, OperationalError
+
+_PG = postgresql.dialect()
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -56,3 +59,64 @@ def test_reading_no_refs_touches_no_database(monkeypatch: pytest.MonkeyPatch) ->
     owners = _failing(monkeypatch, OperationalError("SELECT", {}, Exception("down")))
     assert PgDisclosureStore(object()).disclosed("u", []) == set()  # type: ignore[arg-type]
     assert owners == []
+
+
+class _Result:
+    """A result whose ``rowcount`` must never decide anything (psycopg reports -1 for an
+    ``INSERT ... SELECT ... ON CONFLICT DO NOTHING``, and -1 is truthy)."""
+
+    def __init__(self, row: object | None) -> None:
+        self._row = row
+
+    @property
+    def rowcount(self) -> int:
+        raise AssertionError("record() must not trust rowcount")
+
+    def first(self) -> object | None:
+        return self._row
+
+
+class _ScriptedConn:
+    """Answers the persona read from ``persona_row``; records every statement it is given."""
+
+    def __init__(self, persona_row: object | None) -> None:
+        self._persona_row = persona_row
+        self.statements: list[str] = []
+
+    def execute(self, stmt: Any) -> _Result:  # noqa: ANN401
+        sql = str(stmt.compile(dialect=_PG)).upper()
+        self.statements.append(sql)
+        if sql.startswith("SELECT"):
+            return _Result(self._persona_row)
+        return _Result(None)
+
+
+def _scripted(monkeypatch: pytest.MonkeyPatch, persona_row: object | None) -> _ScriptedConn:
+    conn = _ScriptedConn(persona_row)
+
+    @contextmanager
+    def connection(_engine: Any, _owner_id: str) -> Iterator[_ScriptedConn]:  # noqa: ANN401
+        yield conn
+
+    monkeypatch.setattr(disclosures, "rls_connection", connection)
+    return conn
+
+
+def test_a_persona_that_is_gone_is_refused_and_nothing_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CI failure on PR #40: an erased persona's fact was reported as held."""
+    conn = _scripted(monkeypatch, persona_row=None)
+    assert PgDisclosureStore(object()).record("u", "pers_erased", "conv") is False  # type: ignore[arg-type]
+    assert len(conn.statements) == 1, "only the persona read; no insert for a gone persona"
+    assert "FOR KEY SHARE" in conn.statements[0], "the persona row is held until commit"
+
+
+def test_a_live_persona_holds_the_fact_whatever_rowcount_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _scripted(monkeypatch, persona_row=("pers",))
+    assert PgDisclosureStore(object()).record("u", "pers", "conv") is True  # type: ignore[arg-type]
+    assert conn.statements[0].startswith("SELECT")
+    assert conn.statements[1].startswith("INSERT INTO WELLBEING_DISCLOSURES")
+    assert "ON CONFLICT DO NOTHING" in conn.statements[1]
