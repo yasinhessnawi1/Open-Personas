@@ -38,7 +38,6 @@ from persona_runtime.routing.model_selection import (
     canonical_model_id,
     first_token_sample_model,
     reorder_primary,
-    resolve_served_model,
     served_identity,
 )
 from persona_runtime.routing.nvidia_models import (
@@ -82,7 +81,6 @@ __all__ = [
     "first_token_sample_model",
     "nvidia_metadata_for_model",
     "reorder_primary",
-    "resolve_served_model",
     "served_identity",
     "surface_for_profile",
     "tier_for",

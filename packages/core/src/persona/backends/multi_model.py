@@ -209,14 +209,11 @@ class MultiModelChatBackend:
         self._backends: list[ChatBackend] = backends
         self._tier_name: str | None = tier_name
         self._max_retries: int = max_retries_per_backend
-        # Spec 20 T19 (D-20-9) — per-call attempt ledger surfaced to the
-        # ConversationLoop write-site so TurnLog can capture which backends
-        # fell through to reach the successful winner. RESET at the START of
-        # every chat() / chat_stream() call so concurrent / sequential calls
-        # never bleed state. Class-name-only privacy is enforced by
-        # ``_record_attempt`` which captures ``type(exc).__name__`` (never the
-        # exception message).
-        self._last_attempts: list[AttemptRecord] = []
+        # R9-223: NO per-call state lives here. One chain serves every conversation
+        # on its tier, so an attempt ledger stored on it (removed in R9-223) could be
+        # reset by a concurrent call before the first call read it. Each call's
+        # served identity and attempt history ride its own result instead
+        # (``ServedCall`` on the response and on every chunk).
 
     # ------------------------------------------------------------------ #
     # ChatBackend Protocol properties — delegate to PRIMARY backend.
@@ -235,24 +232,6 @@ class MultiModelChatBackend:
     def backends(self) -> list[ChatBackend]:
         """Composed backends in fallback order (read-only view)."""
         return self._backends
-
-    @property
-    def last_attempts(self) -> list[AttemptRecord]:
-        """Per-call attempt ledger from the most recent chat / chat_stream call.
-
-        Read by the ConversationLoop write-site (Spec 20 T19; D-20-9) to
-        populate the TurnLog ``tier_fallback_*`` fields. Returns the live
-        list (callers MUST NOT mutate — copy via ``list(...)`` if needed).
-
-        On a clean primary-success call the ledger is empty (no fallback
-        engaged). On a successful fallback the ledger holds one
-        :class:`AttemptRecord` per backend that fell through. On
-        :class:`AllModelsFailedError` the ledger holds one record per
-        backend tried (all failed).
-
-        Cleared at the START of every chat / chat_stream call.
-        """
-        return self._last_attempts
 
     @property
     def provider_name(self) -> str:
@@ -325,10 +304,8 @@ class MultiModelChatBackend:
             AllModelsFailedError: every backend exhausted its per-bucket path.
             Any SURFACE-bucket exception: short-circuits the walk.
         """
-        # T19 — reset per-call ledger so :attr:`last_attempts` reflects only
-        # this invocation (the ConversationLoop reads it post-call).
-        self._last_attempts = []
-        attempts: list[AttemptRecord] = self._last_attempts
+        # The per-backend records for this call's AllModelsFailedError (local: R9-223).
+        attempts: list[AttemptRecord] = []
         # Image-workspace cascade: when the request carries an ImageContent
         # block, restrict + order the candidate walk to vision-capable
         # backends. Raises NoVisionCapableModelError if none qualify (honest
@@ -407,9 +384,8 @@ class MultiModelChatBackend:
         top_p: float | None = None,
         top_k: int | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        # T19 — reset per-call ledger (see chat() for rationale).
-        self._last_attempts = []
-        attempts: list[AttemptRecord] = self._last_attempts
+        # The per-backend records for this call's AllModelsFailedError (local: R9-223).
+        attempts: list[AttemptRecord] = []
         # Image-workspace cascade — same vision-aware candidate restriction as
         # chat(); raises NoVisionCapableModelError BEFORE any stream opens.
         candidates = self._vision_aware_candidates(messages)

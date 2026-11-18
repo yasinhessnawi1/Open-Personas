@@ -19,8 +19,7 @@ the file exercises BOTH the wrapper (core) and the TurnLog
 """
 
 # ruff: noqa: SLF001, N802, PT012, PT019
-# SLF001: integration test asserts on the wrapper's private last_attempts
-# ledger via the public ``last_attempts`` property surface (documentation
+# SLF001: integration test reads private test-double state (documentation
 # value of the underscore is implicit here).
 # N802: test names embed acceptance-criterion identifiers (e.g.
 # ``AllModelsFailedError``) — the camel-case is load-bearing and matches
@@ -267,7 +266,7 @@ class TestCrossProviderChatFallback:
         """D-20-9 RETRY-THEN-FALLBACK + D-20-10 N=1 retry.
 
         Primary raises twice → wrapper retries once same-model then
-        advances; ``last_attempts`` records ``retried_same_model=True``.
+        advances; the call's own trace records the backend as retried.
         """
         primary = _ScriptedChatBackend(
             provider="openai",
@@ -289,11 +288,12 @@ class TestCrossProviderChatFallback:
         assert response.content == "fb"
         assert primary.call_count == 2  # original + 1 retry
         assert secondary.call_count == 1
-        attempts = wrapper.last_attempts
+        assert response.served is not None
+        attempts = response.served.fell_through()
         assert len(attempts) == 1
         assert attempts[0].provider == "openai"
-        assert attempts[0].last_error_class == "RateLimitError"
-        assert attempts[0].retried_same_model is True
+        assert attempts[0].error_class == "RateLimitError"
+        assert attempts[0].retry is True
 
     @pytest.mark.asyncio
     async def test_primary_rate_limit_long_retry_after_immediate_fallback(self) -> None:
@@ -313,7 +313,8 @@ class TestCrossProviderChatFallback:
 
         assert response.provider == "deepseek"
         assert primary.call_count == 1  # NO retry
-        assert wrapper.last_attempts[0].retried_same_model is False
+        assert response.served is not None
+        assert response.served.fell_through()[0].retry is False
 
     @pytest.mark.asyncio
     async def test_primary_authentication_error_fallback_with_warning(self) -> None:
@@ -424,7 +425,8 @@ class TestCrossProviderChatFallback:
         response = await wrapper.chat([_user()])
         assert response.provider == "anthropic"
         assert primary.call_count == 1  # FALLBACK-NO-RETRY
-        assert wrapper.last_attempts[0].last_error_class == "ProviderCredentialMissingError"
+        assert response.served is not None
+        assert response.served.fell_through()[0].error_class == "ProviderCredentialMissingError"
 
     @pytest.mark.asyncio
     async def test_streaming_fallback_before_first_chunk(self) -> None:
@@ -443,10 +445,13 @@ class TestCrossProviderChatFallback:
             [primary, secondary], tier_name="frontier", max_retries_per_backend=0
         )
         collected: list[str] = []
+        served = None
         async for chunk in wrapper.chat_stream([_user()]):
             collected.append(chunk.delta)
+            served = chunk.served
         assert "".join(collected) == "hello world"
-        assert wrapper.last_attempts[0].provider == "openai"
+        assert served is not None
+        assert served.fell_through()[0].provider == "openai"
 
     @pytest.mark.asyncio
     async def test_streaming_post_first_chunk_error_raises_verbatim(self) -> None:
@@ -690,7 +695,7 @@ class TestTurnLogFallbackFields:
 
     @pytest.mark.asyncio
     async def test_AllModelsFailedError_path_writes_TurnLog_with_full_attempts(self) -> None:
-        """Exhaustion path — ledger fully populated for operator dashboard."""
+        """Exhaustion path: the error carries every attempt for the operator dashboard."""
         chain = [
             _ScriptedChatBackend(
                 provider=p,
@@ -700,11 +705,15 @@ class TestTurnLogFallbackFields:
             for p, m in (("openai", "gpt-4o"), ("anthropic", "claude"))
         ]
         wrapper = MultiModelChatBackend(list(chain), tier_name="frontier")
-        with pytest.raises(AllModelsFailedError):
+        with pytest.raises(AllModelsFailedError) as excinfo:
             await wrapper.chat([_user()])
-        attempts = wrapper.last_attempts
-        assert [a.provider for a in attempts] == ["openai", "anthropic"]
-        assert all(a.last_error_class == "AuthenticationError" for a in attempts)
+        # The per-call records ride the error itself (no ledger on the shared chain).
+        context = excinfo.value.context
+        assert context["attempt_count"] == "2"
+        assert context["final_error_class"] == "AuthenticationError"
+        attempts_json = context["attempts_json"]
+        assert attempts_json.index("'openai'") < attempts_json.index("'anthropic'")
+        assert attempts_json.count("'AuthenticationError'") == 2
 
     def test_privacy_only_class_names_in_reasons_field(self) -> None:
         """D-20-9 privacy — only class names leak; never message/context."""

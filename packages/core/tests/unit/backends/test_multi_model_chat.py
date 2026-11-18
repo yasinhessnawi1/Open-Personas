@@ -804,10 +804,12 @@ class TestEmptyCompletion:
         assert "".join(c.delta for c in chunks) == "hello"
         assert primary.stream_call_count == 2  # D-20-10: one same-model retry
         assert secondary.stream_call_count == 1
-        # The attempt ledger records the empty completion as a provider failure.
-        assert len(wrapper.last_attempts) == 1
-        assert wrapper.last_attempts[0].last_error_class == "EmptyCompletionError"
-        assert wrapper.last_attempts[0].retried_same_model is True
+        # The call's own trace records the empty completion as a provider failure.
+        served = chunks[-1].served
+        assert served is not None
+        (fell,) = served.fell_through()
+        assert fell.error_class == "EmptyCompletionError"
+        assert fell.retry is True
 
     @pytest.mark.asyncio
     async def test_stream_whitespace_only_completion_falls_back(self) -> None:
@@ -853,7 +855,8 @@ class TestEmptyCompletion:
             chunks.append(c)
         assert any(c.tool_call_delta is not None for c in chunks)
         assert secondary.stream_call_count == 0
-        assert wrapper.last_attempts == []
+        assert chunks[-1].served is not None
+        assert chunks[-1].served.first_attempt is True
 
     @pytest.mark.asyncio
     async def test_stream_all_backends_empty_exhausts_to_all_models_failed(self) -> None:
@@ -885,7 +888,8 @@ class TestEmptyCompletion:
         response = await wrapper.chat([_user_msg()])
         assert response.content == "real"
         assert primary.call_count == 2  # one same-model retry consumed
-        assert wrapper.last_attempts[0].last_error_class == "EmptyCompletionError"
+        assert response.served is not None
+        assert response.served.fell_through()[0].error_class == "EmptyCompletionError"
 
     @pytest.mark.asyncio
     async def test_chat_tool_only_response_is_success(self) -> None:
@@ -906,7 +910,8 @@ class TestEmptyCompletion:
         response = await wrapper.chat([_user_msg()])
         assert response.tool_calls
         assert secondary.call_count == 0
-        assert wrapper.last_attempts == []
+        assert response.served is not None
+        assert response.served.first_attempt is True
 
     def test_empty_completion_error_is_provider_error(self) -> None:
         """The class slots under ProviderError so every existing handler catches it."""

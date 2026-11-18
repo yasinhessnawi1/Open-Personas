@@ -2693,12 +2693,10 @@ class ConversationLoop:
         # attributed per-round (one TurnLog row per turn, not one per round).
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
-        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.
-        # The wrapper's per-call attempt ledger lives on ``last_attempts``;
-        # single-backend (non-wrapper) callers safely return an empty list
-        # via ``getattr(..., None) or []``, yielding the zero-fallback
-        # default shape (backward compat). Computed FIRST (Spec M2, D-M2-2):
-        # the served-model identity below derives from this projection.
+        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields from
+        # the last round's own served trace (R9-223); a bare backend (no trace)
+        # yields the zero-fallback default shape. Computed FIRST (Spec M2,
+        # D-M2-2): the served-model identity below derives from this projection.
         fallback_kwargs = _compute_fallback_fields(backend, served)
         # Spec M2 (D-M2-2): the turn is priced and NAMED as the model that
         # ACTUALLY served it. On a fallback-engaged turn the wrapper's own
@@ -2907,13 +2905,11 @@ def _compute_fallback_fields(backend: ChatBackend, served: ServedCall | None) ->
     fallback-rate trigger consumes ``tier_fallback_count`` /
     ``fallback_engaged`` directly.
 
-    Single-backend (non-wrapper) callers — backends that do not expose a
-    ``last_attempts`` accessor — get the zero-fallback default shape
-    (``tier_model_chosen`` + ``tier_provider_used`` carry the actually-used
-    primary backend; counts are zero; lists are empty). This is the
-    backward-compat path for legacy callers and the degenerate length-1
-    chain that ``TierRegistry`` short-circuits past the wrapper entirely
-    (D-20-17 case (a)).
+    A bare backend (``served`` is ``None``: no chain stamped the round) gets
+    the zero-fallback default shape: ``tier_model_chosen`` and
+    ``tier_provider_used`` carry the backend's own identity, counts are zero,
+    lists are empty. This is also the degenerate length-1 chain that
+    ``TierRegistry`` short-circuits past the wrapper entirely (D-20-17 case (a)).
 
     For a multi-model chain, ``served`` is the round's own
     :class:`~persona.backends.types.ServedCall` (R9-223): the served identity and
@@ -2922,14 +2918,9 @@ def _compute_fallback_fields(backend: ChatBackend, served: ServedCall | None) ->
     from the round's chunks, never from state on the chain, which every
     conversation on the tier shares.
     """
-    if served is not None:
-        fell = served.fell_through()
-        fallback_reasons = [a.error_class or "" for a in fell]
-        fallback_providers = [a.provider for a in fell]
-    else:
-        attempts = getattr(backend, "last_attempts", None) or []
-        fallback_reasons = [a.last_error_class for a in attempts]
-        fallback_providers = [a.provider for a in attempts]
+    fell = served.fell_through() if served is not None else ()
+    fallback_reasons = [a.error_class or "" for a in fell]
+    fallback_providers = [a.provider for a in fell]
     count = len(fallback_reasons)
     chosen_provider, chosen_model = served_identity(backend, served)
     return _FallbackFields(
