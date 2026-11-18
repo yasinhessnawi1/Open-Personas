@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -47,7 +48,7 @@ from persona.backends.errors import (
     ProviderError,
     RateLimitError,
 )
-from persona.backends.types import ServedCall
+from persona.backends.types import BackendAttempt, ServedCall
 from persona.errors import PersonaError
 from persona.logging import get_logger
 from persona.schema.content import ImageContent
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from persona.backends.protocol import ChatBackend
-    from persona.backends.types import ChatResponse, StreamChunk, ToolSpec
+    from persona.backends.types import ChatResponse, StreamChunk, TokenUsage, ToolSpec
     from persona.schema.conversation import ConversationMessage
 
 __all__ = ["AllModelsFailedError", "AttemptRecord", "MultiModelChatBackend"]
@@ -127,6 +128,17 @@ def _is_overloaded_error(exc: ProviderError) -> bool:
     """Whether ``exc`` is the provider saying it is busy right now (no status attached)."""
     message = str(exc).lower()
     return any(marker in message for marker in _OVERLOADED_MARKERS)
+
+
+def _status_code(exc: Exception) -> int | None:
+    """The HTTP status a :class:`PersonaError`'s context carries, parsed best-effort."""
+    if not isinstance(exc, PersonaError):
+        return None
+    raw = exc.context.get("status_code", "")
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def _is_retired_model_error(exc: ProviderError) -> bool:
@@ -322,6 +334,9 @@ class MultiModelChatBackend:
         # backends. Raises NoVisionCapableModelError if none qualify (honest
         # failure — never a silent text-only dispatch).
         candidates = self._vision_aware_candidates(messages)
+        # R9-229: this call's own history of every try, retries included. Local to the
+        # call, so a concurrent call on this shared object cannot touch it.
+        history: list[BackendAttempt] = []
         for backend in candidates:
             outcome = await self._try_backend_chat(
                 backend,
@@ -333,12 +348,13 @@ class MultiModelChatBackend:
                 top_p=top_p,
                 top_k=top_k,
                 attempts=attempts,
+                history=history,
             )
             if outcome is not None:
                 # R9-223 / R9-227: the served identity rides the response itself. It
                 # names the sub-backend that answered, so neither a concurrent call on
                 # this shared object nor a vision walk that skipped a backend can move it.
-                return outcome.model_copy(update={"served": self._served_by(backend)})
+                return outcome.model_copy(update={"served": self._served_by(backend, history)})
         raise self._build_exhausted_error(attempts)
 
     # ------------------------------------------------------------------ #
@@ -397,10 +413,15 @@ class MultiModelChatBackend:
         # Image-workspace cascade — same vision-aware candidate restriction as
         # chat(); raises NoVisionCapableModelError BEFORE any stream opens.
         candidates = self._vision_aware_candidates(messages)
+        # R9-229: this call's own history of every try (see chat()).
+        history: list[BackendAttempt] = []
         for backend in candidates:
+            index = self._chain_index(backend)
             retries_left = self._max_retries
             retried = False
             while True:
+                started = time.perf_counter()
+                is_retry = retried
                 # R9-033: commitment is now keyed on the first PAYLOAD chunk
                 # (non-whitespace delta or a tool-call delta), not on the first
                 # chunk of any kind. Payload-less chunks (usage-only finals,
@@ -440,7 +461,10 @@ class MultiModelChatBackend:
                                 pending.append(chunk)
                                 continue
                             committed = True
-                            served = self._served_by(backend)
+                            history.append(
+                                self._attempt(index, backend, None, retry=is_retry, started=started)
+                            )
+                            served = self._served_by(backend, history)
                             for held in pending:
                                 yield held.model_copy(update={"served": served})
                             pending.clear()
@@ -481,6 +505,16 @@ class MultiModelChatBackend:
                         # Past the point of no return — surface verbatim.
                         self._record_attempt(backend, exc, retried, attempts)
                         raise
+                    history.append(
+                        self._attempt(
+                            index,
+                            backend,
+                            exc,
+                            retry=is_retry,
+                            started=started,
+                            usage=self._held_usage(pending),
+                        )
+                    )
                     action = self._classify(exc)
                     if action == _SURFACE:
                         self._record_attempt(backend, exc, retried, attempts)
@@ -496,15 +530,48 @@ class MultiModelChatBackend:
         raise self._build_exhausted_error(attempts)
 
     @staticmethod
-    def _served_by(backend: ChatBackend) -> ServedCall:
-        """The served identity of ``backend`` for one call (R9-223).
+    def _served_by(backend: ChatBackend, history: list[BackendAttempt]) -> ServedCall:
+        """The served identity of ``backend`` for one call (R9-223), with its history.
 
         The configured ``provider_name`` / ``model_name`` of the sub-backend that
         answered, which is what the price tables key on. A chain is never nested inside
         another chain (the tier registry composes sub-backends only), so the identity
         of the answering sub-backend is the identity of the call.
         """
-        return ServedCall(provider=backend.provider_name, model=backend.model_name)
+        return ServedCall(
+            provider=backend.provider_name, model=backend.model_name, attempts=tuple(history)
+        )
+
+    def _chain_index(self, backend: ChatBackend) -> int:
+        """``backend``'s position in the configured chain (by identity, not the walk)."""
+        return next(i for i, member in enumerate(self._backends) if member is backend)
+
+    @staticmethod
+    def _attempt(
+        index: int,
+        backend: ChatBackend,
+        exc: Exception | None,
+        *,
+        retry: bool,
+        started: float,
+        usage: TokenUsage | None = None,
+    ) -> BackendAttempt:
+        """One try's record (R9-229): class name only, never the message (D-20-9)."""
+        return BackendAttempt(
+            index=index,
+            provider=backend.provider_name,
+            model=backend.model_name,
+            error_class=None if exc is None else type(exc).__name__,
+            status_code=None if exc is None else _status_code(exc),
+            retry=retry,
+            elapsed_ms=max(0.0, (time.perf_counter() - started) * 1000.0),
+            usage=usage,
+        )
+
+    @staticmethod
+    def _held_usage(pending: list[StreamChunk]) -> TokenUsage | None:
+        """The usage a stream reported before failing uncommitted (an empty completion)."""
+        return next((c.usage for c in reversed(pending) if c.usage is not None), None)
 
     @staticmethod
     def _chunk_has_payload(chunk: StreamChunk) -> bool:
@@ -530,6 +597,7 @@ class MultiModelChatBackend:
         max_tokens: int,
         stop: list[str] | None,
         attempts: list[AttemptRecord],
+        history: list[BackendAttempt],
         top_p: float | None = None,
         top_k: int | None = None,
     ) -> ChatResponse | None:
@@ -543,9 +611,14 @@ class MultiModelChatBackend:
             The original exception: when the classifier bucketed it as
                 SURFACE (no more backends tried).
         """
+        index = self._chain_index(backend)
         retries_left = self._max_retries
         retried = False
         while True:
+            started = time.perf_counter()
+            is_retry = retried
+            # Usage a completion reported before it was rejected as empty or degenerate.
+            failed_usage: TokenUsage | None = None
             try:
                 response = await backend.chat(
                     messages,
@@ -561,6 +634,7 @@ class MultiModelChatBackend:
                 # raise into the classifier below so it walks the same
                 # retry-then-fallback path as any other transient ProviderError.
                 if not response.content.strip() and not response.tool_calls:
+                    failed_usage = response.usage
                     raise EmptyCompletionError(
                         "backend returned a completion with no content and no tool calls",
                         context={
@@ -576,6 +650,7 @@ class MultiModelChatBackend:
                 # chain answers instead.
                 if is_degenerate_repetition(response.content):
                     words = response.content.split()
+                    failed_usage = response.usage
                     raise DegenerateCompletionError(
                         "backend returned a completion that collapsed into repetition",
                         context={
@@ -585,8 +660,14 @@ class MultiModelChatBackend:
                             "distinct_words": str(len(set(words))),
                         },
                     )
+                history.append(self._attempt(index, backend, None, retry=is_retry, started=started))
                 return response
             except Exception as exc:  # noqa: BLE001 — classifier branches below
+                history.append(
+                    self._attempt(
+                        index, backend, exc, retry=is_retry, started=started, usage=failed_usage
+                    )
+                )
                 action = self._classify(exc)
                 if action == _SURFACE:
                     self._record_attempt(backend, exc, retried, attempts)
@@ -796,14 +877,7 @@ class MultiModelChatBackend:
         attempts: list[AttemptRecord],
     ) -> None:
         """Append a frozen :class:`AttemptRecord` summarising this backend's outcome."""
-        status: int | None = None
-        if isinstance(exc, PersonaError):
-            raw = exc.context.get("status_code", "")
-            if raw:
-                try:
-                    status = int(raw)
-                except ValueError:
-                    status = None
+        status = _status_code(exc)
         attempts.append(
             AttemptRecord(
                 provider=backend.provider_name,

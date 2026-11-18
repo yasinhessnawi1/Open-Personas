@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from persona.tools.protocol import ToolDescriptor
 
 __all__ = [
+    "BackendAttempt",
     "ChatResponse",
     "ReasoningBlock",
     "ServedCall",
@@ -116,6 +117,42 @@ class ToolCallDelta(BaseModel):
     arguments_delta: str = ""
 
 
+class BackendAttempt(BaseModel):
+    """One try of one backend inside a multi-model call (R9-229).
+
+    Every try is recorded, a same-backend retry included, so a caller can tell a clean
+    first answer from one that followed a failure. Privacy (D-20-9): only the exception's
+    CLASS name is kept, never its message or context values.
+
+    Attributes:
+        index: The backend's position in the chain's configured order (not in the walk,
+            which an image request narrows to vision-capable backends).
+        provider: That backend's ``provider_name``.
+        model: That backend's configured ``model_name``.
+        error_class: ``type(exc).__name__`` of the failure, or ``None`` for the try that
+            served the call.
+        status_code: The failure's HTTP status when its context carried one.
+        retry: ``True`` when this try repeated the previous try on the same backend.
+        elapsed_ms: From the try's start to its failure, or, for the serving try, to the
+            response (non-streaming) or the commit to its stream.
+        usage: Tokens a FAILED try reported (an empty or degenerate completion is still a
+            completion the provider bills). ``None`` for the serving try, whose usage is
+            the call's own, and for a failure that reported none. Not charged to the
+            user (D-ORCH-11-18-h); carried so the cost can be logged.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    index: int = Field(ge=0)
+    provider: str
+    model: str
+    error_class: str | None = None
+    status_code: int | None = None
+    retry: bool = False
+    elapsed_ms: float = Field(default=0.0, ge=0.0)
+    usage: TokenUsage | None = None
+
+
 class ServedCall(BaseModel):
     """Which backend served ONE call, carried on that call's own result (R9-223).
 
@@ -131,12 +168,34 @@ class ServedCall(BaseModel):
         model: The serving sub-backend's configured ``model_name``. This is the id the
             price tables are keyed on, NOT the provider's echo in
             :attr:`ChatResponse.model` (which can be a dated variant).
+        attempts: Every try of this call in order, the serving one last (R9-229).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: str
     model: str
+    attempts: tuple[BackendAttempt, ...] = ()
+
+    @property
+    def first_attempt(self) -> bool:
+        """Whether the call was answered with no failed try before it (D-R9-226 ii)."""
+        return all(attempt.error_class is None for attempt in self.attempts)
+
+    def fell_through(self) -> tuple[BackendAttempt, ...]:
+        """One record per backend that failed and was left for the next, in chain order.
+
+        The shape of the old per-backend ledger (the TurnLog ``tier_fallback_*``
+        fields): the LAST failed try of each backend other than the one that served,
+        so a backend that was retried and then failed shows ``retry=True``, and a
+        retry on the serving backend is not a fallback.
+        """
+        served_index = self.attempts[-1].index if self.attempts else None
+        last_failure: dict[int, BackendAttempt] = {}
+        for attempt in self.attempts:
+            if attempt.error_class is not None and attempt.index != served_index:
+                last_failure[attempt.index] = attempt
+        return tuple(last_failure.values())
 
 
 class ChatResponse(BaseModel):
