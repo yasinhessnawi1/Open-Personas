@@ -418,6 +418,26 @@ def test_a_rollback_racing_a_forget_of_its_evidence_puts_nothing_back(head_index
 
 
 @_BOTH_SHAPES
+def test_a_rollback_is_refused_when_any_citation_was_forgotten_not_only_the_first(
+    head_index: bool,
+) -> None:
+    """The target cites a and x, and only x goes: every citation is required, not the first."""
+    transport = _Transport(head_index=head_index)
+    store, audit = _core(transport)
+    _evidence(transport, "a", "x", "b")
+    _block(store, "summary of a and x", "a", "x")
+    _block(store, "summary of b", "b")
+    transport.gate_next_write(CORE_MEMORY_KIND, _forget(transport, audit, "x"))
+
+    with pytest.raises(ForgottenEvidenceError):
+        store.rollback(_PERSONA, _CORE, 1, source=WriteSource.SYSTEM)
+
+    assert transport.texts(CORE_MEMORY_KIND) == ["summary of b"]
+    assert "x" not in _cited(transport)
+    validate_chain(transport.chain(CORE_MEMORY_KIND, _CORE))
+
+
+@_BOTH_SHAPES
 def test_a_rollback_whose_evidence_stays_still_lands_after_a_lost_race(head_index: bool) -> None:
     """The guard must not cost a legitimate rollback: an unrelated forget only makes it retry."""
     transport = _Transport(head_index=head_index)
