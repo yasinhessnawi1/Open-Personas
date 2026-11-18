@@ -1006,3 +1006,51 @@ def test_every_kit_timer_is_installed_enabled_and_checked() -> None:
     assert "systemctl is-active --quiet" in preflight
     for timer in (KIT / "systemd").glob("*.timer"):
         assert timer.name in enabled, f"provision.sh never enables {timer.name}"
+
+
+def test_deploy_prunes_the_build_cache_after_a_successful_build() -> None:
+    """R9-289: BuildKit's cache grows by every build; it goes once the build succeeded."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    build_block = deploy[deploy.index('if [ "${SKIP_BUILD}" = 0 ]; then\n  say "building') :]
+    build_block = build_block[: build_block.index("\nfi\n")]
+    assert build_block.index("compose build") < build_block.index("docker builder prune -f")
+    prune = next(line for line in build_block.splitlines() if "docker builder prune" in line)
+    assert '|| say "WARNING' in prune, "a prune that fails never fails the deploy"
+
+
+def test_every_compose_exec_and_run_in_deploy_reads_from_dev_null() -> None:
+    """R9-289: `compose exec` and `compose run` read stdin; fed a script on stdin, they would
+    swallow the rest of it (review M4 added the runs: migrate and the Caddyfile check)."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    # One logical command per entry: backslash continuations joined.
+    commands = deploy.replace("\\\n", " ").splitlines()
+    calls = [
+        c
+        for c in commands
+        if re.search(r"\bcompose (exec|run)\b", c) and not c.lstrip().startswith("#")
+    ]
+    assert len(calls) == 6, calls
+    assert all("</dev/null" in c for c in calls), [c for c in calls if "</dev/null" not in c]
+
+
+def test_deploy_never_prunes_images_or_the_whole_system() -> None:
+    """R9-289 review L7: only the build cache goes. The rollback is an image (:previous) and
+    the database is a volume, which an image or system prune could take with it."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in deploy.splitlines() if not line.lstrip().startswith("#"))
+    # Round 3 LOW-3: one logical command per line, so a flag on a continued line still counts.
+    code = code.replace("\\\n", " ")
+    for destroys in (
+        "image prune",
+        "system prune",
+        "volume prune",
+        "volume rm",
+        "volume remove",
+        "image rm",
+        "image remove",
+    ):
+        assert destroys not in code, destroys
+    # Round 2 LOW-3: `down -v` drops the database volume; `rmi` the rollback image. Round 3
+    # LOW-3: so does `-v` inside a flag group (`down -fv`) or spelled `--volumes`.
+    assert not re.search(r"\bdown\b[^\n]*(\s-[a-z]*v\b|--volumes\b)", code), "down -v"
+    assert not re.search(r"\brmi\b", code), "rmi"

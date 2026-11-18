@@ -7,7 +7,8 @@
 #      migrating an empty database would create a fresh schema that the restore then
 #      refuses to overwrite
 #   3. keep the images the running containers use as :previous (the rollback)
-#   4. build natively on the host (it competes with live traffic: deploy off-hours)
+#   4. build natively on the host (it competes with live traffic: deploy off-hours), then
+#      prune the build cache
 #   5. a pg_dump BEFORE migrating (migrations are not reversible by image rollback)
 #   6. migrate: the `migrate` service runs packages/api/release.py once
 #   7. up -d, then wait for api /livez and /healthz
@@ -34,6 +35,8 @@ say() { echo "deploy: $*" >&2; }
 
 # shellcheck source=lib/compose.sh
 . "${SCRIPT_DIR}/lib/compose.sh"
+# Every `compose exec` and `compose run` here reads from /dev/null: it reads stdin otherwise,
+# and would swallow the rest of a script fed to bash on stdin (`ssh host bash -s < deploy.sh`).
 # The database, the images and the data live on the block volume: never deploy without it.
 require_data_mount
 
@@ -45,18 +48,19 @@ say "host profile: ${OP_HOST_PROFILE}"
 compose up -d postgres
 ready=0
 for _ in $(seq 1 60); do
-  if compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona >/dev/null 2>&1; then
+  if compose exec -T postgres pg_isready -h 127.0.0.1 -U persona -d persona </dev/null >/dev/null 2>&1; then
     ready=1; break
   fi
   sleep 2
 done
 [ "${ready}" = 1 ] || die "postgres did not become ready"
 tables="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
-  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")" || die "could not query the database"
+  -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'" </dev/null)" \
+  || die "could not query the database"
 [ "${tables}" != "0" ] || die "the database is empty: run bin/restore.sh first (RUNBOOK.md step 5)"
 # The api's DATABASE_URL is persona_platform: it must exist and must not be a superuser.
 platform_super="$(compose exec -T postgres psql -U persona -d persona -X -q -t -A \
-  -c "SELECT rolsuper::text FROM pg_roles WHERE rolname = 'persona_platform'")" \
+  -c "SELECT rolsuper::text FROM pg_roles WHERE rolname = 'persona_platform'" </dev/null)" \
   || die "could not query the database"
 [ "${platform_super}" = "false" ] \
   || die "persona_platform is missing or a superuser: run bin/restore.sh --roles-only"
@@ -81,6 +85,9 @@ fi
 if [ "${SKIP_BUILD}" = 0 ]; then
   say "building $(git -C "${KIT_DIR}" rev-parse --short HEAD)"
   compose build
+  # The build succeeded (set -e): drop BuildKit's cache, which grows by every build and is
+  # not needed to run or roll back (R9-289). A prune that fails never fails the deploy.
+  docker builder prune -f >/dev/null || say "WARNING: could not prune the build cache"
 fi
 
 # --- 5 ------------------------------------------------------------------------------
@@ -88,18 +95,19 @@ umask 077
 mkdir -p "${OP_DATA_DIR}/backups"
 dump="${OP_DATA_DIR}/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
 say "pre-migrate dump: ${dump}"
-compose exec -T postgres pg_dump -U persona -Fc persona > "${dump}" || die "pre-migrate dump"
+compose exec -T postgres pg_dump -U persona -Fc persona </dev/null > "${dump}" || die "pre-migrate dump"
 chmod 600 "${dump}"
 
 # --- 6 ------------------------------------------------------------------------------
 say "migrating"
-compose run --rm migrate || die "migration failed; nothing was restarted (the old containers still serve)"
+compose run --rm migrate </dev/null \
+  || die "migration failed; nothing was restarted (the old containers still serve)"
 
 # --- 7 ------------------------------------------------------------------------------
 # Caddy runs with its admin API off, so a bad Caddyfile is only found at start: check it
 # first, with the same image and env file.
 compose run --rm --no-deps -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
-  >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
+  </dev/null >/dev/null || die "the Caddyfile does not validate (run the same command without >/dev/null)"
 # The api's HOME (/var/lib/persona/home in the container) must exist and belong to the data
 # uid: the image's own home belongs to uid 1000. Made here rather than by provision.sh,
 # because restore.sh refuses to unpack into a data directory that is not empty.

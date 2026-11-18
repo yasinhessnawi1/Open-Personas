@@ -554,3 +554,471 @@ def test_a_removed_netfilter_persistent_does_not_fail_the_script() -> None:
     branch = provision[provision.index(check) : provision.index("\n  fi\n", provision.index(check))]
     assert "systemctl mask netfilter-persistent" in branch
     assert "else" in branch
+
+
+# --- containerd's root on the block volume (R9-289) ------------------------------------------
+
+
+def test_the_oracle_profile_puts_containerds_root_on_the_block_volume() -> None:
+    assert _profile()["OP_CONTAINERD_ROOT"] == "/srv/containerd"
+
+
+def _containerd(tmp_path: Path, config: str | None) -> subprocess.CompletedProcess[str]:
+    path = tmp_path / "config.toml"
+    if config is not None:
+        path.write_text(config, encoding="utf-8", newline="\n")
+    return _bash(
+        f'set -eu; . "{(LIB / "containerd_root.sh").as_posix()}"; '
+        f'containerd_config_with_root "{path.as_posix()}" /srv/containerd'
+    )
+
+
+# The containerd.io package's config, abridged: comments and the one top-level key.
+CONTAINERD_DEFAULT = (
+    "#   Copyright 2018-2022 Docker Inc.\n"
+    "\n"
+    'disabled_plugins = ["cri"]\n'
+    "\n"
+    '#root = "/var/lib/containerd"\n'
+)
+
+
+@needs_bash
+def test_containerds_root_is_prepended_above_the_packages_config(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, CONTAINERD_DEFAULT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+
+
+@needs_bash
+def test_setting_containerds_root_twice_changes_nothing(tmp_path: Path) -> None:
+    once = _containerd(tmp_path, CONTAINERD_DEFAULT)
+    twice = _containerd(tmp_path, once.stdout)
+    assert twice.returncode == 0, twice.stderr
+    assert twice.stdout == once.stdout
+
+
+@needs_bash
+def test_another_root_already_set_is_refused(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, 'root = "/var/lib/containerd"\n')
+    assert result.returncode == 1
+    assert "already sets root to /var/lib/containerd" in result.stderr
+    assert result.stdout == ""
+
+
+@needs_bash
+def test_a_root_inside_a_table_is_not_containerds_root(tmp_path: Path) -> None:
+    config = 'version = 2\n\n[plugins."io.containerd.grpc.v1.cri"]\n  root = "/x"\n'
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + config
+
+
+@needs_bash
+def test_a_missing_config_becomes_just_the_root(tmp_path: Path) -> None:
+    result = _containerd(tmp_path, None)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n'
+
+
+def test_provision_sets_containerds_root_before_docker_restarts() -> None:
+    provision = _text("bin/provision.sh")
+    lib = provision.index('. "${SCRIPT_DIR}/lib/containerd_root.sh"')
+    apply = provision.index("apply_containerd_root /etc/containerd/config.toml")
+    assert lib < apply < provision.index("systemctl restart docker")
+    call = provision[apply : provision.index("\n", provision.index("|| die", apply))]
+    assert '"${OP_CONTAINERD_ROOT}" "${OP_DATA_MOUNT:-}"' in call
+    assert "containerd.service.d/10-open-persona.conf" in call
+
+
+# docker info answers unless docker.down exists; ps -aq and images -q print their own files
+# (review M1: a stub that cannot tell them apart could not catch a guard that asks only one).
+STUB_DOCKER = (
+    "#!/usr/bin/env bash\n"
+    'case "$1" in\n'
+    '  info) [ -e "${STUB_DIR}/docker.down" ] && exit 1; exit 0 ;;\n'
+    '  ps) cat "${STUB_DIR}/ps.out" 2>/dev/null || true ;;\n'
+    '  images) cat "${STUB_DIR}/images.out" 2>/dev/null || true ;;\n'
+    "esac\n"
+)
+STUB_SYSTEMCTL = '#!/usr/bin/env bash\necho "$*" >> "${STUB_DIR}/systemctl.log"\n'
+# `install -d -m MODE DIR`, as the lib calls it: the directory, without the chmod (which Git
+# Bash cannot do under a Windows temp directory).
+STUB_INSTALL = '#!/usr/bin/env bash\nmkdir -p "${@: -1}"\n'
+MOVED = 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+DROPIN = "[Unit]\nRequiresMountsFor=/srv\n"
+
+
+def _failing_stub(name: str, match: str) -> str:
+    """A stub that fails only the call whose arguments contain ``match``.
+
+    Every other call goes on to the real command (the stub's directory leads PATH), or, for
+    install, to the mkdir that STUB_INSTALL does.
+    """
+    rest = {
+        "install": 'mkdir -p "${@: -1}"',
+        "systemctl": 'echo "$*" >> "${STUB_DIR}/systemctl.log"',
+    }.get(name, f'PATH="${{PATH#*:}}" exec {name} "$@"')
+    return f'#!/usr/bin/env bash\ncase " $* " in *{match}*) exit 1 ;; esac\n{rest}\n'
+
+
+def _apply(
+    tmp_path: Path,
+    *,
+    config: str | None,
+    images: str,
+    dropin: str | None,
+    failing: tuple[tuple[str, str], ...] = (),
+    containers: str = "",
+    docker_down: bool = False,
+    held: str | None = None,
+    bak: str | None = None,
+    stuck_dropin_tmp: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """apply_containerd_root on files under tmp_path, with docker and systemctl stubbed."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in (
+        ("docker", STUB_DOCKER),
+        ("systemctl", STUB_SYSTEMCTL),
+        ("install", STUB_INSTALL),
+        *((name, _failing_stub(name, match)) for name, match in failing),
+    ):
+        (stubs / name).write_text(body, encoding="utf-8", newline="\n")
+        (stubs / name).chmod(0o755)
+    (stubs / "images.out").write_text(images, encoding="utf-8", newline="\n")
+    (stubs / "ps.out").write_text(containers, encoding="utf-8", newline="\n")
+    if docker_down:
+        (stubs / "docker.down").touch()
+    old_root = tmp_path / "var-lib-containerd"
+    if held is not None:  # a file in this directory under the old root
+        (old_root / held).mkdir(parents=True)
+        (old_root / held / "x").write_text("layer", encoding="utf-8")
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    if config is not None:
+        (etc / "config.toml").write_text(config, encoding="utf-8", newline="\n")
+    if dropin is not None:
+        (etc / "dropin.conf").write_text(dropin, encoding="utf-8", newline="\n")
+    if bak is not None:
+        (etc / "config.toml.bak-r9289").write_text(bak, encoding="utf-8", newline="\n")
+    if stuck_dropin_tmp:
+        # A directory where the drop-in's temporary goes: its printf fails for root too
+        # (round 3 LOW-5: root writes through a 0444 file, so that failed for no one but us).
+        (etc / "dropin.conf.tmp").mkdir()
+    result = _bash(
+        # A POSIX path for PATH: a "C:/..." entry would split at its colon.
+        f'set -eu; export STUB_DIR="{stubs.as_posix()}"; '
+        f'export CONTAINERD_DEFAULT_ROOT="{old_root.as_posix()}"; '
+        f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"; '
+        f'. "{(LIB / "containerd_root.sh").as_posix()}"; '
+        f'apply_containerd_root "{(etc / "config.toml").as_posix()}" '
+        f'"{(tmp_path / "srv-containerd").as_posix()}" /srv "{(etc / "dropin.conf").as_posix()}" '
+        # As provision.sh calls it, in a `||` list: errexit is off inside, as it is there, so
+        # only the function's own `|| return 1` can stop it (review M2).
+        "|| exit 1"
+    )
+    log = stubs / "systemctl.log"
+    return result, log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@needs_bash
+def test_a_host_already_on_the_root_with_images_is_a_clean_no_op(tmp_path: Path) -> None:
+    """The Oracle host, moved by hand on 2026-11-16: the root is set and Docker holds images.
+
+    Re-running provision must neither die on the images nor touch or restart anything.
+    """
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=DROPIN)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert systemctl == [], "no reload, no restart"
+    assert not (tmp_path / "srv-containerd").exists(), "nothing created"
+
+
+@needs_bash
+def test_a_root_to_move_under_images_is_refused_and_nothing_changes(tmp_path: Path) -> None:
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="sha256:abc\n", dropin=None
+    )
+    assert result.returncode == 1
+    assert "Docker holds containers or images" in result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
+
+
+@needs_bash
+def test_a_fresh_host_gets_the_root_the_drop_in_and_one_restart(tmp_path: Path) -> None:
+    root = (tmp_path / "srv-containerd").as_posix()
+    result, systemctl = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    config = (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8")
+    assert config == f'root = "{root}"\n' + CONTAINERD_DEFAULT
+    assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
+    assert (tmp_path / "srv-containerd").is_dir()
+    assert systemctl == ["daemon-reload", "restart containerd"]
+
+
+@needs_bash
+def test_the_live_hosts_first_re_run_reloads_and_never_restarts(tmp_path: Path) -> None:
+    """Review H1, the Oracle host as it is: root set by hand, no drop-in, images present.
+
+    The re-run writes the drop-in and reloads systemd; containerd keeps running.
+    """
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=None)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert (tmp_path / "etc" / "dropin.conf").read_text(encoding="utf-8") == DROPIN
+    assert systemctl == ["daemon-reload"], "no restart under the running app"
+
+
+@needs_bash
+def test_the_config_is_moved_into_place_and_the_original_kept(tmp_path: Path) -> None:
+    """Review M2: written whole to config.toml.tmp and moved; the package's config kept."""
+    result, _ = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    etc = tmp_path / "etc"
+    assert (etc / "config.toml.bak-r9289").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert not (etc / "config.toml.tmp").exists()
+    assert not (etc / "config.toml.bak-r9289.tmp").exists()
+    assert not (etc / "dropin.conf.tmp").exists()
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "broken",
+    [
+        ("install", "srv-containerd"),  # the new root
+        ("cp", "bak-r9289"),  # the original's copy
+        ("mv", "bak-r9289.tmp"),  # ...moved into place
+        ("chmod", "config.toml.tmp"),
+        ("mv", "config.toml.tmp"),
+    ],
+    ids=lambda b: b[0],
+)
+def test_a_step_that_fails_fails_the_whole_and_restarts_nothing(
+    tmp_path: Path, broken: tuple[str, str]
+) -> None:
+    """Review M2: under `|| die` errexit is off, so each step must stop the function itself.
+
+    Each stub fails one call only, so it is that step's own check that stops the function,
+    not a later step's; the drop-in (already in place) adds nothing to restart.
+    """
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=DROPIN, failing=(broken,)
+    )
+    assert result.returncode == 1
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("signal", "said"),
+    [
+        ({"containers": "c0ffee\n"}, "Docker holds containers or images"),
+        ({"docker_down": True}, "does not answer"),
+        ({"held": "io.containerd.content.v1.content/blobs/sha256"}, "holds image content"),
+        ({"held": "io.containerd.snapshotter.v1.overlayfs/snapshots"}, "holds image content"),
+    ],
+    ids=["containers only", "docker down", "blobs on disk", "snapshots on disk"],
+)
+def test_the_move_is_refused_whatever_says_something_is_there(
+    tmp_path: Path, signal: dict[str, Any], said: str
+) -> None:
+    """Review M1: containers alone, an unreachable Docker, or content on the old root's disk."""
+    result, systemctl = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None, **signal
+    )
+    assert result.returncode == 1
+    assert said in result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == CONTAINERD_DEFAULT
+    assert systemctl == []
+
+
+@needs_bash
+def test_empty_content_directories_do_not_stop_the_move(tmp_path: Path) -> None:
+    old_root = tmp_path / "var-lib-containerd"
+    for d in (
+        "io.containerd.content.v1.content/blobs/sha256",
+        "io.containerd.snapshotter.v1.overlayfs/snapshots",
+    ):
+        (old_root / d).mkdir(parents=True)
+    result, systemctl = _apply(tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None)
+    assert result.returncode == 0, result.stderr
+    assert systemctl == ["daemon-reload", "restart containerd"]
+
+
+BOM = "\ufeff"
+
+
+@needs_bash
+def test_a_byte_order_mark_is_dropped_above_the_new_root(tmp_path: Path) -> None:
+    """Review L1: the root line must be the file's first, not after an invisible mark."""
+    result = _containerd(tmp_path, BOM + CONTAINERD_DEFAULT)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'root = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+
+
+@needs_bash
+def test_a_root_set_after_a_byte_order_mark_is_no_change(tmp_path: Path) -> None:
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = BOM + MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(tmp_path, config=config, images="sha256:abc\n", dropin=DROPIN)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "etc" / "config.toml").read_text(encoding="utf-8") == config
+    assert systemctl == []
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("config", "said"),
+    [
+        ('"root" = "/var/lib/containerd"\n', "already sets root to /var/lib/containerd"),
+        ("root = '/srv/containerd'\n", "cannot read"),
+        ("root = /srv/containerd\n", "cannot read"),
+        ('root = ""\n', "empty value"),
+    ],
+    ids=["quoted key", "single quotes", "bare value", "empty"],
+)
+def test_a_root_this_cannot_take_as_set_is_refused_never_prepended(
+    tmp_path: Path, config: str, said: str
+) -> None:
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 1
+    assert said in result.stderr
+    assert result.stdout == ""
+
+
+@needs_bash
+def test_a_quoted_root_key_set_to_the_root_is_no_change(tmp_path: Path) -> None:
+    config = '"root" = "/srv/containerd"\n' + CONTAINERD_DEFAULT
+    result = _containerd(tmp_path, config)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == config
+
+
+def test_preflight_checks_containerds_root_against_the_profile() -> None:
+    """Review L2: the root the running containerd reads, compared with OP_CONTAINERD_ROOT."""
+    preflight = _text("bin/preflight.sh")
+    block = preflight[preflight.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then') :]
+    block = block[: block.index("\nfi\n")]
+    assert "containerd config dump" in block
+    assert "^root = " in block
+    assert '[ "${containerd_root}" = "${OP_CONTAINERD_ROOT}" ]' in block
+    assert "|| bad " in block
+
+
+def _preflight_root_check(tmp_path: Path, dump: str) -> subprocess.CompletedProcess[str]:
+    """The preflight's containerd root block, run as written, with `sudo` stubbed to print
+    ``dump`` for `containerd config dump` (review HIGH-1)."""
+    preflight = _text("bin/preflight.sh")
+    start = preflight.index('if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then')
+    block = preflight[start : preflight.index("\nfi\n", start) + 4]
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "dump.out").write_text(dump, encoding="utf-8", newline="\n")
+    (stubs / "sudo").write_text(
+        '#!/usr/bin/env bash\ncat "${STUB_DIR}/dump.out"\n', encoding="utf-8", newline="\n"
+    )
+    (stubs / "sudo").chmod(0o755)
+    script = tmp_path / "check.sh"
+    script.write_text(
+        "set -u\nfails=0\n"
+        'ok() { echo "OK $*"; }\nbad() { echo "BAD $*"; fails=$((fails + 1)); }\n'
+        f'export STUB_DIR="{stubs.as_posix()}"\n'
+        f'PATH="$(cd "{stubs.as_posix()}" && pwd):$PATH"\n'
+        "OP_CONTAINERD_ROOT=/srv/containerd\n" + block,
+        encoding="utf-8",
+        newline="\n",
+    )
+    return _bash(f'bash "{script.as_posix()}"')
+
+
+CONTAINERD_DUMP = "version = 3\n{root}\nstate = '/run/containerd'\n\n[grpc]\n  address = 'x'\n"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "line",
+    ["root = '/srv/containerd'", 'root = "/srv/containerd"'],
+    ids=["containerd 2 single quotes", "containerd 1 double quotes"],
+)
+def test_preflight_reads_containerds_root_in_either_quote_style(tmp_path: Path, line: str) -> None:
+    """Review HIGH-1: containerd 2.4.2 on the Oracle host prints single quotes."""
+    result = _preflight_root_check(tmp_path, CONTAINERD_DUMP.format(root=line))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK containerd's root is /srv/containerd"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "dump",
+    ["", CONTAINERD_DUMP.format(root="root = '/var/lib/containerd'")],
+    ids=["empty dump", "another root"],
+)
+def test_preflight_fails_an_empty_or_other_root(tmp_path: Path, dump: str) -> None:
+    result = _preflight_root_check(tmp_path, dump)
+    assert result.stdout.startswith("BAD containerd's root is"), result.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("failing", "stuck", "calls"),
+    [
+        # Round 3 LOW-4: the drop-in's directory; on the live host's state the config's own
+        # `install -d` of the same directory never runs, so only the drop-in's can fail here.
+        ((("install", "/etc"),), False, []),
+        ((), True, []),  # the drop-in's printf
+        ((("chmod", "dropin.conf.tmp"),), False, []),  # round 3 LOW-4
+        ((("mv", "dropin.conf.tmp"),), False, []),  # the drop-in's mv
+        ((("systemctl", "daemon-reload"),), False, []),
+    ],
+    ids=["drop-in install", "drop-in printf", "drop-in chmod", "drop-in mv", "daemon-reload"],
+)
+def test_a_failing_drop_in_step_fails_the_whole(
+    tmp_path: Path,
+    failing: tuple[tuple[str, str], ...],
+    stuck: bool,  # noqa: FBT001
+    calls: list[str],
+) -> None:
+    """Round 2 LOW-2: the drop-in's own steps, on the live host's state (root already set)."""
+    root = (tmp_path / "srv-containerd").as_posix()
+    config = MOVED.replace("/srv/containerd", root)
+    result, systemctl = _apply(
+        tmp_path,
+        config=config,
+        images="sha256:abc\n",
+        dropin=None,
+        failing=failing,
+        stuck_dropin_tmp=stuck,
+    )
+    assert result.returncode == 1
+    assert systemctl == calls
+
+
+@needs_bash
+def test_a_failing_restart_fails_the_whole(tmp_path: Path) -> None:
+    result, systemctl = _apply(
+        tmp_path,
+        config=CONTAINERD_DEFAULT,
+        images="",
+        dropin=DROPIN,
+        failing=(("systemctl", "restart"),),
+    )
+    assert result.returncode == 1
+    assert systemctl == ["daemon-reload"]
+
+
+@needs_bash
+def test_an_existing_backup_survives_a_rewrite(tmp_path: Path) -> None:
+    """Round 2 LOW-2: the first backup is the package's config; it is never overwritten."""
+    result, _ = _apply(
+        tmp_path, config=CONTAINERD_DEFAULT, images="", dropin=None, bak="the first backup\n"
+    )
+    assert result.returncode == 0, result.stderr
+    bak = tmp_path / "etc" / "config.toml.bak-r9289"
+    assert bak.read_text(encoding="utf-8") == "the first backup\n"

@@ -238,14 +238,140 @@ backup of the block volume, "provisioned, empty".
 `/srv` is the 100 GB block volume (`/dev/oracleoci/oraclevdb`). If it is ever missing
 (detached, or the mount failed at boot), `nofail` lets the host boot, and then:
 
-- Docker does not start (`RequiresMountsFor=/srv`), so no container comes up on an empty
-  data root on the boot disk;
+- neither containerd nor Docker starts (`RequiresMountsFor=/srv` on both), so no container
+  comes up on an empty data root or containerd root on the boot disk;
 - `bin/deploy.sh`, `bin/backup.sh` and `bin/restore.sh` stop with "the block volume is
   missing".
 
 Reattach it in the console (paravirtualized), then `sudo mount /srv` and
-`sudo systemctl start docker`. `provision.sh` refuses to format a device that already holds
+`sudo systemctl start containerd docker`. `provision.sh` refuses to format a device that already holds
 anything but its own `op-data` filesystem, and refuses to mount over a non-empty `/srv`.
+
+### containerd's root (R9-289)
+
+Docker keeps its image layers in containerd's snapshotter, under containerd's root, not under
+Docker's data root. `provision.sh` puts that root on the block volume (`OP_CONTAINERD_ROOT`,
+`/srv/containerd` on Oracle) on a fresh host. It refuses to move a root that must change
+while Docker holds containers or images. On a host already on the root it never restarts
+containerd: at most it adds containerd's wait for the block volume (a drop-in and a
+`daemon-reload`, taking effect at the next start).
+
+**The Oracle core host was moved by hand on 2026-11-16, 17:22 to 17:28 UTC**, with the
+owner's approval, by the steps below: its `/etc/containerd/config.toml` starts with
+`root = "/srv/containerd"`, the original is kept as `/etc/containerd/config.toml.bak-r9289`,
+and `/var/lib/containerd` is gone. The first re-run of `provision.sh` there adds containerd's
+wait for the block volume (a drop-in and a `daemon-reload`, no restart); later re-runs change
+nothing.
+
+For any other host that already holds images on the boot disk: as ubuntu, with sudo,
+outside call hours. **Stop the app first.** `daemon.json` sets `live-restore: true`, so
+stopping Docker alone leaves the containers running on the old snapshot mounts, and copying
+containerd's root under running containers is not safe. Expect about 6 minutes of downtime
+for about 10 GB of images.
+
+Paste the numbered steps one at a time, never a block whole, and read what each prints
+before the next: several must print nothing, and step 6 can print STOP.
+
+```bash
+# on the host, as ubuntu
+# 1. a fresh backup first; it must end Result=success
+sudo systemctl start open-persona-backup.service
+systemctl show -p Result open-persona-backup.service
+
+# 2. stop the app (live-restore would keep it running through step 3)
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
+sudo docker ps -q                  # must print nothing; stop any container it lists first
+
+# 3. stop Docker and containerd
+sudo systemctl stop docker.socket docker containerd
+pgrep -a containerd-shim           # must print nothing: no shim may hold the old root
+
+# 4. copy the root (--delete: a redo after a rollback drops what the first copy left)
+sudo rsync -aHAX --numeric-ids --delete /var/lib/containerd/ /srv/containerd/
+
+# 5. the copy is exact: this dry run must print nothing; stop here (and roll back) if it does
+sudo rsync -aHAXn --numeric-ids --delete -i /var/lib/containerd/ /srv/containerd/
+```
+
+Step 6 sets the root, and says so when a paste before already did: then go on to step 7.
+When it prints STOP, the config sets a root this procedure did not, so do not go on: roll
+back (below), skipping its `cp` line, since step 6 changed nothing.
+
+```bash
+# on the host, as ubuntu
+# 6. only when no root is set yet, back up the config (an earlier backup is never
+#    overwritten) and prepend the root. Not `cp -n`: coreutils 9.2 to 9.4 (Ubuntu 24.04)
+#    make it fail when it skips, so a redo after a rollback would never set the root.
+if sudo grep -qx 'root = "/srv/containerd"' /etc/containerd/config.toml; then
+  echo "step 6 already done, go on to step 7"
+elif sudo grep -qE '^[[:space:]]*"?root"?[[:space:]]*=' /etc/containerd/config.toml; then
+  echo "STOP: containerd's config sets another root; do not go on"
+else
+  { sudo test -e /etc/containerd/config.toml.bak-r9289 \
+      || sudo cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak-r9289; } \
+    && sudo sed -i '1i root = "/srv/containerd"' /etc/containerd/config.toml
+fi
+```
+
+```bash
+# on the host, as ubuntu
+# 7. keep the old root aside; do not delete it yet
+sudo mv /var/lib/containerd /var/lib/containerd.old
+
+# 8. containerd first, then Docker
+sudo systemctl start containerd
+sudo systemctl start docker
+
+# 9. the images are there
+sudo docker images | grep 'open-persona/api' | grep current
+
+# 10. the app, then /healthz 200 (waited for: the api takes a while to start)
+sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
+healthy=0
+for _ in $(seq 1 60); do
+  curl -fsS -o /dev/null http://127.0.0.1:8000/healthz && { healthy=1; break; }
+  sleep 5
+done
+[ "${healthy}" = 1 ] && echo "healthz 200" || echo "healthz NOT 200 after 5 minutes: roll back (below)"
+
+# 11. preflight
+sudo -u deploy deploy/server/bin/preflight.sh </dev/null
+
+# 12. containerd's root, and new files landing under it
+sudo containerd config dump | grep ^root
+sudo find /srv/containerd -newer /etc/containerd/config.toml | head
+
+# 13. only once 9 to 12 all passed
+sudo rm -rf /var/lib/containerd.old
+```
+
+**Rolling back**, if any check fails before step 13. Stop the app first, as in step 2:
+`live-restore` would otherwise keep containers running on the new root while it is put back.
+
+```bash
+# on the host, as ubuntu
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh stop </dev/null
+sudo docker ps -q                  # must print nothing; stop any container it lists first
+sudo systemctl stop docker.socket docker containerd
+pgrep -a containerd-shim           # must print nothing
+sudo cp -a /etc/containerd/config.toml.bak-r9289 /etc/containerd/config.toml   # after step 6 only
+sudo mv -T /var/lib/containerd.old /var/lib/containerd   # after step 7 only
+sudo systemctl start containerd
+sudo systemctl start docker
+cd /opt/open-persona/repo && sudo -u deploy deploy/server/bin/compose.sh up -d </dev/null
+```
+
+The `mv` takes `-T` so that it refuses when `/var/lib/containerd` is there again and not
+empty: a plain `mv` would put the old root inside it, as `/var/lib/containerd/containerd.old`,
+and containerd would start on a root without the images. If it refuses, stop there and look
+at what `/var/lib/containerd` holds before going on.
+
+After a rollback, `provision.sh` refuses (containerd's old root holds images again) until
+the move is redone from step 1; `/srv/containerd` still holds the first copy, which step 4's
+rsync brings up to date.
+
+Then, after a move that went through, re-run `provision.sh`: it adds containerd's wait for
+the block volume (a drop-in and a `daemon-reload`, no restart) and is otherwise a no-op.
 
 ## Step 4: the env files
 

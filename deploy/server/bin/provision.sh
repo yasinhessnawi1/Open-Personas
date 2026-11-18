@@ -432,6 +432,19 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
   apt-get update -q
   apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
+# --- containerd's root on the block volume (R9-289) -----------------------------------------
+# Docker keeps image layers in containerd's snapshotter, under containerd's root and not under
+# its data-root: on the boot disk unless moved. Set on a fresh host, before Docker restarts
+# below; a host already on the root (the Oracle host, moved by hand) is a clean no-op, images
+# and all. A root that must still move is never moved under containers or images
+# (lib/containerd_root.sh, apply_containerd_root).
+if [ -n "${OP_CONTAINERD_ROOT:-}" ]; then
+  # shellcheck source=lib/containerd_root.sh
+  . "${SCRIPT_DIR}/lib/containerd_root.sh"
+  apply_containerd_root /etc/containerd/config.toml "${OP_CONTAINERD_ROOT}" "${OP_DATA_MOUNT:-}" \
+    /etc/systemd/system/containerd.service.d/10-open-persona.conf \
+    || die "containerd's root cannot move to ${OP_CONTAINERD_ROOT} (see above): RUNBOOK.md, 'containerd's root'"
+fi
 # Moving the data root under existing containers or images would orphan them silently.
 current_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
 if [ -n "${current_root}" ] && [ "${current_root}" != "${OP_DOCKER_DATA_ROOT}" ] \
