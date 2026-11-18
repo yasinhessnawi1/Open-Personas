@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -43,7 +44,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from persona.graph._schema import (
     EMBEDDING_DIM,
@@ -57,6 +58,8 @@ from persona.graph._schema import (
 from persona.graph.errors import (
     GraphError,
     GraphIndexError,
+    GraphInteractionGoneError,
+    GraphLinkTargetGoneError,
     GraphMergeConflictError,
     GraphNodeBusyError,
     GraphPersonaGoneError,
@@ -77,7 +80,7 @@ from persona.graph.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from sqlalchemy import Connection, Engine
@@ -143,6 +146,50 @@ _DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
 # R9-284: a graph write holds the persona it names (see PostgresGraphBackend._hold_personas).
 _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR KEY SHARE")
+# R9-304: and the conversation each entry it adds was learned from.
+_HOLD_CONVERSATION = text(
+    "SELECT 1 FROM conversations WHERE id = :c AND owner_id = :o FOR KEY SHARE"
+)
+# The kind an entry's interaction id must have to name a ``conversations`` row. A run's or a
+# task leg's id names no conversation; an entry with no kind predates the field (R-K5-OPEN-CONV)
+# and is only ever on a node already, never added by a current writer.
+_CONVERSATION_KIND = "conversation"
+
+
+def cited_conversations(entries: Iterable[NodeProvenance | None]) -> list[str]:
+    """The conversations ``entries`` were learned from, once each, in a stable order (R9-304)."""
+    return sorted(
+        {
+            p.interaction_id
+            for p in entries
+            if p is not None and p.interaction_id and p.interaction_kind == _CONVERSATION_KIND
+        }
+    )
+
+
+#: Postgres' "foreign key violation": a row the write references is gone.
+_FOREIGN_KEY_VIOLATION = "23503"
+
+
+@contextmanager
+def _link_target_gone(node_id: str) -> Iterator[None]:
+    """A link write whose node (or entity) went meanwhile raises GraphLinkTargetGoneError."""
+    try:
+        yield
+    except IntegrityError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _FOREIGN_KEY_VIOLATION:
+            raise
+        raise GraphLinkTargetGoneError(
+            "a link names a node removed meanwhile", context={"node_id": node_id[:120]}
+        ) from exc
+
+
+def added_entries(
+    trail: Sequence[NodeProvenance], expected: Sequence[NodeProvenance]
+) -> list[NodeProvenance]:
+    """The entries of ``trail`` that the trail the writer read did not have (R9-304)."""
+    read = list(expected)
+    return [p for p in trail if p not in read]
 
 
 def trail_is(expected: Sequence[NodeProvenance]) -> Any:  # noqa: ANN401 - SQL
@@ -267,11 +314,17 @@ class PostgresGraphBackend:
         # only where nothing deletes a node through this backend (the graph's own tests).
         self._node_releaser = node_releaser
         # R9-284: hold each named persona's row in the write's own transaction. Off where the
-        # schema has no ``personas`` table (the graph's own tests); the api turns it on.
+        # schema has no ``personas`` table (the graph's own tests); the api turns it on. It
+        # holds each cited conversation's row too (R9-304), from the same schema.
         self._persona_guard = persona_guard
 
     def _hold_personas(
-        self, conn: Connection, owner_id: str, persona_ids: Iterable[str | None]
+        self,
+        conn: Connection,
+        owner_id: str,
+        persona_ids: Iterable[str | None],
+        *,
+        cites: Iterable[NodeProvenance | None] = (),
     ) -> None:
         """Hold the row of every persona this write names, or refuse the write (R9-284).
 
@@ -279,6 +332,13 @@ class PostgresGraphBackend:
         erasure's row delete waits for this write to commit (and its graph step then removes
         what it wrote), and a write after the delete finds no row and raises
         :class:`GraphPersonaGoneError`. A no-op with the guard off.
+
+        ``cites`` are the provenance entries the write adds. Each conversation they cite is
+        held the same way, after the personas (R9-304): forgetting a conversation's memory
+        removes its facts in the transaction that deletes its row, so a synthesis still in its
+        model call either lands first and is removed, or finds no row and raises
+        :class:`GraphInteractionGoneError`. Only added entries: an older entry may name a
+        conversation deleted without forgetting it, and that must not lock the node.
         """
         if not self._persona_guard:
             return
@@ -288,6 +348,13 @@ class PostgresGraphBackend:
                 raise GraphPersonaGoneError(
                     "a graph write names a persona that no longer exists",
                     context={"persona_id": persona_id[:80]},
+                )
+        for conversation_id in cited_conversations(cites):
+            held = conn.execute(_HOLD_CONVERSATION, {"c": conversation_id, "o": owner_id}).first()
+            if held is None:
+                raise GraphInteractionGoneError(
+                    "a graph write cites a conversation that no longer exists",
+                    context={"interaction_id": conversation_id[:80]},
                 )
 
     # ===== nodes ===========================================================
@@ -304,7 +371,9 @@ class PostgresGraphBackend:
         row = self._node_to_row(owner_id, node, embedding, embedding_model)
         stmt = pg_insert(graph_nodes).values(**row).returning(graph_nodes.c.surrogate)
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
+            self._hold_personas(
+                conn, owner_id, (p.persona_id for p in node.provenance), cites=node.provenance
+            )
             surrogate = conn.execute(stmt).scalar_one()
         return int(surrogate)
 
@@ -332,7 +401,9 @@ class PostgresGraphBackend:
             .returning(graph_nodes.c.surrogate)
         )
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, (p.persona_id for p in node.provenance))
+            self._hold_personas(
+                conn, owner_id, (p.persona_id for p in node.provenance), cites=node.provenance
+            )
             surrogate = conn.execute(stmt).scalar_one_or_none()
         return None if surrogate is None else int(surrogate)
 
@@ -368,7 +439,10 @@ class PostgresGraphBackend:
         self._check_dim(embedding, node.id)
         with self._engine.begin() as conn:
             self._hold_personas(
-                conn, owner_id, [*(p.persona_id for p in node.provenance), *guard_personas]
+                conn,
+                owner_id,
+                [*(p.persona_id for p in node.provenance), *guard_personas],
+                cites=added_entries(node.provenance, expected_provenance),
             )
             current = conn.execute(
                 select(graph_nodes.c.metadata).where(
@@ -392,6 +466,45 @@ class PostgresGraphBackend:
             if surrogate is None:
                 _refuse_if_stale(conn, owner_id, node.id, current is not None)
         return None if surrogate is None else int(surrogate)
+
+    def append_provenance(
+        self,
+        owner_id: str,
+        node_id: str,
+        entry: NodeProvenance,
+        *,
+        expected_content_hash: str,
+        expected_provenance: Sequence[NodeProvenance],
+    ) -> bool:
+        """Append one entry to a node's trail, and nothing else (R9-304 review round 2).
+
+        A restatement's support entry: content, metadata, embedding and embedding model are
+        not written, so the content hash stays and no version is taken. Under the node CAS
+        (the hash and trail the caller read, :class:`GraphStaleWriteError` if the row
+        changed) and the write guard (the entry's persona and conversation are held first).
+        ``False`` if the node is gone. ``updated_at`` advances, as for any node write.
+        """
+        # Appended in SQL, under the CAS on the trail as read (review round 3).
+        appended = graph_nodes.c.provenance.concat(
+            func.jsonb_build_array(literal(entry.model_dump(mode="json"), JSONB))
+        )
+        with self._engine.begin() as conn:
+            self._hold_personas(conn, owner_id, [entry.persona_id], cites=[entry])
+            written = conn.execute(
+                update(graph_nodes)
+                .where(
+                    graph_nodes.c.id == node_id,
+                    graph_nodes.c.owner_id == owner_id,
+                    graph_nodes.c.content_hash == expected_content_hash,
+                    trail_is(expected_provenance),
+                )
+                .values(provenance=appended, updated_at=datetime.now(UTC))
+                .returning(graph_nodes.c.id)
+            ).first()
+            if written is None:
+                _refuse_if_stale(conn, owner_id, node_id, None)
+                return False
+        return True
 
     def _update_node_statement(
         self,
@@ -829,6 +942,7 @@ class PostgresGraphBackend:
                     *(p.persona_id for p in expected_provenance),
                     *guard_personas,
                 ],
+                cites=added_entries(node.provenance, expected_provenance),
             )
             row = (
                 conn.execute(
@@ -1000,8 +1114,11 @@ class PostgresGraphBackend:
         )
         asserted_by = link.provenance.persona_id if link.provenance is not None else None
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
-            conn.execute(stmt)
+            self._hold_personas(
+                conn, owner_id, [asserted_by, *guard_personas], cites=[link.provenance]
+            )
+            with _link_target_gone(link.src_node_id):
+                conn.execute(stmt)
 
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
         """Delete a node's OUTGOING edges of one type (semantic-link re-eval on extend, D-K0-2).
@@ -1162,7 +1279,7 @@ class PostgresGraphBackend:
             *(a.persona_id for a in entity.aliases),
         ]
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, named)
+            self._hold_personas(conn, owner_id, named, cites=[entity.provenance])
             conn.execute(pg_insert(graph_entities).values(**row))
 
     def get_entity(self, owner_id: str, entity_id: str) -> CanonicalEntity | None:
@@ -1292,7 +1409,7 @@ class PostgresGraphBackend:
             .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
             .returning(graph_node_entities.c.entity_id)
         )
-        with self._engine.begin() as conn:
+        with self._engine.begin() as conn, _link_target_gone(node_id):
             self._hold_personas(conn, owner_id, guard_personas)
             return [str(e) for e in conn.execute(stmt).scalars()]
 
@@ -1631,7 +1748,9 @@ class PostgresGraphBackend:
             cast(graph_edges.c.provenance, JSONB).contains({"source": "system", "reason": reason}),
         )
         with self._engine.begin() as conn:
-            self._hold_personas(conn, owner_id, [asserted_by, *guard_personas])
+            self._hold_personas(
+                conn, owner_id, [asserted_by, *guard_personas], cites=[link.provenance]
+            )
             if conn.execute(stmt).first() is not None:
                 return True
             return reason is not None and conn.execute(same_mirror).first() is not None

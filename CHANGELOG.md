@@ -130,6 +130,19 @@ Per-spec entries are added by the close-out phase of each spec.
   with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **Forgetting a conversation's memory now forgets the facts learned from it (R9-304).**
+  Deleting a conversation with "Also forget what ... learned here" removed its episodic
+  memory but left the Memory facts synthesis drew from it, until each was forgotten by
+  hand. Now a fact only that conversation supports is removed, with its links and history,
+  and a fact another conversation also supports stays without that conversation as a
+  source. It happens in the same commit as the delete: if Memory is being reorganised the
+  delete answers 409, the conversation and its memory stay (its attached files may already
+  be gone), and trying again finishes it. A fact still being
+  learned from the conversation when it is forgotten is either removed with the rest or
+  refused. The delete dialog says how many facts would go. Two limits: a fact that stays keeps
+  its wording, which can include what the forgotten conversation added to it; and a fact still
+  being learned from any deleted conversation is now refused, also after a plain delete (the
+  conversation's messages are gone with it, so there was nothing left to learn from).
 - **A turn is billed at the model that answered it, every time.** Each tier's model chain
   is shared by every conversation on it, and which model answered a call was read back
   afterwards from that shared chain. When two conversations used the chain at once, one
