@@ -14,10 +14,12 @@
 import {
   Cable,
   CreditCard,
+  FileText,
   LogOut,
   Monitor,
   Moon,
   Settings,
+  ShieldCheck,
   Sun,
   UserCog,
 } from "lucide-react";
@@ -37,6 +39,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { LEGAL_ROUTES } from "@/lib/legal-routes";
 import { cn } from "@/lib/utils";
 
 /** Two-letter initials from a display name (empty when unknown). */
@@ -167,6 +170,22 @@ export function AccountMenu({
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+
+        {/* The hosted service's legal documents. Cloud only: a self-hosted community
+            install is run by whoever hosts it, and these documents do not cover it. */}
+        {account.available ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem render={<Link href={LEGAL_ROUTES.privacy} />}>
+              <ShieldCheck />
+              {t("privacy")}
+            </DropdownMenuItem>
+            <DropdownMenuItem render={<Link href={LEGAL_ROUTES.terms} />}>
+              <FileText />
+              {t("terms")}
+            </DropdownMenuItem>
+          </>
+        ) : null}
 
         {account.signOut ? (
           <>

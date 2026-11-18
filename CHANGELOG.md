@@ -12,6 +12,7 @@ Per-spec entries are added by the close-out phase of each spec.
 ## [Unreleased]
 
 ### Added
+- **A Privacy Policy and Terms of Service for the hosted service.** `/legal/privacy` and `/legal/terms` render the two documents from one content module each (`packages/web/src/content/legal/`). The sign-up line already pointed at those paths and now lands on real pages; the account menu links both in the cloud edition. `MAINTAINING.md` next to the text lists the code and decisions each section depends on, and `pnpm check:copy` gates the text like the message catalogue. Owner facts (legal entity, address, contact, minimum age) are visible `[[OWNER: ...]]` placeholders until supplied.
 - **Voice runs on Linux arm64 and builds as a linux/arm64 image.** A community edition on a
   Raspberry Pi 5, an Ampere or a Graviton host can now install voice with `uv sync` or
   `pip install persona-voice`. The voice activity detector is the same Silero v5.1 model,

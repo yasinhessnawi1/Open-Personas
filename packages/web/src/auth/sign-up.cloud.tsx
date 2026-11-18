@@ -27,6 +27,7 @@ import { useSignUp } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useState } from "react";
+import { LEGAL_ROUTES } from "@/lib/legal-routes";
 import {
   ErrorAlert,
   Field,
@@ -284,8 +285,8 @@ export function SignUp() {
           </div>
           <p className={s.legal}>
             {t.rich("legal", {
-              terms: (chunks) => <a href="/legal/terms">{chunks}</a>,
-              privacy: (chunks) => <a href="/legal/privacy">{chunks}</a>,
+              terms: (chunks) => <a href={LEGAL_ROUTES.terms}>{chunks}</a>,
+              privacy: (chunks) => <a href={LEGAL_ROUTES.privacy}>{chunks}</a>,
             })}
           </p>
         </form>
