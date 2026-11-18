@@ -202,7 +202,7 @@ class GroundingVerdict(BaseModel):
     #: held notice, so the flush can tell whether anything the judge read has changed.
     fingerprint: str | None = None
     #: The chain member that served the judge call, as ``"provider/model"``, read from
-    #: the chain's attempt ledger (:func:`served_identity`); ``None`` when no model
+    #: the call's own served trace (:func:`served_identity`); ``None`` when no model
     #: answered (a mechanical layer decided, an earlier admission stood, the call
     #: failed) or the served member is unclear. The pipeline stores it with the
     #: fingerprint: a YES from any member but the head of the chain is never kept.

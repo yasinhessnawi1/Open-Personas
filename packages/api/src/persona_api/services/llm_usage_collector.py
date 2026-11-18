@@ -138,7 +138,8 @@ class UsageCollectingBackend:
 
         Delegates to the inner backend's own ``resolve_chain`` when it has one (the plan
         wrapper), else returns the inner backend. The initiative judge reads the chain's
-        head and attempt ledger from it once per call (sixth review LOW-4).
+        head from it once per call (sixth review LOW-4); the served model rides each
+        call's own result (R9-223).
         """
         resolver = getattr(self._inner, "resolve_chain", None)
         return resolver() if callable(resolver) else self._inner
