@@ -322,3 +322,48 @@ def test_the_control_reads_and_changes_only_the_owners_conversation(
         _OWNER, lambda: service.change(_OWNER, "conv-d", released=False, version=None, at=_AT)
     )
     assert undone.state == "held"
+
+
+def test_a_release_overtaken_by_a_tagged_write_can_be_given_again(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """PR #44 review MEDIUM-1 on Postgres: the re-release is written, not left held."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona_api.initiative.conversation_hold import ConversationHoldService  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    backend = PostgresGraphBackend(engine=migrated_engine, persona_guard=False, node_releaser=None)
+    store = build_graph_store(
+        engine=app_engine,
+        embedder=_Emb(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=False,
+        node_releaser=None,
+    )
+    service = ConversationHoldService(store, app_engine)
+    _as(_OWNER, lambda: PgDisclosureStore(app_engine).record(_OWNER, _PERSONA, "conv-d"))
+    seen = _as(_OWNER, lambda: service.read(_OWNER, "conv-d"))
+    _as(
+        _OWNER,
+        lambda: service.change(_OWNER, "conv-d", released=True, version=seen.version, at=_AT),
+    )
+    late = _node(_TAGGED, "disordered_eating").model_copy(
+        update={
+            "provenance": tuple(
+                p.model_copy(update={"written_at": _AT + timedelta(minutes=5)})
+                for p in _node(_TAGGED, "disordered_eating").provenance
+            )
+        }
+    )
+    backend.insert_node_if_absent(_OWNER, late, [1.0] + [0.0] * (_DIM - 1))
+    held = _as(_OWNER, lambda: service.read(_OWNER, "conv-d"))
+    assert held.state == "held"
+
+    later = _AT + timedelta(hours=1)
+    again = _as(
+        _OWNER,
+        lambda: service.change(_OWNER, "conv-d", released=True, version=held.version, at=later),
+    )
+    assert (again.state, again.released_at) == ("released", later)
+    assert len(_audit(migrated_engine)) == 2

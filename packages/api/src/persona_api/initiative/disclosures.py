@@ -205,7 +205,9 @@ class PgDisclosureStore:
         release written and the audit row written. A count that moved since the user read it
         is a :attr:`ReleaseOutcome.CONFLICT` and writes nothing. With no fact (a tagged node
         alone holds the conversation, the merge case) the row is born released at one
-        disclosure; a fact landing meanwhile is a conflict.
+        disclosure; a fact landing meanwhile is a conflict. A release that already covers the
+        count is given again with a new ``released_at``: the caller (the control) only
+        releases a conversation the user saw held.
         """
         try:
             with rls_connection(self._engine, owner_id) as conn:
@@ -236,9 +238,10 @@ class PgDisclosureStore:
                     )
                     if conn.execute(born).first() is None:
                         return ReleaseOutcome.CONFLICT
-                elif current.released_seq == current.disclosure_seq:
-                    return ReleaseOutcome.UNCHANGED
                 else:
+                    # A release already covering the count is given again and re-stamped
+                    # (PR #44 review MEDIUM-1): the ``written_at`` net held the conversation
+                    # after it, and the user has released what they now saw.
                     conn.execute(
                         update(wellbeing_disclosures)
                         .where(*_fact(owner_id, interaction_id))

@@ -167,3 +167,80 @@ def test_a_re_block_holds_it_back_again(monkeypatch: pytest.MonkeyPatch) -> None
     got = service.change("u", "conv-d", released=False, version=None, at=_AT)
     assert facts.calls == [("hold", "u", "pers", "conv-d")]
     assert got == ConversationHold(state="held", released_at=None, version=2)
+
+
+class _NetGraph:
+    """A graph that gains a tagged node citing the conversation after the release."""
+
+    def __init__(self) -> None:
+        self.nodes: list[Any] = []
+
+    def flagged_nodes(self, owner_id: str) -> list[Any]:
+        return self.nodes
+
+
+class _StoreLike(_Facts):
+    """The store's branch order: a moved count is a conflict, otherwise (re)stamp."""
+
+    def release(
+        self, owner_id: str, persona_id: str, interaction_id: str, *, version: int, at: datetime
+    ) -> ReleaseOutcome:
+        self.calls.append(("release", owner_id, persona_id, interaction_id, version, at))
+        assert self.state is not None
+        if self.state.disclosure_seq != version:
+            return ReleaseOutcome.CONFLICT
+        seq = self.state.disclosure_seq
+        self.state = DisclosureState(disclosure_seq=seq, released_seq=seq, released_at=at)
+        return ReleaseOutcome.CHANGED
+
+
+def test_a_release_overtaken_by_a_tagged_write_can_be_given_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 review MEDIUM-1 (the reviewer's probe): it used to stay held for good."""
+    from datetime import timedelta  # noqa: PLC0415
+
+    from persona.graph.models import ConceptNode, NodeKind, NodeProvenance  # noqa: PLC0415
+    from persona.schema.chunks import WriteSource  # noqa: PLC0415
+
+    graph = _NetGraph()
+    facts = _StoreLike(
+        DisclosureState(disclosure_seq=1, released_seq=None, released_at=None),
+        ReleaseOutcome.CHANGED,
+    )
+    gate = ConversationWellbeingGate(graph, object(), disclosures=facts, releases=facts)  # type: ignore[arg-type]
+    monkeypatch.setattr(gate, "unsynthesised", lambda _o, _ids: set())
+    service = ConversationHoldService(
+        graph,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        facts=facts,  # type: ignore[arg-type]
+        gate=gate,
+        persona_of=lambda _o, _c: "pers",
+    )
+    first = service.read("u", "conv")
+    assert first.state == "held"
+    assert service.change("u", "conv", released=True, version=first.version, at=_AT).state == (
+        "released"
+    )
+    graph.nodes.append(
+        ConceptNode(
+            id="n1",
+            node_kind=NodeKind.FACT,
+            concept_name="x",
+            content="x",
+            wellbeing_category="mental_health_crisis",
+            provenance=(
+                NodeProvenance(
+                    source=WriteSource.PERSONA_SELF,
+                    interaction_id="conv",
+                    written_at=_AT + timedelta(minutes=5),
+                ),
+            ),
+            created_at=_AT,
+        )
+    )
+    seen = service.read("u", "conv")
+    assert seen.state == "held", "the net holds it again"
+    later = _AT + timedelta(hours=1)
+    again = service.change("u", "conv", released=True, version=seen.version, at=later)
+    assert again == ConversationHold(state="released", released_at=later, version=seen.version)

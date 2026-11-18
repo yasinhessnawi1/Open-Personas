@@ -157,11 +157,17 @@ def test_a_fact_landing_while_the_release_inserts_is_a_conflict(
     assert _audit_rows(script) == []
 
 
-def test_releasing_a_release_in_force_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_release_given_again_restamps_its_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #44 review MEDIUM-1: the count is covered, yet a tagged write after the release
+    (the ``written_at`` net) holds the conversation. The user releases again with what they
+    saw: that is a new release, so its time moves and it is audited; it is never UNCHANGED.
+    """
     script = _scripted(monkeypatch, _PERSONA, [_Row(disclosure_seq=2, released_seq=2)])
-    assert _store().release("u", "pers", "conv", version=2, at=_AT) is ReleaseOutcome.UNCHANGED
-    assert len(script.statements) == 2
-    assert _audit_rows(script) == []
+    assert _store().release("u", "pers", "conv", version=2, at=_AT) is ReleaseOutcome.CHANGED
+    update = script.sql(2)
+    assert update.startswith("UPDATE WELLBEING_DISCLOSURES SET")
+    assert _AT in script.params(2).values()
+    assert len(_audit_rows(script)) == 1
 
 
 def test_a_release_for_a_persona_that_is_gone_writes_nothing(
