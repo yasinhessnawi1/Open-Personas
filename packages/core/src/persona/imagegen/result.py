@@ -24,11 +24,12 @@ References:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "MAX_IMAGES_PER_CALL",
     "GeneratedImage",
     "GenerationResult",
     "ImageGenOptions",
@@ -55,6 +56,14 @@ treats both values as a no-op + debug log.
 
 ImageMediaType = Literal["image/png", "image/jpeg", "image/webp"]
 """IANA media type carried alongside the generated image bytes."""
+
+
+#: The most images one call may ask for, on every surface that takes a count from outside:
+#: the HTTP route (``ImageGenRequest.count``) and the chat ``generate_image`` tool (R9-308).
+#: :class:`ImageGenOptions` itself still admits up to four, which is the backends' contract
+#: and not a product limit. Before R9-308 the chat tool passed the model's count straight
+#: to the options, so one chat call could make four images while the route allowed two.
+MAX_IMAGES_PER_CALL: Final[int] = 2
 
 
 class ImageGenOptions(BaseModel):
