@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from persona.errors import ForgottenEvidenceError, SummarizerError
+from persona.errors import ChainConflictError, ForgottenEvidenceError, SummarizerError
 from persona.graph.models import NodeKind, NodeProvenance
 from persona.graph.protocol import KnowledgeCandidate
 from persona.logging import get_logger
@@ -66,6 +66,8 @@ _log = get_logger("stores.episodic_engine")
 
 #: The skip reason when a window's evidence was forgotten while its gist was being written.
 _EVIDENCE_FORGOTTEN = "evidence forgotten"
+#: The skip reason when a gist's write lost a race (R9-271).
+_GIST_WRITE_CONFLICT = "gist write conflict"
 
 _ENGINE_WRITTEN_BY = "episodic.engine"
 
@@ -230,6 +232,18 @@ class EpisodicConsolidationEngine:
                         window_start=window[0].created_at,
                         member_count=len(window),
                         reason=_EVIDENCE_FORGOTTEN,
+                    )
+                )
+                continue
+            except ChainConflictError:
+                # Another writer won this gist's row, or Postgres broke a lock cycle by failing
+                # this write. Either way nothing landed; the window is reported, the run goes on,
+                # and the next pass tries it again.
+                skipped.append(
+                    SkippedWindow(
+                        window_start=window[0].created_at,
+                        member_count=len(window),
+                        reason=_GIST_WRITE_CONFLICT,
                     )
                 )
                 continue
