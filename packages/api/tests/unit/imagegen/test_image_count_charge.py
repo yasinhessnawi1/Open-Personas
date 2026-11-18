@@ -119,7 +119,7 @@ async def test_two_images_returned_cost_twice_one(tmp_path: Path) -> None:
     assert one_kw["cost_cents"] == pytest.approx(4.2)
     assert two_kw["cost_cents"] == pytest.approx(8.4), "a two-image call billed one image"
     # Two ceilings pre-deducted (100), 9 credits real: 91 back.
-    assert two.calls[0] == ("deduct", two.calls[0][1])
+    assert two.calls[0][0] == "deduct"
     assert two.calls[0][1]["amount"] == 2 * _CEILING
     assert two.calls[-1][0] == "refund"
     assert two_kw["amount"] == 91
