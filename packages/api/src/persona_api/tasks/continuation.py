@@ -31,12 +31,14 @@ from persona.errors import ScheduleNotFoundError, TaskLegFailedError
 from persona.logging import get_logger
 from persona.schedules import next_fire_after
 from persona.tasks import (
+    CheckpointKind,
     ScheduledFire,
     TaskCheckpoint,
     TaskState,
     WaitKind,
     build_cancellation_summary,
     build_stuck_report,
+    checkpoint_id,
 )
 from persona_runtime.legs import LegDisposition, TaskMilestone, render_milestone_summary
 
@@ -426,7 +428,7 @@ class TaskContinuation:
                 task,
                 TaskCheckpoint(
                     task_id=task.id,
-                    leg_id=f"{task.id}:blocked:{seq}",
+                    leg_id=checkpoint_id(task.id, CheckpointKind.BLOCKED, seq),
                     checkpoint_seq=seq,
                     progress_conclusions=prior.progress_conclusions if prior is not None else (),
                     decisions=prior.decisions if prior is not None else (),

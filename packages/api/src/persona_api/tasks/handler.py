@@ -1328,12 +1328,19 @@ class TaskLegHandler:
     def _park_if_bound(self, owner: str, task: Task, *, now: datetime) -> bool:
         """Park the task if a stated contract bound is reached; return whether it was (finding O).
 
-        ``legs_run`` is the head sequence plus one: the checkpoint chain is the durable count
-        of legs that landed. Goes through the continuation's bound park (the approval park's
-        shape); with no continuation wired the bare state change is the floor, as it is for
-        the over-budget checkpoint.
+        ``legs_run`` is the number of checkpoints a LEG wrote (R9-220). The head sequence is
+        not it: the chain also holds the records written between legs (an obstacle, an
+        answered approval, a saved reply), and counting those parked a task that asked for
+        approval at its cap early, for reasons unrelated to the work it did. Read only when
+        a leg cap is set, so a task with none costs no query. Goes through the
+        continuation's bound park (the approval park's shape); with no continuation wired
+        the bare state change is the floor, as it is for the over-budget checkpoint.
         """
-        legs_run = 0 if task.head_checkpoint_seq is None else task.head_checkpoint_seq + 1
+        legs_run = (
+            self._checkpoints.count_legs(owner, task.id)
+            if task.contract.bounds.max_legs is not None
+            else 0
+        )
         reason = bound_reached(task.contract.bounds, legs_run=legs_run, now=now)
         if reason is None:
             return False

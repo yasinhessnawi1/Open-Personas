@@ -48,8 +48,10 @@ from persona.approvals import (
 )
 from persona.logging import get_logger
 from persona.tasks import (
+    CheckpointKind,
     TaskCheckpoint,
     UserReply,
+    checkpoint_id,
     merge_artifact_pointers,
     pointers_from_artifacts,
 )
@@ -437,7 +439,7 @@ class ApprovalResolver:
         seq = task.next_checkpoint_seq
         checkpoint = TaskCheckpoint(
             task_id=task_id,
-            leg_id=f"{task_id}:approval:{seq}",
+            leg_id=checkpoint_id(task_id, CheckpointKind.APPROVAL, seq),
             checkpoint_seq=seq,
             progress_conclusions=(
                 *(prior.progress_conclusions if prior is not None else ()),

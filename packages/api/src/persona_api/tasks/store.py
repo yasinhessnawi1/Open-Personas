@@ -39,11 +39,13 @@ from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
     TERMINAL_STATES,
     AcceptanceStatus,
+    CheckpointKind,
     Task,
+    checkpoint_id_prefix,
     enforce_checkpoint_budget,
 )
 from persona.tasks import settle_criteria as gate_criteria
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.engine import rls_connection
@@ -449,6 +451,29 @@ class CheckpointStore:
                 .all()
             )
         return [row_to_checkpoint(r) for r in rows]
+
+    def count_legs(self, owner_id: str, task_id: str) -> int:
+        """How many legs ran on this task: checkpoints a leg wrote, not every checkpoint (R9-220).
+
+        The head sequence also counts the records written between legs (an obstacle, an
+        answered approval, a saved reply), so a task that asked for approval twice reached its
+        leg cap four checkpoints early. The kind is read from the ``leg_id`` inside the
+        checkpoint (the one field this table's JSON is filtered on), minted by
+        :func:`persona.tasks.checkpoint_id`.
+        """
+        prefix = checkpoint_id_prefix(task_id, CheckpointKind.LEG)
+        with rls_connection(self._engine, owner_id) as conn:
+            count = conn.execute(
+                select(func.count())
+                .select_from(checkpoints_t)
+                .where(
+                    checkpoints_t.c.task_id == task_id,
+                    checkpoints_t.c.checkpoint_json["leg_id"]
+                    .as_string()
+                    .startswith(prefix, autoescape=True),
+                )
+            ).scalar_one()
+        return int(count)
 
     # --- the atomic CAS append (mutation) -----------------------------------
 

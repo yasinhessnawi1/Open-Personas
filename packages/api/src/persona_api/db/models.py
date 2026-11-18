@@ -1760,7 +1760,8 @@ task_checkpoints = Table(
     Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("checkpoint_seq", Integer, nullable=False),
     # The frozen TaskCheckpoint (conclusions/decisions/lessons/plan/next_step/open
-    # questions/pointers/cursor) — read whole at reconstruction, never sub-field-queried.
+    # questions/pointers/cursor), read whole at reconstruction. The one sub-field query
+    # is ``leg_id``, counted by ``CheckpointStore.count_legs`` for the leg cap (R9-220).
     Column("checkpoint_json", _json(), nullable=False),
     Column("content_hash", Text, nullable=False),
     Column("schema_version", Text, nullable=False, server_default=text("'1.0'")),

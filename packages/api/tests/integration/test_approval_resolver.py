@@ -225,6 +225,8 @@ async def test_the_resolution_checkpoint_carries_the_query_and_source_ledgers(
     assert head.leg_id.startswith("t1:approval:")  # the resolution, not the leg
     assert head.queries_run == ("husleieloven deposit interest",)
     assert head.sources_seen == ("https://lovdata.no/a",)
+    # R9-220, on Postgres's JSONB: two checkpoints, one of them a leg.
+    assert checkpoints.count_legs("user_a", "t1") == 1
 
 
 # --- verbatim proposal-replay -----------------------------------------------
