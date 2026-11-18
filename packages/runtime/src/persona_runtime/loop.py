@@ -2693,6 +2693,13 @@ class ConversationLoop:
         # attributed per-round (one TurnLog row per turn, not one per round).
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
+        # D-ORCH-11-18-s: a failed try that reported tokens is charged, so its tokens
+        # join the row's sums. The TurnLog row is the billing record, and this keeps
+        # its tokens equal to the tokens the turn was priced on (M2 I2), with no new
+        # column. The SSE final chunk's ``usage`` stays the answer's own.
+        failed_prompt, failed_completion = _failed_try_tokens(priced_rounds)
+        prompt_tokens += failed_prompt
+        completion_tokens += failed_completion
         # Spec 20 T19 (D-20-9): populate the multi-model fallback fields from
         # the last round's own served trace (R9-223); a bare backend (no trace)
         # yields the zero-fallback default shape. Computed FIRST (Spec M2,
@@ -2870,6 +2877,17 @@ class _FallbackFields(TypedDict):
     tier_fallback_reasons: list[str]
     tier_fallback_providers: list[str]
     fallback_engaged: bool
+
+
+def _failed_try_tokens(rounds: Sequence[PricedRound]) -> tuple[int, int]:
+    """The prompt and completion tokens the turn's failed tries reported (D-ORCH-11-18-s)."""
+    prompt = completion = 0
+    for priced_round in rounds:
+        for attempt in priced_round.failed_tries:
+            if attempt.usage is not None:
+                prompt += attempt.usage.prompt_tokens
+                completion += attempt.usage.completion_tokens
+    return prompt, completion
 
 
 def _priced_round(
