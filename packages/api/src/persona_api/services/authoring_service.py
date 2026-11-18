@@ -30,7 +30,8 @@ from persona.tools.mcp.catalog import (
     mcp_server_entry,
     recommender_provider_tag,
 )
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import compute_turn_cost, least_certain_basis
+from persona_runtime.routing import served_identity
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from persona_api.schemas.responses import AuthoringDraft, ToolRecommendation
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from persona.backends import ChatBackend
-    from persona.backends.types import TokenUsage
+    from persona.backends.types import ServedCall, TokenUsage
     from persona_runtime.cost import CostSource
 
 
@@ -103,20 +104,26 @@ def _price_usage(
     backend: ChatBackend,
     usage: TokenUsage | None,
     cost_source: CostSource | None,
+    *,
+    served: ServedCall | None = None,
 ) -> tuple[float, CostBasis, int, int]:
     """Price one authoring generation's usage → ``(cost_cents, basis, prompt, completion)``.
 
-    Mirrors the chat loop's ``compute_turn_cost`` call (D-M2-1/3): the served
-    backend's provider/model + token counts, with an OpenRouter ``usage.cost``
-    actual taking precedence. Authoring has no fallback wrapper, so the served
-    identity IS the backend's own ``provider_name`` / ``model_name``. ``usage is
+    Mirrors the chat loop's ``compute_turn_cost`` call (D-M2-1/3): the SERVED
+    model's provider/model + token counts, with an OpenRouter ``usage.cost`` actual
+    taking precedence. The authoring backend can be a fallback chain: when
+    ``PERSONA_AUTHORING_MODEL`` is unset or does not resolve, it is the frontier
+    tier's chain, whose own ``provider_name`` / ``model_name`` are its PRIMARY. So the
+    identity comes from ``served``, the trace the chain stamps on the generation's own
+    chunks (R9-296); ``None`` means a bare backend, its own identity. ``usage is
     None`` (a backend that reported none) degrades to ``(0.0, "unpriced", 0, 0)``.
     """
     if usage is None:
         return 0.0, "unpriced", 0, 0
+    provider, model = served_identity(backend, served)
     cost, basis = compute_turn_cost(
-        provider=backend.provider_name,
-        model=backend.model_name,
+        provider=provider,
+        model=model,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
         actual_cost_usd=usage.cost_usd,
@@ -303,6 +310,7 @@ async def _generate_stream(
 
     buffer: list[str] = []
     usage: TokenUsage | None = None
+    served: ServedCall | None = None
     async for chunk in backend.chat_stream(
         messages,
         temperature=sampling.temperature,
@@ -313,8 +321,10 @@ async def _generate_stream(
             buffer.append(chunk.delta)
             yield ("chunk", chunk.delta)
         if chunk.usage is not None:
-            usage = chunk.usage
-    cents, basis, prompt_tok, completion_tok = _price_usage(backend, usage, cost_source)
+            usage, served = chunk.usage, chunk.served
+    cents, basis, prompt_tok, completion_tok = _price_usage(
+        backend, usage, cost_source, served=served
+    )
     total_cents += cents
     total_prompt += prompt_tok
     total_completion += completion_tok
@@ -329,6 +339,7 @@ async def _generate_stream(
     yield ("retry", "validation")
     repair: list[str] = []
     repair_usage: TokenUsage | None = None
+    repair_served: ServedCall | None = None
     async for chunk in backend.chat_stream(
         _retry_messages(messages, "".join(buffer), errors),
         temperature=_DETERMINISTIC.temperature,
@@ -339,15 +350,16 @@ async def _generate_stream(
             repair.append(chunk.delta)
             yield ("chunk", chunk.delta)
         if chunk.usage is not None:
-            repair_usage = chunk.usage
-    r_cents, r_basis, r_prompt, r_completion = _price_usage(backend, repair_usage, cost_source)
+            repair_usage, repair_served = chunk.usage, chunk.served
+    r_cents, r_basis, r_prompt, r_completion = _price_usage(
+        backend, repair_usage, cost_source, served=repair_served
+    )
     total_cents += r_cents
     total_prompt += r_prompt
     total_completion += r_completion
-    # Same backend both attempts → same basis; keep the repair's when it priced
-    # (a genuine basis over a first-attempt ``unpriced`` miss).
-    if r_basis != "unpriced":
-        basis = r_basis
+    # The two attempts can be served by different models (R9-296), so the turn takes
+    # the least certain priced basis of the two (D3), as a chat turn does.
+    basis = least_certain_basis((basis, r_basis))
     draft2, _ = _finalize_text("".join(repair))
     yield _cost_event(total_cents, basis, total_prompt, total_completion)
     yield ("draft", draft2)

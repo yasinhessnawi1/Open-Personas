@@ -34,7 +34,7 @@ from persona.billing.basis import CostBasis
 from persona.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from persona.backends.model_metadata import ModelMetadata
     from persona.backends.types import BackendAttempt
@@ -48,6 +48,7 @@ __all__ = [
     "CostSource",
     "PricedRound",
     "compute_turn_cost",
+    "least_certain_basis",
     "price_rounds",
 ]
 
@@ -225,6 +226,21 @@ _BASIS_CERTAINTY: Final[dict[str, int]] = {
 }
 
 
+def least_certain_basis(bases: Iterable[CostBasis]) -> CostBasis:
+    """The label for a sum of priced parts whose bases differ (D3, D-ORCH-11-18-h).
+
+    The least certain basis among the PRICED parts (catalog estimate, then static
+    estimate, then actual), so a partial actual never labels the whole as an actual
+    (the M2 review I2 honesty rule). ``unpriced`` parts are ignored; the result is
+    ``unpriced`` only when no part was priced. One rule for a chat or voice turn
+    (:func:`price_rounds`), a task leg's steps and an authoring turn's attempts.
+    """
+    priced = [basis for basis in bases if basis != "unpriced"]
+    if not priced:
+        return "unpriced"
+    return min(priced, key=lambda b: _BASIS_CERTAINTY.get(b, 0))
+
+
 def price_rounds(
     rounds: Sequence[PricedRound],
     *,
@@ -288,8 +304,7 @@ def price_rounds(
             prompt=priced_round.prompt_tokens,
             completion=priced_round.completion_tokens,
         )
-    basis = min(bases, key=lambda b: _BASIS_CERTAINTY.get(b, 0))
-    return round(cents, CENTS_ROUND_DECIMALS), basis
+    return round(cents, CENTS_ROUND_DECIMALS), least_certain_basis(bases)
 
 
 def _log_unrecovered(priced_round: PricedRound, source: CostSource | None, surface: str) -> None:
