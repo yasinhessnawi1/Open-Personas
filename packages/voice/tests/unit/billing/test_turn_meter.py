@@ -204,6 +204,20 @@ class TestBillTurn:
         assert ledger.calls[0]["cost_cents"] == pytest.approx(0.77)
         assert ledger.calls[0]["amount"] == 1  # ceil(0.77) floored to the min 1
 
+    def test_a_cartesia_spoken_turn_charges_for_its_characters(self) -> None:
+        """R9-235: a turn spoken by Cartesia used to price its TTS at zero, because the
+        row was per minute and the meter hands only characters. It now bills the chars."""
+        ledger = _RecordingLedger()
+        meter = _meter(
+            ledger, tts_provider="cartesia", tts_model="sonic-3.5", streamed_seconds=[0.0]
+        )
+        meter.note_tts_chars(1234)  # 1234 chars x 5.0 cents/1k = 6.17 cents, ceil 7
+        asyncio.run(meter.bill_turn(1))
+        assert len(ledger.calls) == 1
+        assert ledger.calls[0]["cost_cents"] == pytest.approx(6.17)
+        assert ledger.calls[0]["amount"] == 7
+        assert ledger.calls[0]["cost_basis"] == "provider_meter"
+
     def test_per_turn_billing_key_is_unique_per_turn(self) -> None:
         ledger = _RecordingLedger()
         box = [0.0]

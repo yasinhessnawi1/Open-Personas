@@ -213,9 +213,9 @@ PRICING_ROWS: tuple[PricingRow, ...] = (
         cost_basis="provider_meter",
     ),
     # Voice TTS — ElevenLabs is the V14 primary, CHAR-metered (not per-min): Flash
-    # ($0.05/1k char) + Multilingual ($0.10/1k char). Cartesia is the fallback
-    # (char-metered ≈3¢/min; priced on the segment's audio minutes). Priced at the
-    # served provider's real unit.
+    # ($0.05/1k char) + Multilingual ($0.10/1k char). Cartesia is a selectable
+    # provider, also CHAR-metered (R9-235). Every TTS row is per 1k chars, because
+    # the voice meter hands TTS only the characters it synthesized.
     PricingRow(
         surface="voice_tts",
         provider="elevenlabs",
@@ -238,8 +238,13 @@ PRICING_ROWS: tuple[PricingRow, ...] = (
         surface="voice_tts",
         provider="cartesia",
         sku="sonic",
-        unit="min",
-        provider_cost_cents=3.0,  # ⚠️ char-metered ≈3¢/min (fallback); on real audio min
+        unit="1k chars",
+        # Sonic bills about 1 credit per character. The owner supplied Cartesia's plan
+        # rates, verified 2026-11-18 (D-ORCH-11-18-t); this is the Pro plan, $5 for 100K
+        # credits = $0.05 per 1k chars = 5.0 cents, the highest per-char rate among them,
+        # so a user who picks Cartesia is never undercharged. Was a per-minute row the
+        # meter could not feed, which priced every Cartesia turn at zero (R9-235).
+        provider_cost_cents=5.0,
         infra_unit="none",
         cost_basis="provider_meter",
     ),
