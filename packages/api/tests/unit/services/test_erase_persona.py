@@ -470,3 +470,42 @@ def test_another_owners_audit_rows_are_never_scrubbed(seeded: Seeded) -> None:
         ).one()
     assert foreign.target == f"{conversation_of(PERSONA)}/doc_x"
     assert foreign.metadata == {"workspace_path": f"x/{SECRET}.pdf", "verbatim_ask": SECRET}
+
+
+def test_the_control_audit_keeps_only_its_action_and_time(seeded: Seeded) -> None:
+    """PR #44 review MEDIUM-2: a ``conversation.setting_changed`` row marks a disclosure.
+
+    It stays (ruling 5 keeps the audit) but loses the conversation and the persona, on a
+    live conversation and on one already deleted; the sibling's rows are untouched.
+    """
+    from _erase_seed import setting_changes  # noqa: PLC0415
+
+    with seeded.engine.connect() as conn:
+        before: dict[str, object] = {
+            str(r.id): r.created_at
+            for r in conn.execute(
+                select(audit_log.c.id, audit_log.c.created_at).where(
+                    audit_log.c.action == "conversation.setting_changed"
+                )
+            )
+        }
+    sibling = setting_changes(seeded.engine, SIBLING)
+
+    erase_persona(_deps(seeded), _claim(seeded))
+
+    assert setting_changes(seeded.engine, PERSONA) == [
+        ("conversation.setting_changed", "", {}),
+        ("conversation.setting_changed", "", {}),
+    ]
+    assert setting_changes(seeded.engine, SIBLING) == sibling
+    assert sibling[0][2] == {"persona_id": SIBLING}
+    with seeded.engine.connect() as conn:
+        after: dict[str, object] = {
+            str(r.id): r.created_at
+            for r in conn.execute(
+                select(audit_log.c.id, audit_log.c.created_at).where(
+                    audit_log.c.action == "conversation.setting_changed"
+                )
+            )
+        }
+    assert after == before, "every row stays, with its time"

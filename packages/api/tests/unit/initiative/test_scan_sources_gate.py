@@ -103,6 +103,7 @@ class _Gate:
         *,
         include_unsynthesised: bool,
         flagged: Any = None,
+        honour_releases: bool = False,  # D-ORCH-11-18-u; the release tests are their own file
     ) -> set[str]:
         wanted = set(refs)
         self.calls.append((wanted, include_unsynthesised))

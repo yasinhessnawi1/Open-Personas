@@ -16,6 +16,7 @@ from persona.schema.persona import PersonaPresentation  # noqa: TC001 — runtim
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
+    "InitiativeHoldResponse",
     "AcceptanceCriterionOut",
     "ApprovalDecisionResult",
     "ApprovalOut",
@@ -1706,3 +1707,17 @@ class InitiativeDeclineOut(_Output):
     declined: bool  # the durable outcome: the opportunity is suppressed
     changed: bool = False  # false = already live-declined (nothing added)
     note: str = ""
+
+
+class InitiativeHoldResponse(_Output):
+    """A conversation's "fine to bring this up" control (D-ORCH-11-18-u).
+
+    ``held``: a disclosure keeps the conversation out of the persona's unprompted
+    initiative. ``released``: the user said it may be drawn on again (``released_at``).
+    ``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a
+    release (it names no count).
+    """
+
+    state: Literal["held", "released", "not_held"]
+    released_at: datetime | None
+    version: str

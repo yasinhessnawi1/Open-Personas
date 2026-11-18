@@ -1242,6 +1242,96 @@
         }
       }
     },
+    "/v1/conversations/{conversation_id}/initiative-hold": {
+      "get": {
+        "tags": ["conversations"],
+        "summary": "Get Initiative Hold",
+        "description": "Whether a disclosure keeps this conversation out of unprompted initiative.",
+        "operationId": "get_initiative_hold_v1_conversations__conversation_id__initiative_hold_get",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeHoldResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["conversations"],
+        "summary": "Set Initiative Hold",
+        "description": "Release the conversation for initiative, or hold it back again; the new state.",
+        "operationId": "set_initiative_hold_v1_conversations__conversation_id__initiative_hold_put",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetInitiativeHoldRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiativeHoldResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/calls": {
       "get": {
         "tags": ["calls"],
@@ -7017,6 +7107,36 @@
         "title": "InitiativeDialRequest",
         "description": "Set a persona's initiative restraint level (Spec A6, B4 \u2014 the dial switch).\n\n``off`` silences the scan, ``propose_only`` converts acts to proposals, ``act_within_envelope``\nlets all-safe plans execute. The level persists regardless of the platform initiative flag; the\nroute reflects whether initiative is globally enabled so the UX is honest about when it acts."
       },
+      "InitiativeHoldResponse": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["held", "released", "not_held"],
+            "title": "State"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["state", "released_at", "version"],
+        "title": "InitiativeHoldResponse",
+        "description": "A conversation's \"fine to bring this up\" control (D-ORCH-11-18-u).\n\n``held``: a disclosure keeps the conversation out of the persona's unprompted\ninitiative. ``released``: the user said it may be drawn on again (``released_at``).\n``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a\nrelease (it names no count)."
+      },
       "JsonValue": {},
       "LedgerEntry": {
         "properties": {
@@ -9569,6 +9689,31 @@
         "type": "object",
         "title": "SetConsentRequest",
         "description": "Set a persona's auto-dispatch consent (spec 21 T09, D-21-7/2).\n\n``granted``: ``True`` = grant (auto-dispatch), ``False`` = decline (stable,\nno re-prompt), ``None`` = revoke back to \"ask\" (the settings-toggle OFF\npath, which re-arms the prompt on the next autonomous dispatch)."
+      },
+      "SetInitiativeHoldRequest": {
+        "properties": {
+          "released": {
+            "type": "boolean",
+            "title": "Released"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^v1\\.[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["released"],
+        "title": "SetInitiativeHoldRequest",
+        "description": "Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).\n\n``released`` true says the persona may draw on what it learned in the conversation when it\nreaches out unprompted; false undoes that. A release carries ``version``, the opaque token\nthe control's read returned, so a disclosure recorded since is never released unseen."
       },
       "SetSkillConsentRequest": {
         "properties": {
