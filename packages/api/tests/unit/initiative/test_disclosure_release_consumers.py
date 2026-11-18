@@ -267,3 +267,66 @@ def test_the_judges_context_read_drops_tagged_notes_in_sql() -> None:
     """Mutant 6: the tagged filter is the query's, independent of any release."""
     sql = str(readers._CONTEXT_SQL)  # noqa: SLF001
     assert "g.wellbeing_category IS NULL" in sql
+
+
+def _scan_candidate(*node_refs: str) -> Any:
+    from persona.initiative import (  # noqa: PLC0415
+        CandidateSource,
+        InitiativeCandidate,
+        InitiativeTrigger,
+        PlannedStep,
+        Urgency,
+    )
+    from persona.tools.categories import ActionCategory  # noqa: PLC0415
+
+    return InitiativeCandidate(
+        observation="The dinner is on Thursday.",
+        citations=tuple(GroundingCitation(kind=CitationKind.NODE, ref=r) for r in node_refs),
+        trigger=InitiativeTrigger.APPROACHING_COMMITMENT,
+        why_now="The date entered the horizon.",
+        plan=(PlannedStep(description="draft", categories=frozenset({ActionCategory.DRAFT})),),
+        next_step="Draft a note.",
+        value=0.9,
+        acceptance=0.8,
+        urgency=Urgency.BATCH,
+        source=CandidateSource.SCAN,
+        owner_id="u",
+        persona_id="p1",
+        prompt_version="a5-scan-v12",
+        scanned_at=_BEFORE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("node", "unsynthesised", "expected"),
+    [
+        ("n-dinner", {"conv-d"}, "wait"),  # released, synthesis behind: WAIT, not expired
+        ("n-dinner", set(), "clear"),  # released and synthesised: free to go
+        ("n-held", set(), "disclosed"),  # never released: never goes out
+    ],
+)
+def test_a_held_notice_from_a_released_conversation_waits_for_synthesis(
+    monkeypatch: pytest.MonkeyPatch, node: str, unsynthesised: set[str], expected: str
+) -> None:
+    """PR #44 review LOW-3, through the pipeline's own held-notice rule."""
+    from persona_runtime.initiative.pipeline import held_notice_subject  # noqa: PLC0415
+
+    check = _check(monkeypatch, _Graph(_TAGGED, _DINNER, _HELD))
+    monkeypatch.setattr(
+        check._gate,  # noqa: SLF001
+        "unsynthesised",
+        lambda _owner, ids: unsynthesised & set(ids),
+    )
+    got = held_notice_subject(check, "u", _scan_candidate(node))
+    assert got.value == expected
+
+
+def test_the_pool_holds_a_released_conversation_until_synthesis_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-ORCH-11-18-u (3): a release never goes out ahead of synthesis."""
+    graph = _Graph(_TAGGED, _DINNER, _ANCHOR)
+    gate = _gate(monkeypatch, graph)
+    monkeypatch.setattr(gate, "unsynthesised", lambda _owner, ids: {"conv-d"} & set(ids))
+    pool = ApiScanGraphReader(graph, gate).noticing_pool("u", limit=30)  # type: ignore[arg-type]
+    assert [n.id for n in pool] == ["n-anchor"]

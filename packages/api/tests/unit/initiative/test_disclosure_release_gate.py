@@ -140,14 +140,19 @@ def test_a_tagged_write_at_the_release_instant_is_covered(monkeypatch: pytest.Mo
     assert gate.released("u", ["conv-d"]) == {"conv-d": _RELEASED_AT}
 
 
-def test_a_release_does_not_hold_while_synthesis_is_behind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mutant 5: even where freshness is not asked for, a new disclosure could be unread."""
+def test_a_release_waits_for_synthesis_through_the_freshness_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #44 review LOW-3: an unsynthesised released conversation is held as UNREAD, not as
+    DISCLOSED, so a held scan notice citing it WAITs for synthesis instead of expiring. The
+    freshness half holds it wherever freshness is asked for (every scan path)."""
     graph, facts = _released_conv_d(_tagged("n-tag", "conv-d"))
     gate = _gate(monkeypatch, graph, facts, unsynthesised={"conv-d"})
-    assert gate.disclosed("u", ["conv-d"], honour_releases=True) == {"conv-d"}
-    assert gate.gated("u", ["conv-d"], include_unsynthesised=False, honour_releases=True) == {
+    assert gate.disclosed("u", ["conv-d"], honour_releases=True) == set()
+    assert gate.gated("u", ["conv-d"], include_unsynthesised=True, honour_releases=True) == {
         "conv-d"
     }
+    assert gate.gated("u", ["conv-d"], include_unsynthesised=False, honour_releases=True) == set()
 
 
 def test_no_release_reader_honours_nothing(monkeypatch: pytest.MonkeyPatch) -> None:

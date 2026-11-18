@@ -33,9 +33,13 @@ node synthesis extracted beside the disclosure it tagged).
   notes). The conversation as its own citation (its raw transcript holds the disclosure)
   and every task path stay strict, so the default is strict. A release lifts both halves
   of ``disclosed`` for its conversation while it holds: no disclosure recorded since (the
-  fact's count), no tagged node citing it with a write made since, and nothing in it
-  synthesis has not read. Tagged nodes themselves are never touched: every reader drops
-  them by their own tag (K4's floor).
+  fact's count) and no tagged node citing it with a write made since. While synthesis is
+  behind on it the conversation is held as UNREAD by the freshness half, not as disclosed
+  (PR #44 review LOW-3), so a held scan notice citing it waits for synthesis instead of
+  expiring. Every caller that honours a release judges a scan's material (event candidates
+  cite only their grounding, a conversation or a task, which stay strict), and every scan
+  path asks for freshness, so a release never goes out ahead of synthesis. Tagged nodes
+  themselves are never touched: every reader drops them by their own tag (K4's floor).
 """
 
 from __future__ import annotations
@@ -180,11 +184,15 @@ class ConversationWellbeingGate:
         return in_force
 
     def _exempt(self, owner_id: str, refs: set[str], nodes: Sequence[ConceptNode]) -> set[str]:
-        """The released refs synthesis has fully read (no engine: none, fail closed)."""
+        """The released refs (no engine: none, fail closed).
+
+        Freshness is not folded in here: the ``include_unsynthesised`` half of :meth:`gated`
+        holds an unread released conversation, as UNREAD rather than as disclosed.
+        """
         released = set(self.released(owner_id, refs, flagged=nodes))
         if not released or self._engine is None:
             return set()
-        return released - self.unsynthesised(owner_id, released)
+        return released
 
     def unsynthesised(self, owner_id: str, conversation_ids: Iterable[str]) -> set[str]:
         """The conversations holding transcript messages K2 synthesis has not processed."""
