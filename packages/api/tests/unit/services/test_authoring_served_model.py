@@ -129,3 +129,15 @@ async def test_an_estimate_then_an_actual_is_still_labelled_the_estimate() -> No
     assert (routed.calls, static.calls) == (2, 1)
     assert cost.cost_cents == pytest.approx(1.8 + 1.0)
     assert cost.cost_basis == "estimate_static"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_try_that_cost_tokens_is_in_the_drafts_charge() -> None:
+    """D-ORCH-11-18-s: Haiku's empty completion (0.6 cents) plus Sonnet's draft (1.8)."""
+    primary = _Member("anthropic", "claude-haiku-4-5", [""])  # billed, but no reply
+    fallback = _Member("anthropic", "claude-sonnet-5", [GOOD])
+    chain = MultiModelChatBackend([primary, fallback], max_retries_per_backend=0)  # type: ignore[list-item]
+    cost = await _cost(chain)
+    assert cost.cost_cents == pytest.approx(2.4)
+    assert (cost.prompt_tokens, cost.completion_tokens) == (4000, 1600)
+    assert cost.cost_basis == "estimate_static"
