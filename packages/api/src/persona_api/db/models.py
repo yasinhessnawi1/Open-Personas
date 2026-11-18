@@ -1645,8 +1645,23 @@ wellbeing_disclosures = Table(
     # A conversation, run or task id: the gate is kind-agnostic, so the kind is not kept.
     Column("interaction_id", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # D-ORCH-11-18-u (migration 066): the user's "fine to bring this up" release. Every
+    # recorded disclosure bumps ``disclosure_seq``; a release covers the disclosures recorded
+    # so far (``released_seq``), so a later one holds the conversation back again. A counter,
+    # not a clock, decides "later": the record and the release lock this same row.
+    Column("disclosure_seq", BigInteger, nullable=False, server_default=text("1")),
+    Column("released_seq", BigInteger, nullable=True),
+    Column("released_at", DateTime(timezone=True), nullable=True),
     PrimaryKeyConstraint("owner_id", "interaction_id", name="pk_wellbeing_disclosures"),
     Index("idx_wellbeing_disclosures_persona", "persona_id"),
+    CheckConstraint(
+        "released_seq IS NULL OR released_seq <= disclosure_seq",
+        name="ck_wellbeing_disclosures_release_seq",
+    ),
+    CheckConstraint(
+        "(released_seq IS NULL) = (released_at IS NULL)",
+        name="ck_wellbeing_disclosures_release_pair",
+    ),
 )
 
 

@@ -22,7 +22,9 @@ from _erase_seed import (
     chunk,
     conversation_of,
     ids_naming,
+    released_facts,
     seed_into,
+    setting_changes,
     uncovered,
 )
 from persona.errors import MemoryOwnerMissingError
@@ -185,10 +187,18 @@ def test_nothing_of_the_persona_remains_on_postgres_and_its_neighbours_keep_all(
     stranger = (_memory_of(seeded.engine, STRANGER), _rows_of(seeded.engine, STRANGER))
     assert _memory_of(seeded.engine, PERSONA) == 7
     assert len(ids_naming(seeded.engine, "wellbeing_disclosures", PERSONA[-6:])) == 2
+    assert released_facts(seeded.engine, PERSONA) == 1, "one of them released (D-ORCH-11-18-u)"
 
     _erase(seeded, platform, embedder)
 
     assert _memory_of(seeded.engine, PERSONA) == 0
+    assert released_facts(seeded.engine, PERSONA) == 0
+    # PR #44 review MEDIUM-2: the control's audit stays, stripped to its action and time.
+    assert setting_changes(seeded.engine, PERSONA) == [
+        ("conversation.setting_changed", "", {}),
+        ("conversation.setting_changed", "", {}),
+    ]
+    assert setting_changes(seeded.engine, SIBLING)[0][2] == {"persona_id": SIBLING}
     assert _rows_of(seeded.engine, PERSONA) == {}
     for kept in ("initiative_declines", "schedule_tombstones"):
         assert ids_naming(seeded.engine, kept, PERSONA) == [], f"{kept} must lose the persona"

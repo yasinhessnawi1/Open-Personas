@@ -18,6 +18,11 @@ import {
 import { useApi } from "@/lib/api/use-api";
 import { useSidebarRefresh } from "@/lib/hooks/use-sidebar-refresh";
 import { cn } from "@/lib/utils";
+import {
+  InitiativeHoldMenuItem,
+  ReleaseConfirmDialog,
+  useInitiativeHoldActions,
+} from "./initiative-hold";
 
 export interface ConversationListPersona {
   id: string;
@@ -76,6 +81,8 @@ export function ConversationList({
   // this codebase, e.g. `persona-memories-modal.tsx`).
   const [pending, setPending] = useState<PendingDelete | null>(null);
   const [forgetMemory, setForgetMemory] = useState(false);
+  // D-ORCH-11-18-u: the per-row "fine to bring this up" control.
+  const hold = useInitiativeHoldActions();
 
   const filtered = useMemo(() => {
     return conversations.filter((c) => {
@@ -164,6 +171,14 @@ export function ConversationList({
     </Dialog.Root>
   );
 
+  const releaseDialog = (
+    <ReleaseConfirmDialog
+      pending={hold.pending}
+      onCancel={() => hold.setPending(null)}
+      onConfirm={hold.confirmRelease}
+    />
+  );
+
   if (filtered.length === 0) {
     return (
       <>
@@ -171,6 +186,7 @@ export function ConversationList({
           {t("noMatches")}
         </p>
         {deleteDialog}
+        {releaseDialog}
       </>
     );
   }
@@ -226,6 +242,12 @@ export function ConversationList({
                   <MoreVertical className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
+                  <InitiativeHoldMenuItem
+                    conversationId={c.id}
+                    personaName={persona?.name ?? t("unknownPersona")}
+                    onRelease={hold.setPending}
+                    onHold={hold.holdAgain}
+                  />
                   <DropdownMenuItem
                     variant="destructive"
                     disabled={deletingId === c.id}
@@ -243,6 +265,7 @@ export function ConversationList({
         })}
       </ul>
       {deleteDialog}
+      {releaseDialog}
     </>
   );
 }

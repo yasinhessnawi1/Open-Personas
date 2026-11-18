@@ -18,12 +18,18 @@ import {
 
 const h = vi.hoisted(() => ({
   del: vi.fn(),
+  // D-ORCH-11-18-u: the row menu reads the initiative-hold control on open;
+  // nothing holds these rows, so it offers no item.
+  get: vi.fn(async () => ({
+    data: { state: "not_held", released_at: null, version: "" },
+    response: new Response(null, { status: 200 }),
+  })),
   notify: vi.fn(),
   refresh: vi.fn(),
 }));
 
 vi.mock("@/lib/api/use-api", () => ({
-  useApi: () => ({ DELETE: h.del }),
+  useApi: () => ({ DELETE: h.del, GET: h.get }),
 }));
 vi.mock("@/components/providers/notification-provider", () => ({
   useNotify: () => ({ notify: h.notify }),
