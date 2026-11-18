@@ -158,3 +158,98 @@ def test_the_sibling_stays_gated_after_the_tagged_node_is_really_deleted(
 
     gated = _as(_OWNER, lambda: check.tagged_refs(_OWNER, dinner, include_unsynthesised=False))
     assert gated == {_DINNER}
+
+
+# D-ORCH-11-18-u: the release and the re-block on real Postgres, as persona_app.
+
+_AT = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+def _state(engine: Engine, owner: str = _OWNER) -> Any:  # noqa: ANN401
+    return _as(owner, lambda: PgDisclosureStore(engine).states(owner, ["conv-d"]).get("conv-d"))
+
+
+def _audit(super_engine: Engine) -> list[tuple[str, str, str, Any]]:
+    with super_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT user_id, action, target, metadata FROM audit_log ORDER BY created_at")
+        ).all()
+    return [(str(r[0]), str(r[1]), str(r[2]), r[3]) for r in rows]
+
+
+def test_a_release_covers_what_was_recorded_and_a_new_disclosure_holds_it_again(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    from persona_api.initiative.disclosures import ReleaseOutcome  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    assert _state(app_engine).disclosure_seq == 2
+
+    stale = _as(_OWNER, lambda: facts.release(_OWNER, _PERSONA, "conv-d", version=1, at=_AT))
+    assert stale is ReleaseOutcome.CONFLICT
+    assert _state(app_engine).released_seq is None
+
+    done = _as(_OWNER, lambda: facts.release(_OWNER, _PERSONA, "conv-d", version=2, at=_AT))
+    assert done is ReleaseOutcome.CHANGED
+    assert _state(app_engine).release_in_force is True
+    assert _state(app_engine).released_at == _AT
+
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    after = _state(app_engine)
+    assert (after.disclosure_seq, after.released_seq) == (3, 2)
+    assert after.release_in_force is False
+
+    assert _as(_OWNER, lambda: facts.hold(_OWNER, _PERSONA, "conv-d")) is ReleaseOutcome.CHANGED
+    assert _state(app_engine).released_seq is None
+    assert _as(_OWNER, lambda: facts.hold(_OWNER, _PERSONA, "conv-d")) is ReleaseOutcome.UNCHANGED
+
+    assert _audit(migrated_engine) == [
+        (_OWNER, "conversation.setting_changed", "conv-d", {"persona_id": _PERSONA}),
+        (_OWNER, "conversation.setting_changed", "conv-d", {"persona_id": _PERSONA}),
+    ]
+
+
+def test_a_conversation_held_by_a_tagged_node_alone_is_born_released(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    from persona_api.initiative.disclosures import ReleaseOutcome  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    got = _as(_OWNER, lambda: facts.release(_OWNER, _PERSONA, "conv-d", version=0, at=_AT))
+    assert got is ReleaseOutcome.CHANGED
+    state = _state(app_engine)
+    assert (state.disclosure_seq, state.released_seq) == (1, 1)
+    assert state.release_in_force is True
+
+
+def test_another_owner_cannot_release_or_see_the_release(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    from persona_api.initiative.disclosures import ReleaseOutcome  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    forged = _as(_OTHER, lambda: facts.release(_OTHER, _PERSONA, "conv-d", version=1, at=_AT))
+    assert forged is ReleaseOutcome.GONE, "not their persona"
+    assert _as(_OTHER, lambda: facts.hold(_OTHER, _PERSONA, "conv-d")) is ReleaseOutcome.UNCHANGED
+    assert _state(app_engine, _OTHER) is None
+    assert _state(app_engine).released_seq is None
+    assert _audit(migrated_engine) == []
+
+
+def test_a_release_for_a_persona_that_is_gone_writes_nothing(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    from persona_api.initiative.disclosures import ReleaseOutcome  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    got = _as(_OWNER, lambda: facts.release(_OWNER, "pers_erased", "conv-d", version=0, at=_AT))
+    assert got is ReleaseOutcome.GONE
+    assert _state(app_engine) is None
+    assert _audit(migrated_engine) == []
