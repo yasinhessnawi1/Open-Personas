@@ -13,6 +13,15 @@ mirrors only the `persona-web`-touching surface.
 
 ## [Unreleased]
 
+### Added, the Privacy Policy and the Terms of Service (D-OWNER-11-18 (4))
+
+- **`/legal/privacy` and `/legal/terms`**: public pages rendered by `LegalDocumentView` from
+  `src/content/legal/privacy.ts` and `terms.ts` (title, version, date, contents, sections).
+  The paths live in `src/lib/legal-routes.ts`; the sign-up line, the account menu (cloud only)
+  and the legal page footer read them.
+- **`check:copy`** now also gates `src/content/legal/*.ts` for dashes and banned vocabulary.
+- **`src/content/legal/MAINTAINING.md`** maps each section to the files it depends on.
+
 ### Added, Memory, the interactive knowledge-graph UI (Spec K5)
 
 - **`/memory` area**: a 2-D-canvas force-graph (graphology ForceAtlas2 in a Web Worker):

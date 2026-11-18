@@ -141,7 +141,9 @@
       "manageAccount": "Manage account",
       "appearance": "Appearance",
       "signOut": "Sign out",
-      "plan": "Account"
+      "plan": "Account",
+      "privacy": "Privacy Policy",
+      "terms": "Terms of Service"
     }
   },
   "theme": {
@@ -149,6 +151,15 @@
     "light": "Light",
     "dark": "Dark",
     "system": "System"
+  },
+  "legal": {
+    "privacyTitle": "Privacy Policy",
+    "termsTitle": "Terms of Service",
+    "meta": "Version {version}. Last updated <time>{date}</time>.",
+    "contents": "Contents",
+    "privacyLink": "Privacy Policy",
+    "termsLink": "Terms of Service",
+    "home": "Back to Open Persona"
   },
   "accountDeleted": {
     "title": "Your account is deleted",
@@ -1931,7 +1942,7 @@
       "passwordPlaceholder": "Create a password",
       "submit": "Create account",
       "submitting": "Creating account…",
-      "legal": "By creating an account you agree to the <terms>Terms</terms> and <privacy>Privacy Policy</privacy>.",
+      "legal": "By creating an account you agree to the <terms>Terms of Service</terms>. The <privacy>Privacy Policy</privacy> explains what we do with your data.",
       "haveAccount": "Already have an account?",
       "signIn": "Sign in",
       "verifyTitle": "Check your inbox",

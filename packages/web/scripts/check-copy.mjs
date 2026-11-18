@@ -25,12 +25,18 @@
  * say why. If a word genuinely belongs in one string, that is a fact about
  * that string, not a licence to use it everywhere.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CATALOGUE = join(WEB_ROOT, "src/i18n/messages/en.json");
+/**
+ * The legal documents (Privacy Policy, Terms of Service) are long-form text kept in
+ * their own content modules rather than the catalogue, so they are gated here too.
+ * The whole file is scanned, comments included: these modules hold text, not logic.
+ */
+const LEGAL_DIR = join(WEB_ROOT, "src/content/legal");
 
 /** Words that almost always replace a concrete fact with a vibe. */
 const BANNED_WORDS = [
@@ -98,7 +104,18 @@ function* walk(node, path = []) {
 const catalogue = JSON.parse(readFileSync(CATALOGUE, "utf8"));
 const violations = [];
 
-for (const [key, value] of walk(catalogue)) {
+/** Every legal content module, as (pseudo key, line) pairs so a hit names its line. */
+function* legalLines() {
+  for (const name of readdirSync(LEGAL_DIR)) {
+    if (!name.endsWith(".ts") || name.includes(".test.")) continue;
+    const lines = readFileSync(join(LEGAL_DIR, name), "utf8").split(/\r?\n/);
+    for (const [i, line] of lines.entries()) {
+      yield [`src/content/legal/${name}:${i + 1}`, line];
+    }
+  }
+}
+
+for (const [key, value] of [...walk(catalogue), ...legalLines()]) {
   const exempt = ALLOWLIST.get(key);
   const haystack = value.toLowerCase();
 
@@ -136,5 +153,5 @@ if (unique.length > 0) {
 }
 
 console.log(
-  "Copy gate clean. No AI-slop vocabulary or dashes in the catalogue.",
+  "Copy gate clean. No AI-slop vocabulary or dashes in the catalogue or the legal documents.",
 );
