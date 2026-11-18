@@ -142,7 +142,7 @@ export function ConversationList({
     setPending(null);
     setDeletingId(id);
     try {
-      const { error } = await api.DELETE(
+      const { error, response } = await api.DELETE(
         "/v1/conversations/{conversation_id}",
         {
           params: {
@@ -151,8 +151,13 @@ export function ConversationList({
           },
         },
       );
+      if (error && response.status === 404) {
+        // Already gone (deleted in another tab): show the list as it is now.
+        refreshSidebar();
+        return;
+      }
       if (error) {
-        // R9-304: a 409 (Memory being reorganised) deleted nothing; say so.
+        // R9-304: a 409 (Memory being reorganised) left the conversation; say so.
         notify({ level: "error", title: t("deleteFailed", { name: label }) });
         return;
       }

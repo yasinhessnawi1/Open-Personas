@@ -281,3 +281,52 @@ def test_each_cited_conversation_is_held_once_in_a_stable_order() -> None:
     _backend(engine).insert_node("u1", _node(_from(_D), _from(_C), _from(_D)), _VECTOR)
 
     assert engine.holds() == [f"hold {_C}", f"hold {_D}"]
+
+
+class _FkEngine(_Engine):
+    """Every INSERT fails as Postgres does when a row it references was deleted meanwhile."""
+
+    def _open(self) -> _Conn:
+        self._next += 1
+        engine = self
+
+        class _FkConn(_Conn):
+            def execute(self, stmt: Any, params: dict[str, str] | None = None) -> _Result:  # noqa: ANN401
+                if str(stmt).lstrip().upper().startswith("INSERT"):
+                    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
+                    class _Orig:
+                        sqlstate = engine.sqlstate
+
+                    raise IntegrityError("INSERT", {}, _Orig())  # type: ignore[arg-type]
+                return super().execute(stmt, params)
+
+        return _FkConn(self, self._next)
+
+    sqlstate = "23503"
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda b: b.upsert_edge("u1", _edge(None)),
+        lambda b: b.associate_entities("u1", "n1", ["x"]),
+    ],
+    ids=["semantic_link", "entity_link"],
+)
+def test_a_link_to_a_node_removed_meanwhile_is_a_link_target_gone_error(write: Any) -> None:  # noqa: ANN401
+    """A follow-on write after the forget removed the node (R9-304 review, item 3)."""
+    from persona.graph.errors import GraphLinkTargetGoneError  # noqa: PLC0415
+
+    with pytest.raises(GraphLinkTargetGoneError):
+        write(_backend(_FkEngine()))
+
+
+def test_another_integrity_error_is_not_relabelled() -> None:
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
+    engine = _FkEngine()
+    engine.sqlstate = "23505"
+
+    with pytest.raises(IntegrityError):
+        _backend(engine).upsert_edge("u1", _edge(None))

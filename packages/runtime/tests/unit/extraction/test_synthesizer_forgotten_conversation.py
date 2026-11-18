@@ -114,3 +114,43 @@ async def test_an_entity_write_refused_for_a_forgotten_conversation_merges_nothi
 
     assert outcomes == []
     assert store.merges == []
+
+
+class _LinkStore(_Store):
+    """The node write landed, then the forget removed the node before its links were written."""
+
+    def merge(self, _owner: str, candidate: KnowledgeCandidate) -> MergeOutcome:
+        from persona.graph.errors import GraphLinkTargetGoneError  # noqa: PLC0415
+
+        if self.merges:
+            raise GraphLinkTargetGoneError("gone", context={"node_id": "n1"})
+        self.merges.append(candidate)
+        return MergeOutcome(action=MergeAction.CREATED, node_id="n1")
+
+
+def _synth_with(store: _Store, *, conversation_there: bool) -> Synthesizer:
+    return Synthesizer(
+        extractor=_Extractor((_cand("a"), _cand("b"))),  # type: ignore[arg-type]
+        entity_resolver=_Entities(),  # type: ignore[arg-type]
+        update_resolver=_Updates(),  # type: ignore[arg-type]
+        graph_store=store,  # type: ignore[arg-type]
+        conversation_exists=lambda _id: conversation_there,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_link_lost_to_a_forget_stops_quietly() -> None:
+    store = _LinkStore()
+
+    outcomes = await _synth_with(store, conversation_there=False).synthesise("u1", _input())
+
+    assert [o.node_id for o in outcomes] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_a_link_lost_while_the_conversation_is_there_still_fails_the_job() -> None:
+    """Another delete (the Memory page's) is not a forget: the job retries as before."""
+    from persona.graph.errors import GraphLinkTargetGoneError  # noqa: PLC0415
+
+    with pytest.raises(GraphLinkTargetGoneError):
+        await _synth_with(_LinkStore(), conversation_there=True).synthesise("u1", _input())

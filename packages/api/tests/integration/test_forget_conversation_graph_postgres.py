@@ -369,3 +369,40 @@ def test_a_write_in_flight_is_waited_for_and_then_removed(
     nodes = _rows(migrated_engine, "SELECT id, 1 FROM graph_nodes WHERE owner_id = :o")
     assert "racing" not in nodes, "what the writer committed first, the forget removed"
     assert "only_c" not in nodes
+
+
+def test_a_fact_restated_in_another_conversation_stays(
+    app_engine: Engine,
+    migrated_engine: Engine,
+    graph: PostgresGraphBackend,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Said identically in C and then in D: D's restatement is support (review item 1).
+
+    The second merge finds the content already there and adds nothing to it, but records D
+    on the trail, through the guarded node write. Forgetting C then keeps the fact.
+    """
+    from persona.graph.merge import MergeEngine  # noqa: PLC0415
+    from persona.graph.protocol import KnowledgeCandidate  # noqa: PLC0415
+
+    engine = MergeEngine(backend=graph, embedder=embedder, settings=GraphSettings())
+
+    def _said(conversation: str) -> KnowledgeCandidate:
+        return KnowledgeCandidate(
+            concept_name="occupation",
+            content="I work as a nurse on night shifts",
+            node_kind=NodeKind.FACT,
+            provenance=_from(conversation),
+        )
+
+    first = engine.merge(_OWNER, _said(_C))
+    again = engine.merge(_OWNER, _said(_D))
+    assert again.node_id == first.node_id, "the restatement found the same fact"
+    preview = fcg.preview(app_engine, owner_id=_OWNER, conversation_id=_C)
+    assert preview.facts_kept == 2, "shared, and now the restated fact"
+
+    _forget(app_engine)
+
+    nodes = _rows(migrated_engine, "SELECT id, provenance FROM graph_nodes WHERE owner_id = :o")
+    assert first.node_id in nodes
+    assert _cited(nodes[first.node_id]) == [_D]

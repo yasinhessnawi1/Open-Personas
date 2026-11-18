@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -43,7 +44,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from persona.graph._schema import (
     EMBEDDING_DIM,
@@ -58,6 +59,7 @@ from persona.graph.errors import (
     GraphError,
     GraphIndexError,
     GraphInteractionGoneError,
+    GraphLinkTargetGoneError,
     GraphMergeConflictError,
     GraphNodeBusyError,
     GraphPersonaGoneError,
@@ -78,7 +80,7 @@ from persona.graph.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from sqlalchemy import Connection, Engine
@@ -163,6 +165,23 @@ def cited_conversations(entries: Iterable[NodeProvenance | None]) -> list[str]:
             if p is not None and p.interaction_id and p.interaction_kind == _CONVERSATION_KIND
         }
     )
+
+
+#: Postgres' "foreign key violation": a row the write references is gone.
+_FOREIGN_KEY_VIOLATION = "23503"
+
+
+@contextmanager
+def _link_target_gone(node_id: str) -> Iterator[None]:
+    """A link write whose node (or entity) went meanwhile raises GraphLinkTargetGoneError."""
+    try:
+        yield
+    except IntegrityError as exc:
+        if getattr(exc.orig, "sqlstate", None) != _FOREIGN_KEY_VIOLATION:
+            raise
+        raise GraphLinkTargetGoneError(
+            "a link names a node removed meanwhile", context={"node_id": node_id[:120]}
+        ) from exc
 
 
 def added_entries(
@@ -1059,7 +1078,8 @@ class PostgresGraphBackend:
             self._hold_personas(
                 conn, owner_id, [asserted_by, *guard_personas], cites=[link.provenance]
             )
-            conn.execute(stmt)
+            with _link_target_gone(link.src_node_id):
+                conn.execute(stmt)
 
     def delete_links_from(self, owner_id: str, node_id: str, link_type: LinkType) -> None:
         """Delete a node's OUTGOING edges of one type (semantic-link re-eval on extend, D-K0-2).
@@ -1350,7 +1370,7 @@ class PostgresGraphBackend:
             .on_conflict_do_nothing(index_elements=["node_id", "entity_id"])
             .returning(graph_node_entities.c.entity_id)
         )
-        with self._engine.begin() as conn:
+        with self._engine.begin() as conn, _link_target_gone(node_id):
             self._hold_personas(conn, owner_id, guard_personas)
             return [str(e) for e in conn.execute(stmt).scalars()]
 

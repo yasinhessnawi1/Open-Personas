@@ -332,6 +332,59 @@ def test_re_merging_identical_candidate_is_a_noop() -> None:
     assert len(node_after.provenance) == len(node_before.provenance)  # no trail growth
 
 
+def _said_in(conversation: str | None, persona: str | None = "persona-a") -> NodeProvenance:
+    return NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id=persona,
+        interaction_id=conversation,
+        interaction_kind="conversation" if conversation else None,
+        written_at=NOW,
+    )
+
+
+def test_restating_a_fact_in_another_conversation_records_that_conversation() -> None:
+    """R9-304 review: the fact is now also D's, so forgetting C alone keeps it.
+
+    The content is unchanged (no duplicate text, same content hash) and no version is taken:
+    only the trail grows, through the ordinary node write (so the write guard holds D).
+    """
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    before, _ = b.nodes["u1::node::00000000"]
+
+    out = eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-d")))
+
+    after, _ = b.nodes["u1::node::00000000"]
+    assert out.action is MergeAction.EXTENDED
+    assert len(b.nodes) == 1
+    assert after.content == before.content
+    assert after.content_hash == before.content_hash, "no hash churn"
+    assert [p.interaction_id for p in after.provenance] == ["conv-c", "conv-d"]
+    assert b.versions == [], "a restatement is not a new version"
+
+
+def test_restating_a_fact_in_the_same_conversation_records_nothing_more() -> None:
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+
+    node, _ = b.nodes["u1::node::00000000"]
+    assert [p.interaction_id for p in node.provenance] == ["conv-c"]
+
+
+def test_restating_a_fact_through_another_persona_records_that_persona() -> None:
+    """The same gap for a persona's erasure: the other persona's support is kept."""
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in(None, "persona-a")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in(None, "persona-b")))
+
+    node, _ = b.nodes["u1::node::00000000"]
+    assert [p.persona_id for p in node.provenance] == ["persona-a", "persona-b"]
+
+
 # ----- accumulate + provenance --------------------------------------------
 
 

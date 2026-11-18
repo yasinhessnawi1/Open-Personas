@@ -28,7 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from persona.graph.errors import GraphInteractionGoneError
+from persona.graph.errors import GraphInteractionGoneError, GraphLinkTargetGoneError
 from persona.graph.models import NodeProvenance
 from persona.graph.protocol import KnowledgeCandidate, ProposedLink
 from persona.logging import get_logger
@@ -74,6 +74,9 @@ class Synthesizer:
         disclosures: Where the durable disclosure fact is recorded (R9-253), once per batch
             and before any merge, when a candidate is tagged or carries self-harm means.
             ``None`` records nothing (tests and installs without initiative's gate).
+        conversation_exists: Asked when a link write finds its node removed meanwhile
+            (R9-304 review): ``False`` means the conversation was forgotten, and the
+            synthesis stops quietly; ``True`` (or ``None``) fails the job as before.
     """
 
     def __init__(
@@ -85,6 +88,7 @@ class Synthesizer:
         graph_store: GraphStore,
         persona_exists: Callable[[str], bool] | None = None,
         disclosures: DisclosureRecorder | None = None,
+        conversation_exists: Callable[[str], bool] | None = None,
     ) -> None:
         self._extractor = extractor
         self._entities = entity_resolver
@@ -92,6 +96,7 @@ class Synthesizer:
         self._store = graph_store
         self._persona_exists = persona_exists
         self._disclosures = disclosures
+        self._conversation_exists = conversation_exists
 
     def _erased(self, interaction: ExtractionInput) -> bool:
         """Whether the interaction's persona was erased while this synthesis ran."""
@@ -152,7 +157,20 @@ class Synthesizer:
                 "synthesis stopped: its conversation was forgotten",
                 interaction_id=interaction.interaction_id,
             )
+        except GraphLinkTargetGoneError:
+            if not self._forgotten(interaction):
+                raise
+            _logger.info(
+                "synthesis stopped: its conversation was forgotten between writes",
+                interaction_id=interaction.interaction_id,
+            )
         return outcomes
+
+    def _forgotten(self, interaction: ExtractionInput) -> bool:
+        """Whether the interaction's conversation is gone (only asked after a lost link)."""
+        if self._conversation_exists is None:
+            return False
+        return not self._conversation_exists(interaction.interaction_id)
 
     async def _merge_all(
         self,
@@ -302,6 +320,7 @@ def build_synthesizer(
     backend: ChatBackend,
     persona_exists: Callable[[str], bool] | None = None,
     disclosures: DisclosureRecorder | None = None,
+    conversation_exists: Callable[[str], bool] | None = None,
 ) -> Synthesizer:
     """Compose a ``Synthesizer`` from the wired graph store, registry, and tier backend.
 
@@ -323,4 +342,5 @@ def build_synthesizer(
         graph_store=graph_store,
         persona_exists=persona_exists,
         disclosures=disclosures,
+        conversation_exists=conversation_exists,
     )

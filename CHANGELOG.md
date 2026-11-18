@@ -136,7 +136,8 @@ Per-spec entries are added by the close-out phase of each spec.
   hand. Now a fact only that conversation supports is removed, with its links and history,
   and a fact another conversation also supports stays without that conversation as a
   source. It happens in the same commit as the delete: if Memory is being reorganised the
-  delete answers 409, nothing is removed, and trying again works. A fact still being
+  delete answers 409, the conversation and its memory stay (its attached files may already
+  be gone), and trying again finishes it. A fact still being
   learned from the conversation when it is forgotten is either removed with the rest or
   refused. The delete dialog says how many facts would go. Two limits: a fact that stays keeps
   its wording, which can include what the forgotten conversation added to it; and a fact still

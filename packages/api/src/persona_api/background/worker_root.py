@@ -138,7 +138,7 @@ from persona_api.jobs.worker import build_worker
 from persona_api.schedules.store import ScheduleStore
 from persona_api.schedules.tick import build_scheduler_tick
 from persona_api.schedules.tombstones import ScheduleTombstoneStore
-from persona_api.services import persona_service
+from persona_api.services import chat_service, persona_service
 from persona_api.services.forget_graph import ForgetReleaser
 from persona_api.services.model_tiers import plan_scoped_background_backend
 from persona_api.services.notifications_service import publish_task_updated
@@ -306,6 +306,8 @@ def build_worker_registry(
         # R9-253: a tagged (or means-dropped) candidate records the durable disclosure fact
         # before any merge, so a forgotten tagged node never un-gates its interaction.
         disclosures=PgDisclosureStore(rls_engine),
+        # R9-304 review: a link lost to a conversation forget between writes stops quietly.
+        conversation_exists=functools.partial(chat_service.conversation_exists, rls_engine),
     )
     registry = JobRegistry()
 

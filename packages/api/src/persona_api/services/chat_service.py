@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "create_conversation",
+    "conversation_exists",
     "delete_conversation",
     "edit_and_rerun_turn",
     "get_conversation",
@@ -334,6 +335,15 @@ def _delete_row(
             "the graph is being reorganised", context={"conversation_id": conversation_id}
         ) from exc
     return counts
+
+
+def conversation_exists(engine: Engine, conversation_id: str) -> bool:
+    """Whether the conversation's row is still there, as the engine's role sees it (R9-304)."""
+    with engine.connect() as conn:
+        found = conn.execute(
+            select(conversations_t.c.id).where(conversations_t.c.id == conversation_id)
+        )
+        return found.first() is not None
 
 
 def set_title(*, rls_engine: Engine, conversation_id: str, title: str) -> None:

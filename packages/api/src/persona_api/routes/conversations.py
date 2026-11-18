@@ -167,7 +167,9 @@ async def delete_conversation(
             "facts learned from it out of Memory (R9-304): a fact only this "
             "conversation supports is removed, one another source also supports loses "
             "this conversation as a source; GET .../forget-preview counts them. 409 "
-            "while Memory is being reorganised (nothing is deleted then; try again). "
+            "while Memory is being reorganised: the conversation, its messages and its "
+            "memory stay, though its attached documents may already be removed; try "
+            "again to finish. "
             "Off by default: a plain delete leaves the persona's memory intact."
         ),
     ),
@@ -195,7 +197,8 @@ async def delete_conversation(
        row delete's own transaction, before the delete: see
        :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
        row: a failure (or a 409 while a consolidation holds the graph) leaves
-       the conversation in place, and the delete can be retried.
+       the conversation, its messages and its memory in place, and the delete
+       can be retried. The documents (step 2) run first and are not rolled back.
 
     404 if not the caller's conversation (RLS-scoped).
     """
@@ -264,7 +267,8 @@ async def delete_conversation(
             graph_forget=graph_forget,
         )
     except GraphNodeBusyError as exc:
-        # Nothing was deleted (one transaction): the conversation stays, and a retry is safe.
+        # The row and the graph are one transaction, so both stay (the documents above may be
+        # gone already); a retry finishes the delete.
         raise MemoryNodeChangedError(
             "this conversation's memory is being reorganised, try again",
             context={"conversation_id": conversation_id},

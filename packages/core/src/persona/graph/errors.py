@@ -16,6 +16,7 @@ __all__ = [
     "EntityResolutionError",
     "GraphError",
     "GraphInteractionGoneError",
+    "GraphLinkTargetGoneError",
     "GraphPersonaGoneError",
     "GraphIndexError",
     "GraphNodeBusyError",
@@ -114,6 +115,17 @@ class GraphInteractionGoneError(GraphError):
     transaction: the forget waits for a write in flight and then removes what it wrote, and a
     write after the delete is refused with this. Never retried: the conversation does not come
     back. ``context`` carries the ``interaction_id``.
+    """
+
+
+class GraphLinkTargetGoneError(GraphError):
+    """A link write names a node or entity that was removed meanwhile (R9-304 review).
+
+    A merge writes the node, then its semantic links and entity links in their own
+    transactions. A forget (or a delete) that lands in between removes the node, and the link's
+    foreign key refuses the write. The synthesizer stops quietly when the interaction's
+    conversation is gone (a forget), and fails the job otherwise, as before. ``context``
+    carries the ``node_id``.
     """
 
 

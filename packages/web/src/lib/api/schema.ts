@@ -405,7 +405,8 @@ export interface paths {
      *        row delete's own transaction, before the delete: see
      *        :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
      *        row: a failure (or a 409 while a consolidation holds the graph) leaves
-     *        the conversation in place, and the delete can be retried.
+     *        the conversation, its messages and its memory in place, and the delete
+     *        can be retried. The documents (step 2) run first and are not rolled back.
      *
      *     404 if not the caller's conversation (RLS-scoped).
      */
@@ -6863,7 +6864,7 @@ export interface operations {
   delete_conversation_v1_conversations__conversation_id__delete: {
     parameters: {
       query?: {
-        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised (nothing is deleted then; try again). Off by default: a plain delete leaves the persona's memory intact. */
+        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised: the conversation, its messages and its memory stay, though its attached documents may already be removed; try again to finish. Off by default: a plain delete leaves the persona's memory intact. */
         forget_memory?: boolean;
       };
       header?: never;

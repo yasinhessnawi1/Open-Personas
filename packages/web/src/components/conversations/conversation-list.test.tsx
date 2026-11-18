@@ -226,4 +226,19 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
     );
     expect(h.refresh).not.toHaveBeenCalled();
   });
+
+  it("a conversation already gone (another tab) refreshes the list instead", async () => {
+    h.del.mockResolvedValue({
+      error: { error: "conversation_not_found" },
+      response: { status: 404 },
+    });
+    renderList();
+    await openDeleteDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(h.refresh).toHaveBeenCalled());
+    expect(h.notify).not.toHaveBeenCalledWith(
+      expect.objectContaining({ level: "error" }),
+    );
+  });
 });
