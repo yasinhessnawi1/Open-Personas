@@ -74,9 +74,14 @@ if TYPE_CHECKING:
     )
     from sqlalchemy import Connection, Engine
 
-__all__ = ["CheckpointStore", "TaskStore"]
+__all__ = ["STUCK_AUDIT_ACTION", "CheckpointStore", "TaskStore"]
 
 _log = get_logger("api.tasks.store")
+
+#: The audit action a stuck park writes (R9-219): which dead job it parked on, at which head.
+#: The revival sweep reads it when the dead job's own key no longer matches the head, which
+#: is what a leg leaves behind when it appended its checkpoint and then kept failing.
+STUCK_AUDIT_ACTION = "task.stuck"
 
 #: How many times a transition decides again after losing a race (R9-247). A race is a
 #: window of milliseconds between two controls, so a second read almost always settles it;
@@ -241,6 +246,31 @@ class TaskStore:
             )
         )
         return True
+
+    def record_stuck(self, owner_id: str, task_id: str, *, head: str, job_id: str) -> None:
+        """Record that a stuck park parked on dead job ``job_id`` at head ``head`` (R9-219).
+
+        Written on the owner's scope explicitly: the dead-leg sweep runs with no ambient
+        tenant, so the audit service's ambient-scope write would be refused by RLS and
+        swallowed, and the revival sweep would then find nothing. Best-effort all the same:
+        the park is the durable outcome; a missing record only costs the automatic retry,
+        which the user can still take with Pick up.
+        """
+        try:
+            with rls_connection(self._engine, owner_id) as conn:
+                conn.execute(
+                    insert(audit_log_t).values(
+                        id=f"audit_{uuid.uuid4().hex}",
+                        user_id=owner_id,
+                        action=STUCK_AUDIT_ACTION,
+                        target=task_id,
+                        metadata={"head": head, "job_id": job_id},
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - the park stands either way
+            _log.warning(
+                "could not record the stuck park task_id={tid}: {err}", tid=task_id, err=str(exc)
+            )
 
     def record_run(self, owner_id: str, task_id: str, run_id: str) -> None:
         """Link a leg's agentic run to the task by appending to ``run_ids``.

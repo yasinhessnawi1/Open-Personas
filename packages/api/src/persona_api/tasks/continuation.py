@@ -46,6 +46,7 @@ from persona_api.tasks.handler import (
     TASK_LEG_JOB_TYPE,
     TaskLegPayload,
     enqueue_task_leg,
+    leg_anchor,
     task_leg_idempotency_key,
 )
 
@@ -313,7 +314,13 @@ class TaskContinuation:
     # --- failure (A0 dead-letter → waiting(on_user)) + cancellation ---------
 
     def react_to_dead_leg(
-        self, owner_id: str, task_id: str, cause: str, *, now: datetime
+        self,
+        owner_id: str,
+        task_id: str,
+        cause: str,
+        *,
+        now: datetime,
+        job_id: str | None = None,
     ) -> StuckReport | None:
         """React to A0's REAL dead-letter (jobs.state='dead'): park the task on the user.
 
@@ -323,6 +330,10 @@ class TaskContinuation:
         or cancel; A3's reminder/auto-pause keeps it from haunting (no zombie). **Idempotent**:
         a dead job processed twice (or for an already-parked/terminal task) is a no-op — the
         ``active``-only guard is the single check (no second exhaustion derivation).
+
+        ``job_id`` is the dead job parked on. The park records it with the head it parked at
+        (R9-219), because a leg that appended its checkpoint and THEN kept failing died keyed
+        at the head before its own append, so the revival sweep's key match cannot find it.
 
         Returns the :class:`StuckReport`, or ``None`` if the task was not active (no-op).
         """
@@ -349,6 +360,10 @@ class TaskContinuation:
         # checkpoint instead of off the job key. That is a change to shipped safety
         # machinery and belongs in its own spec, not in a display fix.
         self._tasks.begin_wait(owner_id, task_id, WaitKind.ON_USER, now=now)
+        if job_id is not None:
+            self._tasks.record_stuck(
+                owner_id, task_id, head=leg_anchor(task.head_checkpoint_seq), job_id=job_id
+            )
         _log.info("task stuck → waiting(on_user)", task_id=task_id, cause=cause)
         self._signal(owner_id, task_id, TaskState.WAITING.value)  # stuck→waiting_on_user — A11 ping
         return report
@@ -369,7 +384,10 @@ class TaskContinuation:
             if not task_id:
                 continue
             cause = job.last_error or "leg failed after retries"
-            if self.react_to_dead_leg(job.owner_id, task_id, cause, now=now) is not None:
+            reacted_to = self.react_to_dead_leg(
+                job.owner_id, task_id, cause, now=now, job_id=job.id
+            )
+            if reacted_to is not None:
                 reacted += 1
         return reacted
 

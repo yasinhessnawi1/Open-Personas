@@ -187,9 +187,18 @@ def task_leg_idempotency_key(payload: TaskLegPayload, *, retry: int = 0) -> str:
     appends a checkpoint must re-key or re-enqueue, or the dead-job match is lost. Change the
     shape here and the sweep's prefix together, or a revival silently finds nothing.
     """
-    anchor = "init" if payload.predecessor_seq is None else str(payload.predecessor_seq)
-    base = f"task:{payload.task_id}:after:{anchor}"
+    base = f"task:{payload.task_id}:after:{leg_anchor(payload.predecessor_seq)}"
     return base if retry <= 0 else f"{base}:retry:{retry}"
+
+
+def leg_anchor(seq: int | None) -> str:
+    """The head a leg key is anchored on: ``init`` before the first checkpoint, else the seq.
+
+    One spelling for the three places that must agree on it (R9-173): the key minted here,
+    the revival sweep's dead-job match, and the stuck park's record of the head it parked at
+    (R9-219).
+    """
+    return "init" if seq is None else str(seq)
 
 
 class LegRunnerBuilder(Protocol):

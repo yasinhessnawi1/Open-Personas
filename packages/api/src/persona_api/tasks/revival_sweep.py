@@ -48,9 +48,11 @@ from sqlalchemy import exists, select
 
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import jobs as jobs_t
+from persona_api.db.models import jobs_archive as jobs_archive_t
 from persona_api.db.models import tasks as tasks_t
-from persona_api.tasks.handler import TASK_LEG_JOB_TYPE
+from persona_api.tasks.handler import TASK_LEG_JOB_TYPE, leg_anchor
 from persona_api.tasks.live_legs import live_task_leg_ids
+from persona_api.tasks.store import STUCK_AUDIT_ACTION
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -229,7 +231,18 @@ class RevivalSweeper:
         re-enqueue, or the dead-job match is lost. The stuck park records no obstacle
         checkpoint for exactly this reason (``TaskContinuation.react_to_dead_leg``), and the
         approval gate may append because no dead job exists at its head.
+
+        One dead leg the key cannot find (R9-219): a leg that appended its own checkpoint and
+        THEN failed on every attempt (metering, the budget gate, the continuation's enqueue)
+        died keyed at the head BEFORE its append. The stuck park records which dead job it
+        parked on and the head it parked at, so when the key finds nothing the park's own
+        record is read at this head. It is keyed on the head at the park, so a head that
+        moved after the park still matches nothing, and the rule above stands.
         """
+        return self._dead_cause_by_key(task_id, head) or self._dead_cause_by_park(task_id, head)
+
+    def _dead_cause_by_key(self, task_id: str, head: int | None) -> str | None:
+        """The dead leg whose idempotency key is anchored at ``head`` (the R9-173 match)."""
         prefix = f"task:{task_id}:after:{_head_key(head)}"
         stmt = (
             select(jobs_t.c.last_error)
@@ -245,6 +258,33 @@ class RevivalSweeper:
         with self._dispatch.begin() as conn:
             row = conn.execute(stmt).first()
         return str(row.last_error) if row is not None and row.last_error else None
+
+    def _dead_cause_by_park(self, task_id: str, head: int | None) -> str | None:
+        """The dead leg the stuck park recorded at ``head``, hot or archived (R9-219)."""
+        marker = (
+            select(audit_log_t.c.metadata)
+            .where(
+                audit_log_t.c.action == STUCK_AUDIT_ACTION,
+                audit_log_t.c.target == task_id,
+                audit_log_t.c.metadata["head"].as_string() == _head_key(head),
+            )
+            .order_by(audit_log_t.c.created_at.desc())
+            .limit(1)
+        )
+        with self._dispatch.begin() as conn:
+            row = conn.execute(marker).first()
+            job_id = row.metadata.get("job_id") if row is not None else None
+            if not job_id:
+                return None
+            for table in (jobs_t, jobs_archive_t):
+                cause = conn.execute(
+                    select(table.c.last_error).where(
+                        table.c.id == str(job_id), table.c.state == "dead"
+                    )
+                ).scalar()
+                if cause:
+                    return str(cause)
+        return None
 
     # --- the one act, and everything that can refuse it --------------------------------------
 
@@ -366,5 +406,6 @@ def _head_key(head: int | None) -> str:
 
     Must stay byte-identical to the anchor ``task_leg_idempotency_key`` writes (R9-173): the
     sweep matches dead jobs on it, so the two spellings drifting apart reads as "no dead leg".
+    It is :func:`~persona_api.tasks.handler.leg_anchor`, the one spelling.
     """
-    return "init" if head is None else str(head)
+    return leg_anchor(head)

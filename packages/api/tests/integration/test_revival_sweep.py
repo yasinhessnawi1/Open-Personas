@@ -343,6 +343,32 @@ async def test_a_transient_dead_letter_is_picked_up_once_on_the_users_behalf(
 
 
 @pytest.mark.asyncio
+async def test_a_leg_that_died_after_its_own_append_is_revived(
+    app_engine: Engine, su_engine: Engine
+) -> None:
+    """R9-219, on Postgres under RLS. The leg enqueued at ``init`` appended checkpoint 0 and
+    then failed after the append on every attempt, so it died keyed ``after:init`` with the
+    head at ``0``. The stuck park (run with no ambient tenant, as the worker runs it) records
+    the dead job at the head it parked at, and the sweep reads that record."""
+    task = _task(app_engine, "t_after_append", "brief hacker news", at=datetime.now(UTC))
+    enqueue_task_leg(
+        JobQueue(app_engine),
+        owner_id=_UID,
+        task_id=task.id,
+        predecessor_seq=None,
+        trigger=_fire(),
+    )
+    _advance_head(su_engine, task.id, 0)  # the leg's own append committed
+    _dead_letter(su_engine, task.id, "rate limit exceeded on every provider")
+    _park_on_the_dead_leg(app_engine, su_engine, task.id)
+    _age(su_engine, task.id, by=TRANSIENT_RETRY_AFTER + timedelta(minutes=1))
+
+    assert await _sweeper(app_engine, su_engine).run_once(now=datetime.now(UTC)) == 1
+    states = _jobs(su_engine, task.id)
+    assert states == [("dead", f"task:{task.id}:after:init"), ("queued", f"task:{task.id}:after:0")]
+
+
+@pytest.mark.asyncio
 async def test_appending_a_checkpoint_at_the_park_loses_the_dead_leg(
     app_engine: Engine, su_engine: Engine
 ) -> None:
