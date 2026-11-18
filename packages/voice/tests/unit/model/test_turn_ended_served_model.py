@@ -842,3 +842,70 @@ async def test_a_held_back_usage_chunk_is_billed_at_the_fallback_that_released_i
 
     assert meter.llm == [("anthropic", "fallback-model")]
     assert _ended(ended) == ("completed", "anthropic", "fallback-model")
+
+
+class _CaptureLedger:
+    """A ``LedgerPort`` double recording every idempotent per-turn capture."""
+
+    def __init__(self) -> None:
+        self.captures: list[dict[str, object]] = []
+
+    def capture_up_to_idempotent(self, **kw: object) -> tuple[int, int]:
+        self.captures.append(kw)
+        amount = kw["amount"]
+        assert isinstance(amount, int)
+        return amount, 10_000
+
+
+class _Disposable:
+    def dispose(self) -> None: ...
+
+
+async def test_a_turn_whose_follow_up_fails_bills_its_first_round_and_leaks_nothing(
+    ended: _EndedLines,
+) -> None:
+    """A tool turn's round 2 raises AllModelsFailedError: the turn never answers.
+
+    The streaming loop's ``finally`` still hands the heard reply to the recorder, which
+    commits and bills the turn, so round 1's usage is billed on THAT turn (key ``:1``)
+    and the next turn is billed only its own round (key ``:2``), never the failed
+    turn's leftovers. Sonnet's static rate: 10 in, 5 out = 0.0105 cents a round.
+    """
+    from persona.billing import BillingConfig
+    from persona_voice.billing import VoiceTurnBillingMeter
+    from persona_voice.model.memory import VoiceTurnRecorder
+    from persona_voice.turn_taking.bridge import HeardWordsBridge
+
+    primary = _Backend("anthropic", "claude-sonnet-4-6", ["web_search", _RATE_LIMIT, _SPEAK])
+    fallback = _Backend("anthropic", "claude-haiku-4-5", [_RATE_LIMIT])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain, toolbox=Toolbox([_web_search], allow_list=None))  # type: ignore[list-item]
+    ledger = _CaptureLedger()
+    meter = VoiceTurnBillingMeter(
+        ledger=ledger,  # type: ignore[arg-type]
+        billing_config=BillingConfig(),
+        engine_factory=_Disposable,  # type: ignore[arg-type]
+        user_id="owner-1",
+        call_id="call1",
+        stt_provider="no-priced-stt",
+        stt_model="none",
+        tts_provider="no-priced-tts",
+        tts_model="none",
+        streamed_seconds_reader=lambda: 0.0,
+    )
+    producer.set_turn_meter(meter)
+    recorder = VoiceTurnRecorder(producer._ctx, billing_meter=meter)  # noqa: SLF001
+    producer._turn_recorder = recorder  # noqa: SLF001
+    loop = _loop(producer, _TTS(), reply_listener=HeardWordsBridge(recorder))
+
+    await loop.invoke_model_for_turn(_turn())
+    assert _ended(ended)[0] == "provider_error"
+    await loop.invoke_model_for_turn(_turn("and now?"))
+
+    assert [c["billing_key"] for c in ledger.captures] == ["voice:call1:1", "voice:call1:2"]
+    assert [c["cost_cents"] for c in ledger.captures] == [
+        pytest.approx(0.0105),
+        pytest.approx(0.0105),
+    ]
