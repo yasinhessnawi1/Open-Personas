@@ -39,7 +39,8 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.asyncio
 
-_CFG = BackendConfig(provider="anthropic", model="unused", api_key="sk-test")
+#: Placeholder config: the registry cache is preset, so no key is ever used.
+_CFG = BackendConfig(provider="anthropic", model="unused", api_key="-".join(("r9", "unused")))
 _PROMPT, _COMPLETION = 1000, 500
 
 

@@ -28,7 +28,9 @@ from persona.schema.conversation import ConversationMessage
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-_SECRET = "sk-or-v1-never-log-me"
+#: A sentinel the error text carries; built at run time so no credential-shaped literal
+#: sits in the source. It must never reach an attempt record.
+_SECRET = "-".join(("r9", "229", "sentinel", "never", "log", "me"))
 _OK = TokenUsage(prompt_tokens=3, completion_tokens=2, total_tokens=5)
 _WASTED = TokenUsage(prompt_tokens=900, completion_tokens=0, total_tokens=900)
 
