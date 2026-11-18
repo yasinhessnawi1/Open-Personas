@@ -612,6 +612,61 @@ async def test_a_stop_pressed_during_the_hold_gives_the_hold_back(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("owner_context")
+async def test_a_double_clicked_stop_during_the_hold_still_gives_it_back(
+    audit_rows: list[dict[str, Any]],
+) -> None:
+    """A second cancel while the undo waits must not be forwarded into the hold."""
+    ledger = _Ledger()
+    ledger.gated.add("deduct_idempotent")
+    backend = _Backend()
+    task = asyncio.create_task(_tool(ledger, backend).execute(prompt="a lighthouse at dusk"))
+
+    assert await asyncio.to_thread(ledger.entered.wait, 10), "the hold never started"
+    task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()  # ChatTurnRegistry.request_cancel again, while the task is not done
+    await asyncio.sleep(0)
+    ledger.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert backend.calls == []
+    assert ledger.net_charged == 0, "the second cancel stranded the hold"
+    assert [r["method"] for r in ledger.image_rows()] == ["deduct_idempotent", "grant_idempotent"]
+    assert audit_rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
+async def test_a_bug_in_the_cancel_undo_does_not_replace_the_cancel(
+    monkeypatch: pytest.MonkeyPatch, audit_rows: list[dict[str, Any]]
+) -> None:
+    """A non-ledger error from release during the undo is recorded; the cancel still wins."""
+    ledger = _Ledger()
+    ledger.gated.add("deduct_idempotent")
+
+    async def _broken_release(_self: Any) -> None:
+        msg = "release bug"
+        raise ZeroDivisionError(msg)
+
+    monkeypatch.setattr(chat_charge_module.ChatImageCharge, "release", _broken_release)
+    task = asyncio.create_task(_tool(ledger).execute(prompt="a lighthouse at dusk"))
+
+    assert await asyncio.to_thread(ledger.entered.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0)
+    ledger.gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (row,) = audit_rows
+    assert row["action"] == "image_chat_unrefunded"
+    assert row["metadata"]["cause"] == "error:ZeroDivisionError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("owner_context")
 async def test_a_stop_pressed_during_a_refused_hold_releases_nothing() -> None:
     ledger = _Ledger(balance=0)
     ledger.gated.add("deduct_idempotent")

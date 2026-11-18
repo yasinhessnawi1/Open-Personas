@@ -233,17 +233,36 @@ class ChatImageCharge:
     async def _undo_cancelled_hold(self, task: asyncio.Future[None]) -> None:
         """After a cancel: wait for the hold, and give it back if it landed.
 
-        A hold that was refused, or whose outcome is uncertain (already recorded as
-        ``image_chat_hold_uncertain``), took nothing this code can safely give back.
+        Further cancels (a double-clicked stop) are absorbed rather than forwarded, both
+        while the hold finishes and while the release runs: a cancel forwarded into either
+        lets its thread commit with nobody left to undo it. The caller re-raises the
+        original cancel afterwards. A hold that was refused, or whose outcome is uncertain
+        (already recorded as ``image_chat_hold_uncertain``), took nothing this code can
+        safely give back.
         """
-        try:
-            await task
-        except Exception:  # noqa: BLE001 (refused or uncertain: nothing to release)
+        await _wait_unforwarded(task)
+        if task.cancelled() or task.exception() is not None:
             return
-        try:
-            await self.release()
-        except ImageChargeLedgerError:
-            return  # already recorded as image_chat_unrefunded
+        release = asyncio.ensure_future(self.release())
+        await _wait_unforwarded(release)
+        if release.cancelled():
+            return
+        exc = release.exception()
+        if exc is None or isinstance(exc, ImageChargeLedgerError):
+            return  # released, or already recorded as image_chat_unrefunded
+        # A bug in release must not replace the cancel the caller is about to re-raise.
+        _LOG.error(
+            "chat image hold release raised a bug after a cancel key={key} error={error}",
+            key=self.billing_key,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await self._record_miss(
+            "image_chat_unrefunded",
+            amount=self.held,
+            cost_cents=None,
+            basis="",
+            cause=f"error:{type(exc).__name__}",
+        )
 
     async def settle(self, result: GenerationResult) -> None:
         """True the hold up to what ``result`` cost; a repeat moves nothing.
@@ -411,6 +430,21 @@ class ChatImageCharge:
                 "cause": cause,
             },
         )
+
+
+async def _wait_unforwarded(task: asyncio.Future[None]) -> None:
+    """Wait until ``task`` is done without forwarding any cancel of the waiter into it.
+
+    Each cancel delivered to the waiter is absorbed and the wait resumes; the task keeps
+    running to its own end. Its result or exception is left on the task for the caller.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:  # noqa: BLE001, S112 (the task's own outcome; read off the task)
+            return
 
 
 class _LedgerWriteFailedError(Exception):
