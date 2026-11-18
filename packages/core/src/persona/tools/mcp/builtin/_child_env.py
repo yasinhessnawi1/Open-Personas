@@ -105,6 +105,9 @@ _APP = frozenset(
 #: The names every built-in MCP child receives from the api env, when set there.
 BASE_CHILD_ENV: frozenset[str] = _POSIX | _LOCALE | _WINDOWS | _PYTHON | _APP
 
+#: Windows env names are case-insensitive, so there a name matches whatever its case.
+_FOLD_CASE = sys.platform == "win32"
+
 
 def build_child_env(
     extra: frozenset[str],
@@ -123,10 +126,9 @@ def build_child_env(
     case; elsewhere a name must match exactly.
     """
     allowed = BASE_CHILD_ENV | extra
-    fold = sys.platform == "win32"
     env = {
         name: value
         for name, value in parent.items()
-        if name in allowed or (fold and name.upper() in allowed)
+        if name in allowed or (_FOLD_CASE and name.upper() in allowed)
     }
     return {**env, **(overrides or {})}

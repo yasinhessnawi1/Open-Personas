@@ -9,9 +9,10 @@ Clerk keys, connector tokens) stays in the parent.
 from __future__ import annotations
 
 import re
+import sys
 
 import pytest
-from persona.tools.mcp.builtin import SERVER_BUILDERS, SERVER_CHILD_ENV, child_env
+from persona.tools.mcp.builtin import SERVER_BUILDERS, SERVER_CHILD_ENV, _child_env, child_env
 from persona.tools.mcp.builtin._child_env import BASE_CHILD_ENV, build_child_env
 
 #: Secrets an api process really holds, by name. None may reach a child.
@@ -153,6 +154,16 @@ def test_a_missing_name_is_simply_absent() -> None:
     assert env == {"PATH": "/bin"}
 
 
+def test_an_override_wins_over_the_parent_value() -> None:
+    # A per-spawn value the launcher sets is what the child sees, even for a base name.
+    env = build_child_env(frozenset(), {"PATH": "/bin"}, overrides={"PATH": "/override"})
+    assert env == {"PATH": "/override"}
+
+
+def test_the_case_flag_follows_the_platform() -> None:
+    assert _child_env._FOLD_CASE is (sys.platform == "win32")
+
+
 def test_the_parent_mapping_is_not_changed() -> None:
     parent = {"PATH": "/bin", "DATABASE_URL": "postgres://x"}
     build_child_env(frozenset(), parent, overrides={"PERSONA_FILESYSTEM_SCOPE_ROOT": "/r"})
@@ -161,12 +172,13 @@ def test_the_parent_mapping_is_not_changed() -> None:
 
 def test_windows_names_match_whatever_their_case(monkeypatch: pytest.MonkeyPatch) -> None:
     # Windows env names are case-insensitive; a mixed-case parent name still matches.
-    monkeypatch.setattr("persona.tools.mcp.builtin._child_env.sys.platform", "win32")
+    # The module flag, not the interpreter-wide sys.platform.
+    monkeypatch.setattr(_child_env, "_FOLD_CASE", True)
     env = build_child_env(frozenset(), {"SystemRoot": "C:\\Windows", "Stripe_Secret_Key": "s"})
     assert env == {"SystemRoot": "C:\\Windows"}
 
 
 def test_posix_names_match_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("persona.tools.mcp.builtin._child_env.sys.platform", "linux")
+    monkeypatch.setattr(_child_env, "_FOLD_CASE", False)
     env = build_child_env(frozenset(), {"Path": "/bin", "PATH": "/usr/bin"})
     assert env == {"PATH": "/usr/bin"}

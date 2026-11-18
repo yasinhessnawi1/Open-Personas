@@ -81,8 +81,9 @@ class BuiltinMCPSupervisor:
         host: Bind address for every server. Loopback only (D-27-12); overriding
             this off ``127.0.0.1`` is unsupported and logged.
         python_executable: Interpreter used to spawn ``python -m
-            persona.tools.mcp.builtin``. Defaults to the API's own interpreter so
-            children inherit its environment + user (D-27-12).
+            persona.tools.mcp.builtin``. Defaults to the API's own interpreter, so
+            children run the same Python as the API user (D-27-12). They do NOT
+            inherit the API environment: each gets an allow-listed one (R9-258).
         child_uid: Optional POSIX uid the children drop to at spawn. ``None`` →
             inherit the API process user.
         spawn_timeout_s: How long to wait for a spawned server's port to open
