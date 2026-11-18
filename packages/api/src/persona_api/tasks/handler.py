@@ -68,7 +68,7 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, compute_turn_cost, price_rounds
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -296,13 +296,21 @@ class _LegCost:
         self._reported[kind] = self._reported.get(kind, 0.0) + max(cost_cents, 0.0)
 
     async def on_step_usage(self, usage: StepUsage) -> None:
-        cost_cents, basis = compute_turn_cost(
-            provider=usage.provider,
-            model=usage.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            actual_cost_usd=usage.cost_usd,
+        # Priced as one round (exactly compute_turn_cost for one round), so the step's
+        # failed tries that cost tokens are logged as unrecovered, never charged (D1).
+        cost_cents, basis = price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cost_usd=usage.cost_usd,
+                    provider=usage.provider,
+                    model=usage.model,
+                    unrecovered=usage.unrecovered,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg",
         )
         self._step_cents += cost_cents
         # Prefer a genuine basis over ``unpriced`` (same-provider legs share one).

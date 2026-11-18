@@ -22,11 +22,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from persona_runtime.routing import served_identity
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
     from persona.backends.protocol import ChatBackend
-    from persona.backends.types import ChatResponse, StreamChunk, ToolSpec
+    from persona.backends.types import ChatResponse, ServedCall, StreamChunk, ToolSpec
     from persona.schema.conversation import ConversationMessage
 
 __all__ = [
@@ -141,13 +143,16 @@ class UsageCollectingBackend:
         resolver = getattr(self._inner, "resolve_chain", None)
         return resolver() if callable(resolver) else self._inner
 
-    def _record(self, usage: object) -> None:
+    def _record(self, usage: object, served: ServedCall | None) -> None:
         sink = _active_sink.get()
         if sink is None or usage is None:
             return
+        # R9-296: the model that SERVED the call, from the call's own trace. The inner
+        # backend is usually a tier chain, whose own names are its PRIMARY.
+        provider, model = served_identity(self._inner, served)
         sink.record(
-            provider=self._inner.provider_name,
-            model=self._inner.model_name,
+            provider=provider,
+            model=model,
             prompt_tokens=getattr(usage, "prompt_tokens", 0),
             completion_tokens=getattr(usage, "completion_tokens", 0),
             cost_usd=getattr(usage, "cost_usd", None),
@@ -173,7 +178,7 @@ class UsageCollectingBackend:
             top_p=top_p,
             top_k=top_k,
         )
-        self._record(getattr(response, "usage", None))
+        self._record(getattr(response, "usage", None), getattr(response, "served", None))
         return response
 
     async def chat_stream(
@@ -197,5 +202,5 @@ class UsageCollectingBackend:
             top_k=top_k,
         ):
             if chunk.usage is not None:
-                self._record(chunk.usage)
+                self._record(chunk.usage, chunk.served)
             yield chunk
