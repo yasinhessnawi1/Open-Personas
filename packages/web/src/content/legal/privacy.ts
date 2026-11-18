@@ -153,7 +153,7 @@ You can ask us for a copy of the safeguards that apply.`,
       heading: "Deleting your data",
       body: `**Correct or forget a memory.** You can open your personas' memory, see what they keep, correct a memory, or forget it. Forgetting removes the memory, anything merged into it, and the conversation memory it came from; you see what will go before you confirm. A forgotten memory is removed, not hidden.
 
-**Delete a conversation.** Deleting a conversation removes its messages. You can also tick the option to forget the conversation's memory. Facts a persona drew from it stay until you forget them in Memory.
+**Delete a conversation.** Deleting a conversation removes its messages. You can also tick the option to forget the conversation's memory. That also removes the facts a persona learned only from that conversation, and removes the conversation as a source of facts it also learned elsewhere; the dialog shows how many facts go before you confirm. A fact kept because you also said it elsewhere can still contain wording from the deleted conversation. Correct or forget it in Memory to remove that too.
 
 **Delete a persona.** Deleting a persona removes it at once, with its conversations, its files, its tasks, its wellbeing markers and the memories that came only from it. Memories your other personas also hold stay with them, without the deleted persona's part. Activity records about it (without their content) stay until you delete your account. It cannot be undone.
 
