@@ -259,7 +259,9 @@ class TestBillTurn:
         # ``compute_turn_cost`` with the accumulator's empty provider/model — that
         # logs a spurious ``no pricing metadata; turn recorded unpriced provider=
         # model=`` warning on every LLM-less turn (and prices 0 anyway).
-        from persona_voice.billing import turn_meter as tm
+        # The meter prices through persona_runtime.cost.price_rounds (R9-246), which
+        # calls that module's compute_turn_cost: spy on it there.
+        from persona_runtime import cost as tm
 
         seen: list[dict[str, object]] = []
         real = tm.compute_turn_cost

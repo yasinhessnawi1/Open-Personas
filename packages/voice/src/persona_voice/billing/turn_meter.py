@@ -17,8 +17,8 @@ fallback answered is billed at the fallback, and the OpenRouter actual-cost arm 
 exactly when the fallback was an OpenRouter route (R9-221). Each round of a tool turn is
 priced on its own, at the model that served it, and the rounds are summed; one round's
 OpenRouter actual is used for that round even when another round has none. (The text
-TurnLog still prices a whole turn at its last round's model; voice no longer does.) The
-pair is read from a ledger on a tier wrapper that concurrent calls
+turn is priced by the same function, ``persona_runtime.cost.price_rounds``, since
+R9-246.) The pair is read from a ledger on a tier wrapper that concurrent calls
 share, so a concurrent call can still misattribute a turn (R9-223). The deduct rides
 :meth:`~persona.billing.metered.MeteredBilling.charge` in ``capture`` mode with a
 per-turn idempotency ``billing_key`` (``voice:{call_id}:{turn_seq}``) so a
@@ -53,7 +53,7 @@ from persona.billing import (
 )
 from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
-from persona_runtime.cost import CENTS_ROUND_DECIMALS, compute_turn_cost
+from persona_runtime.cost import CENTS_ROUND_DECIMALS, PricedRound, price_rounds
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -69,15 +69,10 @@ _LOG = get_logger("voice.billing")
 _SECONDS_PER_MINUTE = 60.0
 
 
-@dataclass(frozen=True)
-class LlmRound:
-    """One model round's usage and the (provider, model) that served that round."""
-
-    prompt_tokens: int
-    completion_tokens: int
-    cost_usd: float | None
-    provider: str
-    model: str
+#: One model round's usage and the (provider, model) that served that round. The
+#: runtime's :class:`~persona_runtime.cost.PricedRound`, so chat and voice price a
+#: round with one type and one function (R9-246).
+LlmRound = PricedRound
 
 
 @dataclass(frozen=True)
@@ -260,24 +255,12 @@ class VoiceTurnBillingMeter:
     def _price_llm_rounds(self, rounds: tuple[LlmRound, ...]) -> float:
         """Each round at the model that served it, summed (review test gap on R9-221).
 
-        A turn with no model round (a TTS-only greeting, an STT/TTS-only turn) prices at
-        zero without calling the cost function, and so does a round with no served model
-        (Finding 3: ``compute_turn_cost(provider="", model="")`` would log a spurious
-        ``no pricing metadata`` warning and return 0.0 anyway).
+        Delegates to :func:`~persona_runtime.cost.price_rounds`, the per-round pricing
+        the text loop uses too (R9-246). A turn with no model round (a TTS-only
+        greeting, an STT/TTS-only turn) prices at zero, and so does a round with no
+        served model (Finding 3: it is skipped, never priced as ``("", "")``).
         """
-        cents = 0.0
-        for llm_round in rounds:
-            if not llm_round.model:
-                continue
-            round_cents, _ = compute_turn_cost(
-                provider=llm_round.provider,
-                model=llm_round.model,
-                prompt_tokens=llm_round.prompt_tokens,
-                completion_tokens=llm_round.completion_tokens,
-                actual_cost_usd=llm_round.cost_usd,
-                source=self._cost_source,
-            )
-            cents += round_cents
+        cents, _ = price_rounds(rounds, source=self._cost_source, surface="voice")
         return cents
 
     # ----- deducts (off the audio loop, fail-soft) ---------------------------

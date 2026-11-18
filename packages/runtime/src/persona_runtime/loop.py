@@ -64,7 +64,7 @@ from persona.tools import format_tool_result
 from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should_ask
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, compute_turn_cost, price_rounds
 from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
 from persona_runtime.errors import ScheduleParseError
 from persona_runtime.graph_window import set_recent_window_from_messages
@@ -124,7 +124,7 @@ from persona_runtime.task_origination import (
 from persona_runtime.task_origination.reschedule_flow import assemble_reschedule_echo
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from persona.audit import AuditLogger
     from persona.backends import ChatBackend, StreamChunk, TokenUsage
@@ -1414,6 +1414,10 @@ class ConversationLoop:
         # last-writer-wins (see that function for the summing + mixed-round
         # actual honesty rule).
         round_usages: list[TokenUsage] = []
+        # R9-246: the same rounds, each with the model that served it, so each is
+        # priced at its own model (``price_rounds``). Appended exactly where
+        # ``round_usages`` is, so the priced rounds are the rounds the tokens count.
+        priced_rounds: list[PricedRound] = []
         # R9-223: the served identity of the last round that ran, from that round's own
         # chunks. It names the turn and fills the TurnLog fallback fields (D5: the
         # last round, as before; only where it is read from changed).
@@ -1497,6 +1501,7 @@ class ConversationLoop:
             # few lines down is accumulated separately where IT streams).
             if round_usage is not None:
                 round_usages.append(round_usage)
+                priced_rounds.append(_priced_round(backend, round_usage, outcome.served))
 
             at_cap = rounds >= self._max_tool_rounds
             if round_calls and not at_cap:
@@ -1620,6 +1625,9 @@ class ConversationLoop:
                 # so the capped round's own tokens/cost vanished entirely).
                 if final_outcome.usage is not None:
                     round_usages.append(final_outcome.usage)
+                    priced_rounds.append(
+                        _priced_round(backend, final_outcome.usage, final_outcome.served)
+                    )
 
             # Normal completion (or post-cap final text) — the text already
             # streamed delta-by-delta above. The single is_final=True chunk is
@@ -1682,6 +1690,9 @@ class ConversationLoop:
                 # billed round — accumulate rather than overwrite.
                 if retry_outcome.usage is not None:
                     round_usages.append(retry_outcome.usage)
+                    priced_rounds.append(
+                        _priced_round(backend, retry_outcome.usage, retry_outcome.served)
+                    )
                 reasoning_buffer += retry_outcome.reasoning_text
                 _logger.info(
                     "refusal-retry engaged: corrected a tool refusal tools={tools} tier={tier}",
@@ -1702,10 +1713,9 @@ class ConversationLoop:
             _logger.warning(
                 "multi-round turn had a mixed cost_usd report across rounds "
                 "(some rounds served OpenRouter with a real actual, at least "
-                "one round did not) — dropping the partial actual and "
-                "pricing the turn on its summed tokens instead (an "
-                "incomplete actual is never claimed as the whole turn's "
-                "actual) conversation={conv}",
+                "one round did not); the turn-level usage reports no actual, "
+                "and each round is priced on its own (R9-246), the turn "
+                "labelled by its least certain round conversation={conv}",
                 conv=conversation.conversation_id,
             )
 
@@ -1809,6 +1819,7 @@ class ConversationLoop:
             tier=tier,
             backend=backend,
             served=last_served,
+            priced_rounds=priced_rounds,
             usage=usage,
             latency_ms=latency_ms,
             tool_calls=tool_call_count,
@@ -2668,6 +2679,7 @@ class ConversationLoop:
         mcp_invocations: list[str] | None = None,
         mcp_unavailable_requested: list[str] | None = None,
         served: ServedCall | None = None,
+        priced_rounds: Sequence[PricedRound] = (),
     ) -> None:
         # M2 review (I2): ``usage`` arrives ALREADY summed across every round
         # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
@@ -2708,14 +2720,23 @@ class ConversationLoop:
         # ACTUAL we paid, D-M2-3) takes precedence — basis
         # "actual_openrouter"; otherwise the chain estimates — basis
         # "estimate_static" / "estimate_catalog" / "unpriced".
-        cost, cost_basis = compute_turn_cost(
-            provider=served_provider,
-            model=served_model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            actual_cost_usd=usage.cost_usd if usage is not None else None,
-            source=self._cost_source,
-        )
+        #
+        # R9-246: each round is priced at the model that served THAT round and the
+        # rounds are summed (``price_rounds``, the function voice prices with), not
+        # the summed tokens at the last round's model. A one-round turn prices
+        # exactly as before. A turn with no usage-carrying round keeps the old
+        # zero-token call at the served pair, so its basis is unchanged too.
+        if priced_rounds:
+            cost, cost_basis = price_rounds(priced_rounds, source=self._cost_source, surface="chat")
+        else:
+            cost, cost_basis = compute_turn_cost(
+                provider=served_provider,
+                model=served_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                actual_cost_usd=usage.cost_usd if usage is not None else None,
+                source=self._cost_source,
+            )
         # Spec 23 T11 (D-23-7): accumulate this turn's cost into the loop-owned
         # per-session tally that feeds the soft per-session budget ramp on the
         # NEXT turn. Loop-owned, never on the stateless router/backend.
@@ -2851,6 +2872,31 @@ class _FallbackFields(TypedDict):
     tier_fallback_reasons: list[str]
     tier_fallback_providers: list[str]
     fallback_engaged: bool
+
+
+def _priced_round(
+    backend: ChatBackend, usage: TokenUsage, served: ServedCall | None
+) -> PricedRound:
+    """One round's usage under the model that served that round (R9-246).
+
+    ``served`` is the round's own trace; ``None`` means a bare backend, its own
+    identity. The round's failed tries that reported usage ride along to be logged as
+    unrecovered cost, never charged (D-ORCH-11-18-h).
+    """
+    provider, model = served_identity(backend, served)
+    unrecovered = (
+        tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
+        if served is not None
+        else ()
+    )
+    return PricedRound(
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        cost_usd=usage.cost_usd,
+        provider=provider,
+        model=model,
+        unrecovered=unrecovered,
+    )
 
 
 def _compute_fallback_fields(backend: ChatBackend, served: ServedCall | None) -> _FallbackFields:
