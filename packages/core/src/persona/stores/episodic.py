@@ -124,13 +124,11 @@ class EpisodicStore(TypedStore):
         the text, sitting on top of evidence that has just been deleted.
 
         The core block is derived text too, so it goes the same way, and it goes LAST, after the
-        evidence. That order is what a refresh in flight relies on. If its write commits first,
-        this sees the block and removes it. If this commits first, the refresh's write can put a
-        version back (it rewrites the prior head to link it), but every version it could put
-        back cites evidence that is already gone, and the refresh sweeps the whole chain for
-        exactly that after it writes (``refresh_core_block``). Another writer to the core chain
-        doing the same would not sweep: only the refresh and a rollback write it, and a rollback
-        has no production caller yet.
+        evidence. That order is what a refresh in flight relies on (R9-271). Its write requires
+        the evidence it cites and holds it while it lands. If the write commits first, this waits
+        for it, then sees the block and removes it. If this commits first, the write finds its
+        evidence gone and lands nothing. A gist is written the same way
+        (:meth:`persona.stores.pyramid.EpisodicPyramid.write_gist`).
         """
         if not doc_ids:
             return

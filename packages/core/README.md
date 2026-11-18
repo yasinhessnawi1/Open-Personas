@@ -191,13 +191,18 @@ turn logging), compose `persona-core` with
   lost disk flush. A forget removes every version of what it is given, not just the
   current one. A chain damaged by an older release is repaired by `persona repair`,
   which moves version pointers only, so it never re-embeds and needs no model loaded.
-  Two processes writing the same fact at the same instant differ by transport. On
-  Postgres the database allows one current version per fact, so the second writer reads
-  again and lands on top of the first. On the local Chroma store nothing stops both from
-  winning, and that memory then refuses new saves until you run `persona repair
-  --resolve-raced`, which keeps both versions in the order they were saved. Forgetting
-  something also removes every version of the memory summary written from it, and
-  `persona repair --forgotten-evidence` finds summaries a restored backup still holds.
+  A write lands only if what it read is still there: the version it replaces, at the
+  number it read, and anything it was built from. So a forget that lands while a memory is
+  being written stays forgotten, and a summary written from something you forget during its
+  model call is dropped. Two writers updating the same fact at the same instant land one on
+  top of the other on both transports. Two first writes of a brand new fact at the same
+  instant differ by transport. On Postgres the database allows one current version per fact,
+  so the second writer reads again and lands on top of the first. On the local Chroma store
+  both win, as they do for two processes sharing one Chroma folder, and that memory then
+  refuses new saves until you run `persona repair --resolve-raced`, which keeps both versions
+  in the order they were saved. Forgetting something also removes every version of the
+  memory summary written from it, and `persona repair --forgotten-evidence` finds summaries a
+  restored backup still holds.
 - **Episodic memory is a multi resolution pyramid.** Raw chunks are kept forever
   (text plus embedding, because summaries never replace evidence), and a background
   engine builds gists above them with drill down pointers back to the untouched

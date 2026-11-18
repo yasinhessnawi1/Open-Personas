@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,6 +32,7 @@ from persona.schema.chunks import (
     mint_chunk_id,
 )
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.identity import IdentityStore
 from persona.stores.self_facts import SelfFactsStore
 
@@ -45,7 +47,27 @@ class _SpyBackend:
         self.chunks: dict[tuple[str, str], dict[str, PersonaChunk]] = {}
         self.calls: list[str] = []
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for i, c in self.chunks.get((persona_id, kind), {}).items() if i in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         self.calls.append("upsert")
         bucket = self.chunks.setdefault((persona_id, store_kind), {})
         for chunk in chunks:

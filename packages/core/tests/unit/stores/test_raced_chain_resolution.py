@@ -17,12 +17,14 @@ of this file: a repair that accepts a shape it should refuse rewrites someone's 
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from persona.audit import AuditAction, MemoryAuditLogger
 from persona.errors import BrokenVersionChainError
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
+from persona.stores.guarded import guarded_batch
 from persona.stores.self_facts import SelfFactsStore
 from persona.stores.versioning import (
     ChainDefect,
@@ -85,7 +87,25 @@ class _Backend:
         _ = (persona_id, store_kind, logical_ids)
         return list(self.rows.values())
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda _kind, ids: [self.rows[i] for i in ids if i in self.rows],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         _ = (persona_id, store_kind)
         self.upserts += 1
         self.rows.update({c.id: c for c in chunks})

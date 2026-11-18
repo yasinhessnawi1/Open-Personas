@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence  # noqa: TC003 - in a runtime signature
 from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 — used at runtime by pytest tmp_path
+from typing import Any
 
 import pytest
 from persona.audit import AuditAction, MemoryAuditLogger
@@ -429,12 +430,19 @@ class _RaceAtNextUpsert:
     def __getattr__(self, name: str) -> object:
         return getattr(self._inner, name)
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        **guard: Any,  # noqa: ANN401 - what the write read, forwarded as is (R9-271)
+    ) -> None:
         if store_kind == "self_facts":
             hook, self.hook = self.hook, None
             if callable(hook):
                 hook()
-        self._inner.upsert(persona_id=persona_id, store_kind=store_kind, chunks=chunks)
+        self._inner.upsert(persona_id=persona_id, store_kind=store_kind, chunks=chunks, **guard)
 
 
 class TestRacingPersonaSaves:
@@ -614,36 +622,57 @@ class TestForgetReachesTheCoreBlock:
 
 
 class TestChromaHasNoHeadIndex:
-    """The documented Liskov difference in ``persona.stores.backend``. Postgres raises
-    ``ChainConflictError`` and retries; here both racers land, and repair is the remedy."""
+    """The documented Liskov difference in ``persona.stores.backend``.
 
-    def test_two_racing_writers_both_land_and_repair_settles_them(
+    An update names the version it supersedes, and Chroma checks that under its folder lock, so
+    two updates racing in one process land one on top of the other, as on Postgres (R9-271).
+    Two FIRST writes to a new chain name nothing, and with no head index both land; repair is
+    the remedy there. Postgres raises ``ChainConflictError`` and retries.
+    """
+
+    @staticmethod
+    def _chained(chunk_id: str, body: str, logical_id: str) -> PersonaChunk:
+        return PersonaChunk(
+            id=chunk_id,
+            text=body,
+            created_at=UTC_NOW,
+            provenance=ChunkProvenance(
+                source=WriteSource.USER, logical_id=logical_id, written_at=UTC_NOW
+            ),
+        )
+
+    def test_two_racing_updates_land_one_on_top_of_the_other(
         self, backend: ChromaBackend, audit: MemoryAuditLogger
     ) -> None:
         racing = _RaceAtNextUpsert(backend)
         store = SelfFactsStore(backend=racing, audit_logger=audit)
         store.write("p1", [_chunk(chunk_id="base", text="v1")], source=WriteSource.USER)
 
-        def chained(chunk_id: str, body: str) -> PersonaChunk:
-            return PersonaChunk(
-                id=chunk_id,
-                text=body,
-                created_at=UTC_NOW,
-                provenance=ChunkProvenance(
-                    source=WriteSource.USER, logical_id="base", written_at=UTC_NOW
-                ),
-            )
+        racing.hook = lambda: store.write(
+            "p1", [self._chained("b", "from b", "base")], source=WriteSource.USER
+        )
+        store.write("p1", [self._chained("a", "from a", "base")], source=WriteSource.USER)
 
-        racing.hook = lambda: store.write("p1", [chained("b", "from b")], source=WriteSource.USER)
-        store.write("p1", [chained("a", "from a")], source=WriteSource.USER)  # no error here
+        assert store.diagnose("p1").healthy
+        # ``b`` landed first, inside the hook, and ``a`` was refused, read again and went on top.
+        assert [c.text for c in store.history("p1", "base")] == ["v1", "from b", "from a"]
+
+    def test_two_racing_first_writes_both_land_and_repair_settles_them(
+        self, backend: ChromaBackend, audit: MemoryAuditLogger
+    ) -> None:
+        racing = _RaceAtNextUpsert(backend)
+        store = SelfFactsStore(backend=racing, audit_logger=audit)
+
+        racing.hook = lambda: store.write(
+            "p1", [self._chained("b", "from b", "new")], source=WriteSource.USER
+        )
+        store.write("p1", [self._chained("a", "from a", "new")], source=WriteSource.USER)
 
         found = store.diagnose("p1").findings
         assert [f.defect for f in found] == [ChainDefect.RACED_HEADS]
         assert store.repair("p1") == 0, "a plain repair must leave it"
         assert store.repair("p1", resolve_raced=True) == 1
-        # ``b`` landed first, inside the hook. ``a`` committed last, so its link is the one the
-        # prior head kept, and the resolution puts it last.
-        assert [c.text for c in store.history("p1", "base")] == ["v1", "from b", "from a"]
+        assert store.diagnose("p1").healthy
 
 
 class TestRelinkWithVersionsOnly:
