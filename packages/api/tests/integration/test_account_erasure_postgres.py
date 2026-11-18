@@ -14,7 +14,17 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from _erase_seed import OTHER_OWNER, OWNER, PERSONA, SIBLING, STRANGER, Seeded, row, seed_into
+from _erase_seed import (
+    OTHER_OWNER,
+    OWNER,
+    PERSONA,
+    SIBLING,
+    STRANGER,
+    Seeded,
+    released_facts,
+    row,
+    seed_into,
+)
 from persona.stores.postgres import PostgresBackend
 from persona_api.db.models import metadata
 from persona_api.errors import AccountErasedError
@@ -247,11 +257,13 @@ def test_nothing_of_the_account_remains_and_the_neighbour_keeps_all(
 ) -> None:
     bob_before = _naming(seeded.engine, OTHER_OWNER)
     stripe, clerk = _Stripe(), _Clerk()
+    assert released_facts(seeded.engine, PERSONA) == 1, "a released fact (D-ORCH-11-18-u)"
     erasure = ae.begin_account_erasure(platform, owner_id=OWNER, origin=ae.ORIGIN_ROUTE)
 
     ae.erase_account(_deps(seeded, platform, embedder, stripe=stripe, clerk=clerk), erasure)
 
     assert _naming(seeded.engine, OWNER) == {}, "nothing names the erased account"
+    assert released_facts(seeded.engine, PERSONA) == 0
     assert _anywhere(seeded.engine, OWNER) == {}, "the id is nowhere, not even inside a value"
     assert _naming(seeded.engine, OTHER_OWNER) == bob_before, "the neighbour keeps all"
     ledger = ErasureLedger(seeded.engine)

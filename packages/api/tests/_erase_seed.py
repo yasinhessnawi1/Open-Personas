@@ -301,22 +301,49 @@ def _persona_rows(conn: Connection, owner: str, pid: str) -> None:
     _persona_disclosures(conn, owner, pid)
 
 
+#: When the seeded release was given (D-ORCH-11-18-u).
+RELEASED_AT = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
 def _persona_disclosures(conn: Connection, owner: str, pid: str) -> None:
     """R9-253's disclosure facts: one on a live conversation, one on a conversation now gone.
 
     Postgres editions only (the legacy SQLite build has no graph, so no such table). The second
-    fact names no row that still exists, so only the persona's own cascade can remove it.
+    fact names no row that still exists, so only the persona's own cascade can remove it. The
+    first carries the user's release (D-ORCH-11-18-u), so the erasures are shown to take a
+    released fact with the rest.
     """
     if not inspect(conn).has_table("wellbeing_disclosures"):
         return
-    for interaction in (conversation_of(pid), f"goneconv_{pid[-6:]}"):
-        row(
-            conn,
-            "wellbeing_disclosures",
-            owner_id=owner,
-            persona_id=pid,
-            interaction_id=interaction,
-        )
+    row(
+        conn,
+        "wellbeing_disclosures",
+        owner_id=owner,
+        persona_id=pid,
+        interaction_id=conversation_of(pid),
+        disclosure_seq=2,
+        released_seq=2,
+        released_at=RELEASED_AT,
+    )
+    row(
+        conn,
+        "wellbeing_disclosures",
+        owner_id=owner,
+        persona_id=pid,
+        interaction_id=f"goneconv_{pid[-6:]}",
+    )
+
+
+def released_facts(engine: Engine, persona_id: str) -> int:
+    """How many of the persona's disclosure facts carry a release."""
+    t = metadata.tables["wellbeing_disclosures"]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(t.c.interaction_id).where(
+                t.c.persona_id == persona_id, t.c.released_seq.isnot(None)
+            )
+        ).all()
+    return len(rows)
 
 
 def _persona_memory(memory: Backend, pid: str) -> None:
