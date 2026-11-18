@@ -371,3 +371,76 @@ def test_a_release_overtaken_by_a_tagged_write_can_be_given_again(
     )
     assert (again.state, again.released_at) == ("released", later)
     assert len(_audit(migrated_engine)) == 2
+
+
+def _racing(super_engine: Engine, in_flight: str, contender: Callable[[], Any]) -> tuple[bool, Any]:
+    """Run ``contender`` in a thread while ``in_flight`` holds the fact row, uncommitted.
+
+    Returns (whether the contender waited on the row lock, what it returned). Hang-safe: the
+    holder commits in ``finally``, the joins are bounded and the thread is a daemon.
+    """
+    import threading  # noqa: PLC0415
+
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result["value"] = contender()
+
+    worker = threading.Thread(target=run, daemon=True)
+    holder = super_engine.connect()
+    tx = holder.begin()
+    try:
+        holder.execute(text("SET LOCAL lock_timeout = '10s'"))
+        holder.execute(text(in_flight), {"o": _OWNER})
+        worker.start()
+        worker.join(timeout=1.0)
+        waited = worker.is_alive()
+        tx.commit()
+    finally:
+        if tx.is_active:
+            tx.rollback()
+        holder.close()
+    worker.join(timeout=15.0)
+    assert not worker.is_alive(), "the contender finished once the row was free"
+    return waited, result.get("value")
+
+
+def test_a_release_racing_a_record_is_a_conflict_never_a_release_unseen(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """PR #44 review LOW-4: a disclosure recorded while the release waits is not released."""
+    from persona_api.initiative.disclosures import ReleaseOutcome  # noqa: PLC0415
+
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    waited, outcome = _racing(
+        migrated_engine,
+        "UPDATE wellbeing_disclosures SET disclosure_seq = disclosure_seq + 1 "
+        "WHERE owner_id = :o AND interaction_id = 'conv-d'",
+        lambda: _as(_OWNER, lambda: facts.release(_OWNER, _PERSONA, "conv-d", version=1, at=_AT)),
+    )
+    assert waited, "the release waits on the record's row lock"
+    assert outcome is ReleaseOutcome.CONFLICT
+    state = _state(app_engine)
+    assert (state.disclosure_seq, state.released_seq) == (2, None)
+
+
+def test_a_record_racing_a_release_holds_the_conversation_again(
+    migrated_engine: Engine, app_engine: Engine
+) -> None:
+    """PR #44 review LOW-4: a disclosure recorded behind a release still re-blocks."""
+    _seed(migrated_engine)
+    facts = PgDisclosureStore(app_engine)
+    _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d"))
+    waited, held = _racing(
+        migrated_engine,
+        "UPDATE wellbeing_disclosures SET released_seq = disclosure_seq, released_at = now() "
+        "WHERE owner_id = :o AND interaction_id = 'conv-d'",
+        lambda: _as(_OWNER, lambda: facts.record(_OWNER, _PERSONA, "conv-d")),
+    )
+    assert waited, "the record waits on the release's row lock"
+    assert held is True
+    state = _state(app_engine)
+    assert (state.disclosure_seq, state.released_seq) == (2, 1)
+    assert state.release_in_force is False
