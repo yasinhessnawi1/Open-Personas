@@ -432,6 +432,7 @@ async def maybe_assign_voice(
         prompt_tokens=totals.prompt_tokens,
         completion_tokens=totals.completion_tokens,
         cost_usd=totals.cost_usd,
+        failed_tries=totals.failed_tries,
         surface="voice_pick",
         billing_key=f"voice_pick:{persona_id}",
         cost_source=getattr(state, "metadata_resolver", None),

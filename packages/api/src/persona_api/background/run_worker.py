@@ -160,7 +160,7 @@ class _RunBillingWatcher:
 
     async def on_step_usage(self, usage: StepUsage) -> None:
         # Priced as one round (exactly compute_turn_cost for one round), so the step's
-        # failed tries that cost tokens are logged as unrecovered, never charged (D1).
+        # failed tries that cost tokens are charged at their own model (D-ORCH-11-18-s).
         cost_cents, basis = price_rounds(
             [
                 PricedRound(
@@ -169,7 +169,7 @@ class _RunBillingWatcher:
                     cost_usd=usage.cost_usd,
                     provider=usage.provider,
                     model=usage.model,
-                    unrecovered=usage.unrecovered,
+                    failed_tries=usage.failed_tries,
                 )
             ],
             source=self._cost_source,

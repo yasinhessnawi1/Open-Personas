@@ -57,6 +57,15 @@ Per-spec entries are added by the close-out phase of each spec.
   never printed: the line says `withheld` or `malformed` instead.
 
 ### Changed
+- **You are now charged for a failed model attempt that still cost tokens.** When a
+  model returns an empty or garbled reply, the provider still bills us for the tokens
+  it read and wrote, and your persona then asks another model for the answer. Until
+  now you paid only for the answer and we absorbed the failed attempt. You now pay
+  for both, each at the price of the model that made it, and it is added to the same
+  charge as the answer, so it is rounded up once, not twice. An attempt that failed
+  before it used any tokens, such as a refused or timed-out request, still costs
+  nothing. This applies to chat, voice, agentic runs, task steps, persona drafting
+  and background work.
 - **A clone on Linux now installs the CPU build of PyTorch.** `uv sync` used to pull
   PyTorch's CUDA build on Linux, about 2.3 GB of NVIDIA libraries on x86 and ARM
   alike, though production never had a GPU and the api image now has to build on a

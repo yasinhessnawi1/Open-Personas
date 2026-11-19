@@ -217,3 +217,35 @@ async def test_every_attempt_is_timed() -> None:
 
 def test_a_hand_built_served_call_with_no_history_counts_as_a_first_attempt() -> None:
     assert ServedCall(provider="openai", model="g").first_attempt is True
+
+
+def _try(usage: TokenUsage | None, *, error: str | None = "EmptyCompletionError") -> BackendAttempt:
+    return BackendAttempt(index=0, provider="vendor", model="m", error_class=error, usage=usage)
+
+
+def test_charged_failed_tries_are_the_failed_tries_that_reported_tokens() -> None:
+    """D-ORCH-11-18-s: only a failed try that reported tokens (or an actual) is charged.
+
+    A provider that sends no usage gets a ``TokenUsage(0, 0, 0)`` from the backend, so a
+    try with usage present but zero tokens and no actual reported nothing.
+    """
+    zero = _try(TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0))
+    none = _try(None)
+    prompt_only = _try(TokenUsage(prompt_tokens=5, completion_tokens=0, total_tokens=5))
+    completion_only = _try(TokenUsage(prompt_tokens=0, completion_tokens=3, total_tokens=3))
+    actual_only = _try(
+        TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost_usd=0.001)
+    )
+    served_try = _try(TokenUsage(prompt_tokens=9, completion_tokens=9, total_tokens=18), error=None)
+    served = ServedCall(
+        provider="vendor",
+        model="m",
+        attempts=(zero, none, prompt_only, completion_only, actual_only, served_try),
+    )
+    assert served.charged_failed_tries() == (prompt_only, completion_only, actual_only)
+    assert [a.reported_tokens for a in (zero, none, prompt_only, actual_only)] == [
+        False,
+        False,
+        True,
+        True,
+    ]

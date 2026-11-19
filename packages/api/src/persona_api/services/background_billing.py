@@ -33,11 +33,12 @@ from typing import TYPE_CHECKING
 
 from persona.billing import BillingConfig, credits_charged, infra_rate_cents
 from persona.logging import get_logger
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, price_rounds
 
 from persona_api.services.free_model_usage import FreeModelDailyCounter
 
 if TYPE_CHECKING:
+    from persona.backends.types import BackendAttempt
     from persona.billing import CostBasis, InfraUnit
     from persona_runtime.cost import CostSource
     from sqlalchemy import Engine
@@ -64,6 +65,7 @@ def bill_background_llm(
     cost_source: CostSource | None = None,
     billing_config: BillingConfig | None = None,
     floor: int = 1,
+    failed_tries: tuple[BackendAttempt, ...] = (),
 ) -> None:
     """Owner-bill one background LLM op's real cost, idempotent + fail-soft (Spec M3, T5).
 
@@ -82,11 +84,15 @@ def bill_background_llm(
         cost_source: The pricing resolver chain (full catalog coverage); ``None``
             → the static-only default (OpenRouter actuals still price exactly).
         floor: The minimum charge (infra via the floor, D-M3-4 amendment).
+        failed_tries: The op's failed tries that reported tokens (``UsageTotals``);
+            each is charged at the model that made it, inside the op's one rounding
+            and one ceil (D-ORCH-11-18-s).
     """
     if credits_policy is None or rls_engine is None:
         return
     # A surface that made no real model call (0 tokens, no cost) charges nothing.
-    if prompt_tokens <= 0 and completion_tokens <= 0 and not cost_usd:
+    charged_tries = any(a.reported_tokens for a in failed_tries)
+    if prompt_tokens <= 0 and completion_tokens <= 0 and not cost_usd and not charged_tries:
         return
     # R9-179 item 3, a background op on a free chain spends the SAME account-wide
     # daily cap a free user's turn does, and this is where the api already knows which
@@ -95,13 +101,20 @@ def bill_background_llm(
     FreeModelDailyCounter.from_env(rls_engine).record_served(provider=provider, model=model)
     config = billing_config or BillingConfig()
     try:
-        cost_cents, basis = compute_turn_cost(
-            provider=provider,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            actual_cost_usd=cost_usd,
+        # One round: exactly compute_turn_cost when there is no failed try.
+        cost_cents, basis = price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=cost_usd,
+                    provider=provider,
+                    model=model,
+                    failed_tries=failed_tries,
+                )
+            ],
             source=cost_source,
+            surface=surface,
         )
         charge = credits_charged(
             provider_cents=cost_cents,

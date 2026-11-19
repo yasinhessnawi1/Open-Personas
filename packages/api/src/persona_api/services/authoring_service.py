@@ -30,7 +30,12 @@ from persona.tools.mcp.catalog import (
     mcp_server_entry,
     recommender_provider_tag,
 )
-from persona_runtime.cost import compute_turn_cost, least_certain_basis
+from persona_runtime.cost import (
+    CENTS_ROUND_DECIMALS,
+    PricedRound,
+    least_certain_basis,
+    price_rounds,
+)
 from persona_runtime.routing import served_identity
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -117,19 +122,39 @@ def _price_usage(
     identity comes from ``served``, the trace the chain stamps on the generation's own
     chunks (R9-296); ``None`` means a bare backend, its own identity. ``usage is
     None`` (a backend that reported none) degrades to ``(0.0, "unpriced", 0, 0)``.
+
+    The generation's failed tries that reported tokens (an empty completion before a
+    fallback answered) are charged too, each at the model that made it, and their
+    tokens are counted with the answer's (D-ORCH-11-18-s). Priced through
+    :func:`~persona_runtime.cost.price_rounds`, which for a generation with no failed
+    try is exactly ``compute_turn_cost``.
     """
     if usage is None:
         return 0.0, "unpriced", 0, 0
     provider, model = served_identity(backend, served)
-    cost, basis = compute_turn_cost(
-        provider=provider,
-        model=model,
-        prompt_tokens=usage.prompt_tokens,
-        completion_tokens=usage.completion_tokens,
-        actual_cost_usd=usage.cost_usd,
+    failed = served.charged_failed_tries() if served is not None else ()
+    cost, basis = price_rounds(
+        [
+            PricedRound(
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cost_usd=usage.cost_usd,
+                provider=provider,
+                model=model,
+                failed_tries=failed,
+            )
+        ],
         source=cost_source,
+        surface="authoring",
     )
-    return cost, basis, usage.prompt_tokens, usage.completion_tokens
+    failed_prompt = sum(a.usage.prompt_tokens for a in failed if a.usage is not None)
+    failed_completion = sum(a.usage.completion_tokens for a in failed if a.usage is not None)
+    return (
+        cost,
+        basis,
+        usage.prompt_tokens + failed_prompt,
+        usage.completion_tokens + failed_completion,
+    )
 
 
 class AuthoringSampling(BaseModel):
@@ -368,11 +393,15 @@ async def _generate_stream(
 def _cost_event(
     cost_cents: float, basis: CostBasis, prompt_tokens: int, completion_tokens: int
 ) -> tuple[Literal["cost"], AuthoringCost]:
-    """Build the ``("cost", AuthoringCost)`` event (the summed authoring-turn cost)."""
+    """Build the ``("cost", AuthoringCost)`` event (the summed authoring-turn cost).
+
+    The draft's and the repair's costs are summed by the caller; the sum is rounded
+    once here, to micro-cents, so float noise (0.1 + 0.2) never reaches the ceil.
+    """
     return (
         "cost",
         AuthoringCost(
-            cost_cents=cost_cents,
+            cost_cents=round(cost_cents, CENTS_ROUND_DECIMALS),
             cost_basis=basis,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

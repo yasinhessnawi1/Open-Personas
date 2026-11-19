@@ -129,8 +129,8 @@ async def test_a_step_a_fallback_served_is_reported_at_the_fallback() -> None:
     (usage,) = watcher.usages
     assert (usage.provider, usage.model) == ("openai", "gpt-4o")
     assert (usage.prompt_tokens, usage.completion_tokens) == (10, 5)  # the answer's own
-    # D1: the primary's wasted try rides along, to be logged by the pricer, not charged.
-    (wasted,) = usage.unrecovered
+    # The primary's wasted try rides along, for the pricer to charge (D-ORCH-11-18-s).
+    (wasted,) = usage.failed_tries
     assert (wasted.model, wasted.error_class) == ("claude-sonnet-4-6", "EmptyCompletionError")
     assert wasted.usage is not None
     assert wasted.usage.prompt_tokens == 800

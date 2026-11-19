@@ -68,7 +68,12 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import PricedRound, compute_turn_cost, least_certain_basis, price_rounds
+from persona_runtime.cost import (
+    CENTS_ROUND_DECIMALS,
+    PricedRound,
+    least_certain_basis,
+    price_rounds,
+)
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -300,7 +305,7 @@ class _LegCost:
 
     async def on_step_usage(self, usage: StepUsage) -> None:
         # Priced as one round (exactly compute_turn_cost for one round), so the step's
-        # failed tries that cost tokens are logged as unrecovered, never charged (D1).
+        # failed tries that cost tokens are charged at their own model (D-ORCH-11-18-s).
         cost_cents, basis = price_rounds(
             [
                 PricedRound(
@@ -309,7 +314,7 @@ class _LegCost:
                     cost_usd=usage.cost_usd,
                     provider=usage.provider,
                     model=usage.model,
-                    unrecovered=usage.unrecovered,
+                    failed_tries=usage.failed_tries,
                 )
             ],
             source=self._cost_source,
@@ -339,15 +344,23 @@ class _LegCost:
         not distil bills exactly what it billed before.
         """
         totals = self._distillation.totals()
-        if not totals.prompt_tokens and not totals.completion_tokens:
+        charged_tries = any(a.reported_tokens for a in totals.failed_tries)
+        if not totals.prompt_tokens and not totals.completion_tokens and not charged_tries:
             return 0.0, None
-        return compute_turn_cost(
-            provider=totals.provider,
-            model=totals.model,
-            prompt_tokens=totals.prompt_tokens,
-            completion_tokens=totals.completion_tokens,
-            actual_cost_usd=totals.cost_usd,
+        # One round, its failed tries charged at their own model (D-ORCH-11-18-s).
+        return price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=totals.prompt_tokens,
+                    completion_tokens=totals.completion_tokens,
+                    cost_usd=totals.cost_usd,
+                    provider=totals.provider,
+                    model=totals.model,
+                    failed_tries=totals.failed_tries,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg_distillation",
         )
 
     def result(self) -> tuple[float, str | None]:
@@ -364,7 +377,10 @@ class _LegCost:
         basis: str | None = steps_basis
         if not steps_priced and distilled_basis is not None:
             basis = distilled_basis
-        return self._step_cents + distilled_cents, basis
+        # Rounded once, to the micro-cents every part is priced in: a float sum of
+        # steps such as 0.1 + 2.7 + 0.2 lands on 3.0000000000000004, and the charge ceils
+        # the printed value, so an unrounded total bills an extra credit.
+        return round(self._step_cents + distilled_cents, CENTS_ROUND_DECIMALS), basis
 
     def ledger_spend(
         self,

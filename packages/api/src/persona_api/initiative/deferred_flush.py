@@ -157,6 +157,7 @@ class InitiativeDeferredFlushHandler:
             prompt_tokens=totals.prompt_tokens,
             completion_tokens=totals.completion_tokens,
             cost_usd=totals.cost_usd,
+            failed_tries=totals.failed_tries,
             surface=_SURFACE,
             billing_key=f"{_SURFACE}:{owner_id}:{payload.release_at.isoformat()}",
             cost_source=self._cost_source,
