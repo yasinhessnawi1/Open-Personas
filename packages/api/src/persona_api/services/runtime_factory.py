@@ -72,6 +72,7 @@ from sqlalchemy import select, text
 from persona_api.approvals.action_executor import ToolboxActionExecutor
 from persona_api.db.models import personas as personas_t
 from persona_api.editions import MeteredCreditsPolicy
+from persona_api.imagegen.chat_charge import ChatImageChargeHook
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
@@ -699,6 +700,27 @@ class RuntimeFactory:
         """
         return self._openrouter_resolver
 
+    def _chat_image_charge_hook(self) -> ChatImageChargeHook:
+        """The chat ``generate_image`` tool's charge hook (R9-308), over this factory's policy.
+
+        The floor is the image floor every other image surface uses
+        (``APIConfig.image_credit_floor``); without an api config (CLI / tests) it is the
+        hook's own default of one credit. The cost source is the same resolver every loop
+        prices with.
+        """
+        if self._api_config is None:
+            return ChatImageChargeHook(
+                credits_policy=self._credits_policy,
+                rls_engine=self._engine,
+                cost_source=self._metadata_resolver,
+            )
+        return ChatImageChargeHook(
+            credits_policy=self._credits_policy,
+            rls_engine=self._engine,
+            cost_source=self._metadata_resolver,
+            floor=self._api_config.image_credit_floor,
+        )
+
     @property
     def metadata_resolver(self) -> ChainedModelMetadataResolver:
         """The shared cost-pricing chain (static + optional OpenRouter catalog).
@@ -964,6 +986,11 @@ class RuntimeFactory:
         # ``code_execution`` graceful-absence shape: no backend → no tool;
         # the model surfaces a structured error if it tries to invoke one
         # that isn't registered.
+        #
+        # R9-308: the tool now charges the owner for what it makes. It used to call the
+        # backend with no credits policy at all, so every chat image was free. The hook
+        # checks the balance before the provider and records one keyed ledger entry per
+        # call after it, priced like every other image (``image_cost``).
         if self._image_backend is not None:
             extra.append(
                 make_generate_image_tool(
@@ -971,6 +998,7 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                     persona_visual_style=persona.identity.visual_style,
                     persister=workspace_persister,
+                    charge_hook=self._chat_image_charge_hook(),
                 )
             )
         # Spec 28 B3 — render_diagram is runtime-wired (needs the persister to

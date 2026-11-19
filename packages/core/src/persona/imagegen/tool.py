@@ -66,11 +66,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.imagegen._merge import merge_visual_style
+from persona.imagegen.charge import ImageChargeLedgerError, ImageChargeRefusedError
 from persona.imagegen.errors import (
     ContentRejectedError,
     ImageGenError,
 )
-from persona.imagegen.result import ImageGenOptions
+from persona.imagegen.result import MAX_IMAGES_PER_CALL, ImageGenOptions
 from persona.imagegen.safety import (
     hash_prompt_for_audit,
     is_hard_line_violation,
@@ -81,7 +82,9 @@ from persona.tools.audit import ToolAuditEvent
 from persona.tools.protocol import AsyncTool, tool
 
 if TYPE_CHECKING:
+    from persona.imagegen.charge import ImageCharge, ImageChargeHook
     from persona.imagegen.protocol import ImageBackend
+    from persona.imagegen.result import GenerationResult
     from persona.tools.audit import ToolAuditLogger
     from persona.tools.workspace_persister import WorkspacePersister
 
@@ -117,6 +120,7 @@ def make_generate_image_tool(
     persona_visual_style: str | None = None,
     persister: WorkspacePersister | None = None,
     description: str = _DEFAULT_DESCRIPTION,
+    charge_hook: ImageChargeHook | None = None,
 ) -> AsyncTool:
     """Build the ``generate_image`` :class:`AsyncTool`.
 
@@ -161,6 +165,15 @@ def make_generate_image_tool(
         description: Tool description fed to the model. The default
             covers the spec §5 wording; override to surface persona-
             specific guidance.
+        charge_hook: Optional :class:`ImageChargeHook` (R9-308). When
+            provided it is asked to authorize every call AFTER the options
+            validate and BEFORE the provider is called; a refusal returns a
+            structured error (``insufficient_credits`` / ``daily_spend_cap``)
+            and the provider is never called. The charge it returns is
+            settled with the provider's result after a success and released
+            after a failure.
+            ``None`` (the CLI, core tests) bills nothing, as before. Core
+            only defines the seam; the api implements it over its ledger.
 
     Returns:
         An :class:`AsyncTool` named ``generate_image``. The persona's
@@ -234,17 +247,14 @@ def make_generate_image_tool(
         merged_prompt = merge_visual_style(prompt, persona_visual_style)
 
         # 3. Validate ImageGenOptions — closes the closed-preset surface
-        #    + the D-15-3 count<=2 cap. Bad values from the model land as
+        #    + the D-15-3 count<=2 cap (MAX_IMAGES_PER_CALL, R9-308). Bad
+        #    values from the model land as
         #    structured failure (the @tool decorator's validation
         #    envelope already covers schema-level errors; this catches
         #    e.g. unknown ``size`` strings that pass the str type check
         #    but fail the Literal validation).
         try:
-            options = ImageGenOptions(
-                size=size,  # type: ignore[arg-type]
-                count=count,
-                quality=quality,  # type: ignore[arg-type]
-            )
+            options = _validated_options(size=size, count=count, quality=quality)
         except Exception as exc:  # noqa: BLE001 — ValidationError + value coercion + Literal misses
             _emit_options_error_audit(
                 audit_logger=audit_logger,
@@ -265,11 +275,30 @@ def make_generate_image_tool(
                 },
             )
 
+        # 3b. R9-308: ask the charge hook BEFORE the provider is called, so an
+        #     image the person cannot pay for is never made.
+        charge: ImageCharge | None = None
+        if charge_hook is not None:
+            try:
+                charge = await charge_hook.authorize(
+                    options, provider=backend.provider_name, model=backend.model_name
+                )
+            except ImageChargeRefusedError as exc:
+                return _refused_result(
+                    exc,
+                    audit_logger=audit_logger,
+                    persona_id=persona_id,
+                    provider=backend.provider_name,
+                    model=backend.model_name,
+                )
+
         # 4. Backend dispatch — adapter-level error funnel surfaces SDK
         #    exceptions as ContentRejectedError (moderation) or
         #    ImageGenError-family (auth / rate / transient / etc.).
         try:
-            result = await backend.generate(merged_prompt, options=options)
+            result = await _generate(
+                backend, merged_prompt, options=options, charge=charge, persona_id=persona_id
+            )
         except ContentRejectedError as exc:
             stage = exc.context.get("stage", "")
             reason = exc.context.get("reason", "provider_moderation")
@@ -336,6 +365,10 @@ def make_generate_image_tool(
         #    (workspace_path is None at this layer — T15 service rewrites
         #    after disk persistence); ``content`` is a short human-
         #    readable summary the model can echo.
+        # R9-308: the provider returned images, so they are charged now, before
+        # persistence, the same point the request path trues up at.
+        if charge is not None:
+            await _settle(charge, result, persona_id=persona_id)
         image_count = len(result.images)
         _emit_success_audit(
             audit_logger=audit_logger,
@@ -432,6 +465,137 @@ def make_generate_image_tool(
         )
 
     return generate_image
+
+
+def _validated_options(*, size: str, count: int, quality: str) -> ImageGenOptions:
+    """The model's arguments as options, with the count capped at the route's cap.
+
+    :class:`ImageGenOptions` admits up to four (the backends' contract); a chat call may
+    ask for no more than :data:`MAX_IMAGES_PER_CALL`, the same as the HTTP route (R9-308).
+    """
+    if count > MAX_IMAGES_PER_CALL:
+        msg = f"count must be at most {MAX_IMAGES_PER_CALL} (got {count})"
+        raise ValueError(msg)
+    return ImageGenOptions(
+        size=size,  # type: ignore[arg-type]
+        count=count,
+        quality=quality,  # type: ignore[arg-type]
+    )
+
+
+async def _generate(
+    backend: ImageBackend,
+    prompt: str,
+    *,
+    options: ImageGenOptions,
+    charge: ImageCharge | None,
+    persona_id: str | None,
+) -> GenerationResult:
+    """Call the provider; when it raises, release the charge before the error goes on.
+
+    Any exception releases, not only the image errors the tool turns into results: an
+    unexpected one still made no image, and an authorization may be holding money.
+    """
+    try:
+        return await backend.generate(prompt, options=options)
+    except BaseException:
+        if charge is not None:
+            await _release(charge, persona_id=persona_id)
+        raise
+
+
+async def _release(charge: ImageCharge, *, persona_id: str | None) -> None:
+    """Release a charge after a failed generation; nothing it raises replaces that failure.
+
+    The person must see the provider's error, not a billing one, so a ledger failure is a
+    warning and anything else (a bug in the hook) is logged at error level.
+    """
+    try:
+        await charge.release()
+    except ImageChargeLedgerError as exc:
+        _LOG.warning(
+            "generate_image charge failed to release (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            error=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 (a hook bug is logged loudly, never surfaced)
+        _LOG.error(
+            "generate_image charge release raised a bug (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+async def _settle(charge: ImageCharge, result: GenerationResult, *, persona_id: str | None) -> None:
+    """Settle the charge for ``result``; nothing it raises takes the image away.
+
+    By now the provider has made the images and billed us for them, and the person has
+    paid the hold. Failing the tool here would charge them for an image they never get.
+    A ledger failure (the hook's :class:`ImageChargeLedgerError`, already recorded) is a
+    warning. Anything else is a bug in the hook: it is logged at error level, so it stays
+    visible, and the image is still returned.
+    """
+    try:
+        await charge.settle(result)
+    except ImageChargeLedgerError as exc:
+        _LOG.warning(
+            "generate_image charge failed to settle (fail-soft)",
+            persona_id=persona_id or "<unknown>",
+            provider=result.provider,
+            model=result.model,
+            image_count=len(result.images),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 (a hook bug is logged loudly, never surfaced)
+        _LOG.error(
+            "generate_image charge settle raised a bug (fail-soft, image kept)",
+            persona_id=persona_id or "<unknown>",
+            provider=result.provider,
+            model=result.model,
+            image_count=len(result.images),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+def _refused_result(
+    exc: ImageChargeRefusedError,
+    *,
+    audit_logger: ToolAuditLogger | None,
+    persona_id: str | None,
+    provider: str,
+    model: str,
+) -> ToolResult:
+    """The structured error for an image the person cannot pay for; the provider was not called."""
+    reason = exc.context.get("reason", "insufficient_credits")
+    _emit_error_audit(
+        audit_logger=audit_logger,
+        persona_id=persona_id,
+        provider=provider,
+        model=model,
+        error_type=type(exc).__name__,
+        reason=reason,
+    )
+    _LOG.info(
+        "generate_image refused by its charge hook; provider not called",
+        persona_id=persona_id or "<unknown>",
+        provider=provider,
+        reason=reason,
+    )
+    return ToolResult(
+        tool_name="generate_image",
+        # The message alone: it is written for the person, the context is for logs.
+        content=f"{reason}: {exc.message}",
+        is_error=True,
+        metadata={
+            "outcome": "error",
+            "reason": reason,
+            "provider": provider,
+            "model": model,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

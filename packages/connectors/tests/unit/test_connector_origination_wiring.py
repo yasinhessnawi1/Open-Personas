@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from persona_api.config import APIConfig, Edition
+from persona_api.services.chat_turn_composition import build_chat_turn_registry
 from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_connectors import composition, service
 from persona_connectors.config import ConnectorConfig
@@ -257,3 +258,36 @@ def test_the_service_entry_binds_before_it_can_return() -> None:
     assert bind_line.startswith("    channels.bind("), (
         "the bind is indented into a branch, so a host can be handed an unbound registry"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_real_root_composes_a_registry_that_does_not_charge_for_images(
+    tmp_path: Path,
+) -> None:
+    """R9-308 (M1): a connector sends only text, so a persona's image there is not charged.
+
+    ``_collect_reply`` returns the reply text alone, so an image made on Telegram reaches
+    nobody. The owner ruled the house pays for it; the registry states that explicitly,
+    and the chat image charge reads the flag off each turn's request context.
+    """
+    captured: list[dict[str, object]] = []
+    built: list[object] = []
+    real = build_chat_turn_registry
+
+    def _recording(**kwargs: object) -> object:
+        captured.append(kwargs)
+        registry = real(**kwargs)  # type: ignore[arg-type]
+        built.append(registry)
+        return registry
+
+    config = _connector_config(telegram_bot_token="tg-token")  # noqa: S106 - test literal
+    monkeypatched = pytest.MonkeyPatch()
+    try:
+        monkeypatched.setattr(composition, "build_chat_turn_registry", _recording, raising=True)
+        await _build(config, _api_config(tmp_path))
+    finally:
+        monkeypatched.undo()
+
+    assert len(captured) == 1, captured
+    assert captured[0]["delivers_images"] is False
+    assert built[0].delivers_images is False  # type: ignore[attr-defined]
