@@ -7,6 +7,7 @@ RLS-scoped via ``get_current_user``. The per-request loop builder comes from
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 from datetime import UTC, datetime  # noqa: TC003 — used in cast() at runtime
@@ -15,11 +16,12 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from persona.approvals import is_decision_cue
+from persona.graph.errors import GraphNodeBusyError
 from persona.stores.episodic import EpisodicStore
 
 from persona_api.approvals import ApprovalStore
 from persona_api.auth import AuthenticatedUser, get_current_user
-from persona_api.errors import TurnNotActiveError
+from persona_api.errors import MemoryNodeChangedError, TurnNotActiveError
 from persona_api.jobs.handlers.file_extract import (
     enqueue_file_extract,
     file_extract_queue_ready,
@@ -30,6 +32,7 @@ from persona_api.routes._runtime_guard import require_runtime_wired
 from persona_api.schemas import (
     ActiveTurnResponse,
     ConversationDetail,
+    ConversationForgetPreview,
     ConversationSummary,
     CreateConversationRequest,
     EditMessageRequest,
@@ -42,6 +45,7 @@ from persona_api.services import (
     audit_service,
     chat_service,
     document_service,
+    forget_conversation_graph,
     memory_service,
     notifications_service,
 )
@@ -158,9 +162,15 @@ async def delete_conversation(
         default=False,
         description=(
             "Also forget the episodic memory this conversation produced (Spec K11, "
-            "D-K11-9) — exact match on chunks stamped with this conversation's id, "
-            "content-match fallback for legacy (pre-stamp) chunks. Off by default: "
-            "a plain delete leaves the persona's memory intact."
+            "D-K11-9): exact match on chunks stamped with this conversation's id, "
+            "content-match fallback for legacy (pre-stamp) chunks. Also takes the "
+            "facts learned from it out of Memory (R9-304): a fact only this "
+            "conversation supports is removed, one another source also supports loses "
+            "this conversation as a source; GET .../forget-preview counts them. 409 "
+            "while Memory is being reorganised: the conversation, its messages and its "
+            "memory stay, though its attached documents may already be removed; try "
+            "again to finish. "
+            "Off by default: a plain delete leaves the persona's memory intact."
         ),
     ),
 ) -> None:
@@ -183,6 +193,12 @@ async def delete_conversation(
        docstring for the exact ∪ content-match cascade. A no-op when the
        memory backend isn't composed (community/no-DB edition) — the
        conversation delete itself is unaffected either way.
+    5. **Knowledge-graph facts** (R9-304), with ``forget_memory=true``: in the
+       row delete's own transaction, before the delete: see
+       :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
+       row: a failure (or a 409 while a consolidation holds the graph) leaves
+       the conversation, its messages and its memory in place, and the delete
+       can be retried. The documents (step 2) run first and are not rolled back.
 
     404 if not the caller's conversation (RLS-scoped).
     """
@@ -224,16 +240,39 @@ async def delete_conversation(
             document_store=build_document_store(),
         )
 
-    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade.
-    chat_service.delete_conversation(
-        rls_engine=request.app.state.rls_engine,
-        conversation_id=conversation_id,
-        forget_memory=forget_memory,
-        persona_id=persona_id,
-        episodic_store=episodic_store,
-        match_texts=match_texts,
-        match_floor=memory_service.ForgetSettings().similarity_floor,
+    # R9-304: forgetting the memory also takes the facts learned here out of the graph, in the
+    # row delete's own transaction (see forget_conversation_graph). A no-op off Postgres.
+    graph_forget = (
+        functools.partial(
+            forget_conversation_graph.forget_conversation_graph,
+            owner_id=user.id,
+            conversation_id=conversation_id,
+        )
+        if forget_memory
+        else None
     )
+
+    # DB delete (existing cascade to messages + turn_logs) + the K11-T3 episodic cascade. Off the
+    # event loop: the graph step may wait for a running consolidation (R9-287's bound, 15 s).
+    try:
+        graph_counts = await asyncio.to_thread(
+            chat_service.delete_conversation,
+            rls_engine=request.app.state.rls_engine,
+            conversation_id=conversation_id,
+            forget_memory=forget_memory,
+            persona_id=persona_id,
+            episodic_store=episodic_store,
+            match_texts=match_texts,
+            match_floor=memory_service.ForgetSettings().similarity_floor,
+            graph_forget=graph_forget,
+        )
+    except GraphNodeBusyError as exc:
+        # The row and the graph are one transaction, so both stay (the documents above may be
+        # gone already); a retry finishes the delete.
+        raise MemoryNodeChangedError(
+            "this conversation's memory is being reorganised, try again",
+            context={"conversation_id": conversation_id},
+        ) from exc
 
     # (Spec 13 T12 inserts its image-workspace-cascade here when it lands.)
 
@@ -242,12 +281,51 @@ async def delete_conversation(
         user_id=user.id,
         action="conversation.delete",
         target=conversation_id,
+        metadata=_graph_audit(graph_counts),
     )
     # R9-012: post-commit sidebar liveness ping (see create_conversation).
     notifications_service.publish_sidebar_changed(
         getattr(request.app.state, "event_channel", None),
         owner_id=user.id,
         reason="conversation.deleted",
+    )
+
+
+def _graph_audit(counts: dict[str, int] | None) -> dict[str, str] | None:
+    """The graph step's counts for the audit row: numbers only, never ids or content."""
+    if not counts:
+        return None
+    return {
+        "graph_facts_removed": str(counts.get("nodes_deleted", 0)),
+        "graph_facts_stripped": str(counts.get("nodes_stripped", 0)),
+    }
+
+
+@router.get(
+    "/conversations/{conversation_id}/forget-preview",
+    response_model=ConversationForgetPreview,
+)
+async def preview_conversation_forget(
+    conversation_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> ConversationForgetPreview:
+    """How many Memory facts forgetting this conversation's memory would remove (R9-304).
+
+    For the delete dialog's "also forget" choice. A pure read: nothing is deleted. 404 if the
+    conversation is not the caller's. Zeros where there is no graph.
+    """
+    chat_service.get_conversation(
+        rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
+    )
+    counts = await asyncio.to_thread(
+        forget_conversation_graph.preview,
+        request.app.state.rls_engine,
+        owner_id=user.id,
+        conversation_id=conversation_id,
+    )
+    return ConversationForgetPreview(
+        facts_removed=counts.facts_removed, facts_kept=counts.facts_kept
     )
 
 

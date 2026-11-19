@@ -16,6 +16,7 @@ from persona.schema.persona import PersonaPresentation  # noqa: TC001 — runtim
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 __all__ = [
+    "InitiativeHoldResponse",
     "AcceptanceCriterionOut",
     "ApprovalDecisionResult",
     "ApprovalOut",
@@ -306,6 +307,19 @@ class ToolRecommendationResponse(_Output):
 
 
 # -- conversations ----------------------------------------------------------
+
+
+class ConversationForgetPreview(_Output):
+    """What forgetting a conversation's memory would do to the facts in Memory (R9-304).
+
+    ``facts_removed``: facts only this conversation supports, which the delete removes.
+    ``facts_kept``: facts another source also supports, which stay without this conversation as
+    a source. Counts only, for the delete dialog; merged duplicates and the user's own node are
+    not counted. Both are 0 where there is no graph.
+    """
+
+    facts_removed: int = Field(ge=0)
+    facts_kept: int = Field(ge=0)
 
 
 class ConversationSummary(_Output):
@@ -1706,3 +1720,17 @@ class InitiativeDeclineOut(_Output):
     declined: bool  # the durable outcome: the opportunity is suppressed
     changed: bool = False  # false = already live-declined (nothing added)
     note: str = ""
+
+
+class InitiativeHoldResponse(_Output):
+    """A conversation's "fine to bring this up" control (D-ORCH-11-18-u).
+
+    ``held``: a disclosure keeps the conversation out of the persona's unprompted
+    initiative. ``released``: the user said it may be drawn on again (``released_at``).
+    ``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a
+    release (it names no count).
+    """
+
+    state: Literal["held", "released", "not_held"]
+    released_at: datetime | None
+    version: str

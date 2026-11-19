@@ -30,10 +30,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal, cast
 
 from persona.errors import PersonaError, PersonaNotFoundError
+from persona.graph.errors import GraphNodeBusyError
 from persona.logging import get_logger
 from persona.schema.conversation import Conversation, ConversationMessage
 from sqlalchemy import delete, func, insert, over, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from persona_api.db.engine import aware_utc
 from persona_api.db.models import conversations as conversations_t
@@ -41,6 +42,7 @@ from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import ConversationNotFoundError
 from persona_api.services import document_service, image_service
+from persona_api.services import forget_conversation_graph as forget_graph
 from persona_api.services.message_metadata import metadata_from_channel
 
 if TYPE_CHECKING:
@@ -70,6 +72,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "create_conversation",
+    "conversation_exists",
     "delete_conversation",
     "edit_and_rerun_turn",
     "get_conversation",
@@ -237,7 +240,8 @@ def delete_conversation(
     episodic_store: EpisodicStore | None = None,
     match_texts: Callable[[str, list[str], float], list[str]] | None = None,
     match_floor: float = 0.80,
-) -> None:
+    graph_forget: Callable[[Connection], dict[str, int]] | None = None,
+) -> dict[str, int]:
     """Delete a conversation (cascades to its messages + turn_logs via FK).
 
     RLS-scoped → a conversation that isn't the caller's is invisible and the
@@ -268,21 +272,19 @@ def delete_conversation(
     ``forget_memory=True``; a missing collaborator (community/no-memory-backend
     edition) makes the cascade a no-op rather than an error — the conversation
     delete itself always proceeds.
+
+    ``graph_forget`` (R9-304): with ``forget_memory``, the step that takes the facts learned
+    from this conversation out of the knowledge graph
+    (:func:`persona_api.services.forget_conversation_graph.forget_conversation_graph`). It runs
+    inside the row delete's transaction, before the delete, so the two commit together: a
+    failure leaves the conversation in place for a retry, and a lost lock wait is raised as
+    :class:`GraphNodeBusyError` (the route's 409). Returns its counts (``{}`` without it).
     """
     message_texts: list[str] = []
     if forget_memory:
         message_texts = _conversation_message_texts(rls_engine, conversation_id)
 
-    with rls_engine.begin() as conn:
-        result = conn.execute(
-            delete(conversations_t)
-            .where(conversations_t.c.id == conversation_id)
-            .returning(conversations_t.c.id)
-        )
-        if result.first() is None:
-            raise ConversationNotFoundError(
-                "conversation not found", context={"id": conversation_id}
-            )
+    graph_counts = _delete_row(rls_engine, conversation_id, graph_forget if forget_memory else None)
 
     if forget_memory and persona_id is not None and episodic_store is not None:
         all_chunks = episodic_store.get_all(persona_id)
@@ -305,6 +307,43 @@ def delete_conversation(
         forgotten = exact_ids | content_ids
         if forgotten:
             episodic_store.remove_documents(persona_id, list(forgotten))
+    return graph_counts
+
+
+def _delete_row(
+    rls_engine: Engine,
+    conversation_id: str,
+    graph_forget: Callable[[Connection], dict[str, int]] | None,
+) -> dict[str, int]:
+    """The conversation's row, and its graph facts first when asked, in one transaction (R9-304)."""
+    try:
+        with rls_engine.begin() as conn:
+            counts = graph_forget(conn) if graph_forget is not None else {}
+            result = conn.execute(
+                delete(conversations_t)
+                .where(conversations_t.c.id == conversation_id)
+                .returning(conversations_t.c.id)
+            )
+            if result.first() is None:
+                raise ConversationNotFoundError(
+                    "conversation not found", context={"id": conversation_id}
+                )
+    except OperationalError as exc:
+        if graph_forget is None or not forget_graph.is_busy(exc):
+            raise
+        raise GraphNodeBusyError(
+            "the graph is being reorganised", context={"conversation_id": conversation_id}
+        ) from exc
+    return counts
+
+
+def conversation_exists(engine: Engine, conversation_id: str) -> bool:
+    """Whether the conversation's row is still there, as the engine's role sees it (R9-304)."""
+    with engine.connect() as conn:
+        found = conn.execute(
+            select(conversations_t.c.id).where(conversations_t.c.id == conversation_id)
+        )
+        return found.first() is not None
 
 
 def set_title(*, rls_engine: Engine, conversation_id: str, title: str) -> None:

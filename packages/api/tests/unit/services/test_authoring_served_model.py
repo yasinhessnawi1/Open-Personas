@@ -129,3 +129,24 @@ async def test_an_estimate_then_an_actual_is_still_labelled_the_estimate() -> No
     assert (routed.calls, static.calls) == (2, 1)
     assert cost.cost_cents == pytest.approx(1.8 + 1.0)
     assert cost.cost_basis == "estimate_static"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_try_that_cost_tokens_is_in_the_drafts_charge() -> None:
+    """D-ORCH-11-18-s: Haiku's empty completion (0.6 cents) plus Sonnet's draft (1.8)."""
+    primary = _Member("anthropic", "claude-haiku-4-5", [""])  # billed, but no reply
+    fallback = _Member("anthropic", "claude-sonnet-5", [GOOD])
+    chain = MultiModelChatBackend([primary, fallback], max_retries_per_backend=0)  # type: ignore[list-item]
+    cost = await _cost(chain)
+    assert cost.cost_cents == pytest.approx(2.4)
+    assert (cost.prompt_tokens, cost.completion_tokens) == (4000, 1600)
+    assert cost.cost_basis == "estimate_static"
+
+
+@pytest.mark.asyncio
+async def test_the_drafts_two_attempts_are_rounded_once_with_no_float_noise() -> None:
+    """0.1 + 0.2 cents is 0.30000000000000004 in floats; the recorded cost must be 0.3."""
+    first = _Member("openrouter", "z-ai/glm-4.6", [BAD], fail_on=(1,), cost_usd=0.001)
+    repair = _Member("openrouter", "qwen/qwen3-30b-a3b", [GOOD], cost_usd=0.002)
+    cost = await _cost(MultiModelChatBackend([first, repair]))  # type: ignore[list-item]
+    assert cost.cost_cents == 0.3

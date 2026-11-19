@@ -119,4 +119,4 @@ def test_a_live_persona_holds_the_fact_whatever_rowcount_says(
     assert PgDisclosureStore(object()).record("u", "pers", "conv") is True  # type: ignore[arg-type]
     assert conn.statements[0].startswith("SELECT")
     assert conn.statements[1].startswith("INSERT INTO WELLBEING_DISCLOSURES")
-    assert "ON CONFLICT DO NOTHING" in conn.statements[1]
+    assert "ON CONFLICT (OWNER_ID, INTERACTION_ID) DO UPDATE" in conn.statements[1]

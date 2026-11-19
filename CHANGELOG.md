@@ -57,6 +57,15 @@ Per-spec entries are added by the close-out phase of each spec.
   never printed: the line says `withheld` or `malformed` instead.
 
 ### Changed
+- **You are now charged for a failed model attempt that still cost tokens.** When a
+  model returns an empty or garbled reply, the provider still bills us for the tokens
+  it read and wrote, and your persona then asks another model for the answer. Until
+  now you paid only for the answer and we absorbed the failed attempt. You now pay
+  for both, each at the price of the model that made it, and it is added to the same
+  charge as the answer, so it is rounded up once, not twice. An attempt that failed
+  before it used any tokens, such as a refused or timed-out request, still costs
+  nothing. This applies to chat, voice, agentic runs, task steps, persona drafting
+  and background work.
 - **A clone on Linux now installs the CPU build of PyTorch.** `uv sync` used to pull
   PyTorch's CUDA build on Linux, about 2.3 GB of NVIDIA libraries on x86 and ARM
   alike, though production never had a GPU and the api image now has to build on a
@@ -130,6 +139,19 @@ Per-spec entries are added by the close-out phase of each spec.
   with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **Forgetting a conversation's memory now forgets the facts learned from it (R9-304).**
+  Deleting a conversation with "Also forget what ... learned here" removed its episodic
+  memory but left the Memory facts synthesis drew from it, until each was forgotten by
+  hand. Now a fact only that conversation supports is removed, with its links and history,
+  and a fact another conversation also supports stays without that conversation as a
+  source. It happens in the same commit as the delete: if Memory is being reorganised the
+  delete answers 409, the conversation and its memory stay (its attached files may already
+  be gone), and trying again finishes it. A fact still being
+  learned from the conversation when it is forgotten is either removed with the rest or
+  refused. The delete dialog says how many facts would go. Two limits: a fact that stays keeps
+  its wording, which can include what the forgotten conversation added to it; and a fact still
+  being learned from any deleted conversation is now refused, also after a plain delete (the
+  conversation's messages are gone with it, so there was nothing left to learn from).
 - **A turn is billed at the model that answered it, every time.** Each tier's model chain
   is shared by every conversation on it, and which model answered a call was read back
   afterwards from that shared chain. When two conversations used the chain at once, one

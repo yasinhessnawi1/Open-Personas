@@ -106,11 +106,11 @@ _DEFAULT_MAX_TOKENS = 4096
 GATE_BUDGET_S: float = 4.0
 
 
-def _unrecovered(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
-    """A call's failed tries that reported tokens: logged as unrecovered, never charged."""
+def _failed_tries(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
+    """A call's failed tries that reported tokens: the meter charges them (D-ORCH-11-18-s)."""
     if served is None:
         return ()
-    return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
+    return served.charged_failed_tries()
 
 
 def _is_reply_payload(chunk: StreamChunk) -> bool:
@@ -682,7 +682,7 @@ class VoiceModelReplyProducer:
                     cost_usd=chunk.usage.cost_usd,
                     provider=provider,
                     model=model,
-                    unrecovered=_unrecovered(chunk.served),
+                    failed_tries=_failed_tries(chunk.served),
                 )
             tcd = chunk.tool_call_delta
             if tcd is not None:

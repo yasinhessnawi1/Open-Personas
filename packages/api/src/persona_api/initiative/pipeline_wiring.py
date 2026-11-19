@@ -24,6 +24,7 @@ from persona_api.initiative.store import InitiativeLedger, NoticeDisposition
 from persona_api.initiative.wellbeing_gate import (
     ConversationWellbeingGate,
     DisclosureReader,
+    ReleaseReader,
     node_sources,
 )
 from persona_api.services import audit_service
@@ -97,6 +98,10 @@ class ApiWellbeingSubjectCheck:
     - a TASK is gated if its id or one of its runs is (the kind-agnostic disclosed
       rule: a flagged node learned from the task's run), or if its originating
       conversation is.
+
+    D-ORCH-11-18-u: a user's release lifts a node's SOURCES only (what a conversation
+    taught). A cited conversation (its raw transcript holds the disclosure) and a task's
+    origins (its goal text is never checked against tags) stay strict.
     """
 
     def __init__(
@@ -105,14 +110,18 @@ class ApiWellbeingSubjectCheck:
         engine: Engine,
         *,
         disclosures: DisclosureReader | None = None,
+        releases: ReleaseReader | None = None,
     ) -> None:
         """Bind the graph store and the owner-scoped engine (freshness, task origins).
 
-        ``disclosures`` replaces the gate's fact table over ``engine`` (tests).
+        ``disclosures`` and ``releases`` replace the gate's fact table over ``engine``
+        (tests).
         """
         self._store = store
         self._engine = engine
-        self._gate = ConversationWellbeingGate(store, engine, disclosures=disclosures)
+        self._gate = ConversationWellbeingGate(
+            store, engine, disclosures=disclosures, releases=releases
+        )
 
     def tagged_refs(
         self,
@@ -135,11 +144,18 @@ class ApiWellbeingSubjectCheck:
             return gated | nodes
         sources = {ref: node_sources(self._store.get_node(owner_id, ref)) for ref in nodes}
         origins = self._gate.task_origins(owner_id, tasks)
-        judged = set().union(*sources.values(), *origins.values()) | conversations | tasks
+        strict = set().union(*origins.values()) | conversations | tasks
         hit = self._gate.gated(
-            owner_id, judged, include_unsynthesised=include_unsynthesised, flagged=flagged
+            owner_id, strict, include_unsynthesised=include_unsynthesised, flagged=flagged
         )
-        gated |= {ref for ref, src in sources.items() if src & hit}
+        taught = self._gate.gated(
+            owner_id,
+            set().union(*sources.values()),
+            include_unsynthesised=include_unsynthesised,
+            flagged=flagged,
+            honour_releases=True,
+        )
+        gated |= {ref for ref, src in sources.items() if src & taught}
         gated |= conversations & hit
         gated |= {t for t in tasks if t in hit or origins.get(t, set()) & hit}
         return gated

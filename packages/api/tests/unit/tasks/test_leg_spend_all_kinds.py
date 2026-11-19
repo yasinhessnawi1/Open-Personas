@@ -271,7 +271,12 @@ class _NoUsage:
 
     def totals(self) -> SimpleNamespace:
         return SimpleNamespace(
-            prompt_tokens=0, completion_tokens=0, provider=None, model=None, cost_usd=None
+            prompt_tokens=0,
+            completion_tokens=0,
+            provider=None,
+            model=None,
+            cost_usd=None,
+            failed_tries=(),
         )
 
 

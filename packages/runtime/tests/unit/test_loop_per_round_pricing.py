@@ -100,6 +100,15 @@ class _Member:
         outcome = self.script.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        if outcome == "empty":
+            # A completion with no reply that the provider still bills: the chain
+            # treats it as a failed try and falls through (D-ORCH-11-18-s charges it).
+            yield StreamChunk(
+                delta="",
+                is_final=True,
+                usage=TokenUsage(prompt_tokens=_PROMPT, completion_tokens=0, total_tokens=_PROMPT),
+            )
+            return
         if outcome == "tool":
             yield StreamChunk(
                 delta="",
@@ -209,3 +218,20 @@ async def test_every_round_is_priced_once_including_the_cap_forced_final_round()
 
     assert (log.prompt_tokens, log.completion_tokens) == (3000, 1500)
     assert log.cost_cents == pytest.approx(6.0)
+
+
+async def test_a_failed_try_that_cost_tokens_is_charged_and_counted_in_the_turn() -> None:
+    """D-ORCH-11-18-s: the dear primary's empty completion (1000 in = 10.0 cents) is charged
+    beside the cheap fallback's answer (2.0 cents), and its tokens join the TurnLog sums, so
+    the priced tokens still equal the TurnLog's (M2 I2)."""
+    dear = _Member("dear", ["empty"])
+    cheap = _Member("cheap", ["text"])
+    loop, _ = _loop(MultiModelChatBackend([dear, cheap], max_retries_per_backend=0))
+
+    log = await _turn(loop)
+
+    assert log.cost_cents == pytest.approx(12.0)
+    assert loop.last_turn_cost_cents == pytest.approx(12.0)
+    assert log.model_name == "cheap"  # the turn is still named by the model that answered
+    assert (log.prompt_tokens, log.completion_tokens) == (2000, 500)
+    assert (log.tier_fallback_count, log.fallback_engaged) == (1, True)

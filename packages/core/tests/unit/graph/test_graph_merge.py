@@ -83,6 +83,7 @@ class _FakeBackend:
         # version snapshots (K7-D-1): (version_key, node_id, node, embedding,
         # valid_at, invalid_at, invalidated_by)
         self.versions: list[_VersionRow] = []
+        self.appended: list[NodeProvenance] = []
         self._next_surrogate = 0
         self._next_version_key = 0
 
@@ -144,6 +145,26 @@ class _FakeBackend:
             raise GraphStaleWriteError("changed", context={"node_id": node.id})
         self.nodes[node.id] = (node, list(embedding))
         return 1
+
+    def append_provenance(
+        self,
+        owner_id: str,
+        node_id: str,
+        entry: NodeProvenance,
+        *,
+        expected_content_hash: str,
+        expected_provenance: object = (),
+    ) -> bool:
+        """Only the trail grows: the stored node and embedding are otherwise untouched."""
+        if node_id not in self.nodes:
+            return False
+        node, emb = self.nodes[node_id]
+        if node.content_hash != expected_content_hash:
+            raise GraphStaleWriteError("changed", context={"node_id": node_id})
+        grown = node.model_copy(update={"provenance": (*node.provenance, entry)})
+        self.nodes[node_id] = (grown, emb)
+        self.appended.append(entry)
+        return True
 
     def snapshot_node_version(
         self,
@@ -330,6 +351,82 @@ def test_re_merging_identical_candidate_is_a_noop() -> None:
     assert len(b.nodes) == 1
     assert node_after.content == node_before.content  # …but added nothing
     assert len(node_after.provenance) == len(node_before.provenance)  # no trail growth
+
+
+def _said_in(conversation: str | None, persona: str | None = "persona-a") -> NodeProvenance:
+    return NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id=persona,
+        interaction_id=conversation,
+        interaction_kind="conversation" if conversation else None,
+        written_at=NOW,
+        grounding=f"what was said in {conversation}",
+    )
+
+
+def test_restating_a_fact_in_another_conversation_records_that_conversation() -> None:
+    """R9-304 review: the fact is now also D's, so forgetting C alone keeps it.
+
+    The content is unchanged (no duplicate text, same content hash) and no version is taken:
+    only the trail grows, through the ordinary node write (so the write guard holds D).
+    """
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    before, _ = b.nodes["u1::node::00000000"]
+
+    said_on_a_call = _said_in("conv-d").model_copy(update={"channel": "voice"})
+    out = eng.merge("u1", _cand("works as a nurse", provenance=said_on_a_call))
+
+    after, _ = b.nodes["u1::node::00000000"]
+    assert out.action is MergeAction.EXTENDED
+    assert len(b.nodes) == 1
+    assert after.content == before.content
+    assert after.content_hash == before.content_hash, "no hash churn"
+    assert [p.interaction_id for p in after.provenance] == ["conv-c", "conv-d"]
+    assert b.versions == [], "a restatement is not a new version"
+    (entry,) = b.appended
+    assert entry.grounding is None, "a slim entry: none of D's words are stored again"
+    assert entry.reason == merge_module.RESTATED_REASON
+    assert (entry.interaction_kind, entry.persona_id) == ("conversation", "persona-a")
+    assert entry.channel == "voice", "the surface it was restated on is kept"
+
+
+def test_a_restatement_never_re_embeds_the_node() -> None:
+    """The row keeps the embedding (and the model) it has: only the trail is written."""
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    _, stored = b.nodes["u1::node::00000000"]
+
+    def _no_update(*_a: object, **_k: object) -> None:
+        raise AssertionError("a restatement must not rewrite the node or its embedding")
+
+    b.update_node = _no_update  # type: ignore[method-assign]
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-d")))
+
+    assert b.nodes["u1::node::00000000"][1] == stored
+
+
+def test_restating_a_fact_in_the_same_conversation_records_nothing_more() -> None:
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+
+    node, _ = b.nodes["u1::node::00000000"]
+    assert [p.interaction_id for p in node.provenance] == ["conv-c"]
+
+
+def test_restating_a_fact_through_another_persona_records_that_persona() -> None:
+    """The same gap for a persona's erasure: the other persona's support is kept."""
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in(None, "persona-a")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in(None, "persona-b")))
+
+    node, _ = b.nodes["u1::node::00000000"]
+    assert [p.persona_id for p in node.provenance] == ["persona-a", "persona-b"]
 
 
 # ----- accumulate + provenance --------------------------------------------

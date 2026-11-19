@@ -190,12 +190,12 @@ def _backend_max_tokens(backend: ChatBackend) -> int:
     return value if isinstance(value, int) and value > 0 else _DEFAULT_MAX_TOKENS
 
 
-def _unrecovered(response: ChatResponse) -> tuple[BackendAttempt, ...]:
-    """The call's failed tries that reported tokens: logged by the pricer, never charged."""
+def _failed_tries(response: ChatResponse) -> tuple[BackendAttempt, ...]:
+    """The call's failed tries that reported tokens: the pricer charges them (D-ORCH-11-18-s)."""
     served = response.served
     if served is None:
         return ()
-    return tuple(a for a in served.attempts if a.error_class is not None and a.usage is not None)
+    return served.charged_failed_tries()
 
 
 class AgenticLoop:
@@ -456,7 +456,7 @@ class AgenticLoop:
                             prompt_tokens=response.usage.prompt_tokens,
                             completion_tokens=response.usage.completion_tokens,
                             cost_usd=response.usage.cost_usd,
-                            unrecovered=_unrecovered(response),
+                            failed_tries=_failed_tries(response),
                         )
                     )
 

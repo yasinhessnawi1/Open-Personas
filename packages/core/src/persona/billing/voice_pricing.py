@@ -20,9 +20,9 @@ Metering units per surface:
 
 * **STT** — ``audio-min``: real streamed audio-seconds (V8 rebase) × the served
   provider's ¢/min.
-* **TTS** — ElevenLabs is CHAR-metered (``1k chars``): real synthesized
-  characters × ¢/1k-char; Cartesia (fallback) is per-``min`` and is priced on the
-  segment's real audio-seconds.
+* **TTS** - every provider is CHAR-metered (``1k chars``): real synthesized
+  characters x cents/1k-char, ElevenLabs and Cartesia alike (R9-235). A TTS row in
+  any other unit is ``unpriced``, because characters are all the meter measures.
 * **LiveKit transport** — ``infra_flat`` per voice minute (no provider cost).
 """
 
@@ -43,8 +43,9 @@ __all__ = [
 ]
 
 _SECONDS_PER_MINUTE = 60.0
-#: ElevenLabs (and the docs table) price per 1,000 characters.
+#: Every TTS row (and the docs table) prices per 1,000 characters.
 _CHARS_PER_UNIT = 1000.0
+_TTS_UNIT = "1k chars"
 
 
 #: The registry lookup both priced surfaces share (promoted to ``pricing_registry`` so voice
@@ -76,24 +77,19 @@ def voice_tts_cents(
     provider: str,
     *,
     chars: int = 0,
-    audio_seconds: float | None = None,
     model: str | None = None,
 ) -> tuple[float, CostBasis]:
     """The served TTS provider's real cost for one synthesized segment.
 
-    ElevenLabs (primary) is CHAR-metered: real ``chars`` × ¢/1k-char (Flash vs
-    Multilingual selected by ``model``, cheapest on ambiguity). Cartesia
-    (fallback) is per-``min`` and is priced on ``audio_seconds`` (the segment's
-    real audio duration). Unknown provider → ``(0.0, "unpriced")``.
+    Every TTS provider is CHAR-metered: real ``chars`` x cents/1k-char. ElevenLabs
+    Flash vs Multilingual is selected by ``model`` (cheapest on ambiguity); Cartesia
+    has one Sonic row (R9-235). Unknown provider, or a row not priced per 1k chars
+    (nothing here could price it from characters), gives ``(0.0, "unpriced")``.
     """
     row = _served_row("voice_tts", provider, model)
-    if row is None or row.provider_cost_cents is None:
+    if row is None or row.provider_cost_cents is None or row.unit != _TTS_UNIT:
         return 0.0, "unpriced"
-    if row.unit == "1k chars":
-        return row.provider_cost_cents * (max(0, chars) / _CHARS_PER_UNIT), "provider_meter"
-    # A per-minute provider (Cartesia fallback): price the segment's audio minutes.
-    minutes = max(0.0, audio_seconds or 0.0) / _SECONDS_PER_MINUTE
-    return row.provider_cost_cents * minutes, "provider_meter"
+    return row.provider_cost_cents * (max(0, chars) / _CHARS_PER_UNIT), "provider_meter"
 
 
 def livekit_infra_cents(config: BillingConfig, *, minutes: float) -> tuple[float, CostBasis]:

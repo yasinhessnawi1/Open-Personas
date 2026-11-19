@@ -156,6 +156,7 @@ class EpisodicConsolidationHandler:
             prompt_tokens=totals.prompt_tokens,
             completion_tokens=totals.completion_tokens,
             cost_usd=totals.cost_usd,
+            failed_tries=totals.failed_tries,
             surface="episodic_consolidation",
             billing_key=episodic_consolidation_idempotency_key(payload),
             cost_source=self._cost_source,

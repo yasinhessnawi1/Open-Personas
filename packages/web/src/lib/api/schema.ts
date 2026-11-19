@@ -401,10 +401,39 @@ export interface paths {
      *        docstring for the exact ∪ content-match cascade. A no-op when the
      *        memory backend isn't composed (community/no-DB edition) — the
      *        conversation delete itself is unaffected either way.
+     *     5. **Knowledge-graph facts** (R9-304), with ``forget_memory=true``: in the
+     *        row delete's own transaction, before the delete: see
+     *        :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
+     *        row: a failure (or a 409 while a consolidation holds the graph) leaves
+     *        the conversation, its messages and its memory in place, and the delete
+     *        can be retried. The documents (step 2) run first and are not rolled back.
      *
      *     404 if not the caller's conversation (RLS-scoped).
      */
     delete: operations["delete_conversation_v1_conversations__conversation_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/conversations/{conversation_id}/forget-preview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Preview Conversation Forget
+     * @description How many Memory facts forgetting this conversation's memory would remove (R9-304).
+     *
+     *     For the delete dialog's "also forget" choice. A pure read: nothing is deleted. 404 if the
+     *     conversation is not the caller's. Zeros where there is no graph.
+     */
+    get: operations["preview_conversation_forget_v1_conversations__conversation_id__forget_preview_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
     options?: never;
     head?: never;
     patch?: never;
@@ -608,6 +637,30 @@ export interface paths {
      *     lesson: never enqueue into a handler-less worker.
      */
     post: operations["turn_message_into_file_v1_conversations__conversation_id__messages__message_id__turn_into_file_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/conversations/{conversation_id}/initiative-hold": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Initiative Hold
+     * @description Whether a disclosure keeps this conversation out of unprompted initiative.
+     */
+    get: operations["get_initiative_hold_v1_conversations__conversation_id__initiative_hold_get"];
+    /**
+     * Set Initiative Hold
+     * @description Release the conversation for initiative, or hold it back again; the new state.
+     */
+    put: operations["set_initiative_hold_v1_conversations__conversation_id__initiative_hold_put"];
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -3482,6 +3535,21 @@ export interface components {
       updated_at: string;
     };
     /**
+     * ConversationForgetPreview
+     * @description What forgetting a conversation's memory would do to the facts in Memory (R9-304).
+     *
+     *     ``facts_removed``: facts only this conversation supports, which the delete removes.
+     *     ``facts_kept``: facts another source also supports, which stay without this conversation as
+     *     a source. Counts only, for the delete dialog; merged duplicates and the user's own node are
+     *     not counted. Both are 0 where there is no graph.
+     */
+    ConversationForgetPreview: {
+      /** Facts Removed */
+      facts_removed: number;
+      /** Facts Kept */
+      facts_kept: number;
+    };
+    /**
      * ConversationSummary
      * @description A conversation in a list view.
      *
@@ -4099,6 +4167,26 @@ export interface components {
        * @enum {string}
        */
       dial: "off" | "propose_only" | "act_within_envelope";
+    };
+    /**
+     * InitiativeHoldResponse
+     * @description A conversation's "fine to bring this up" control (D-ORCH-11-18-u).
+     *
+     *     ``held``: a disclosure keeps the conversation out of the persona's unprompted
+     *     initiative. ``released``: the user said it may be drawn on again (``released_at``).
+     *     ``not_held``: nothing keeps it out. ``version`` is an opaque token that goes back with a
+     *     release (it names no count).
+     */
+    InitiativeHoldResponse: {
+      /**
+       * State
+       * @enum {string}
+       */
+      state: "held" | "released" | "not_held";
+      /** Released At */
+      released_at: string | null;
+      /** Version */
+      version: string;
     };
     JsonValue: unknown;
     /**
@@ -5586,6 +5674,20 @@ export interface components {
       granted?: boolean | null;
     };
     /**
+     * SetInitiativeHoldRequest
+     * @description Release a conversation for initiative, or hold it back again (D-ORCH-11-18-u).
+     *
+     *     ``released`` true says the persona may draw on what it learned in the conversation when it
+     *     reaches out unprompted; false undoes that. A release carries ``version``, the opaque token
+     *     the control's read returned, so a disclosure recorded since is never released unseen.
+     */
+    SetInitiativeHoldRequest: {
+      /** Released */
+      released: boolean;
+      /** Version */
+      version?: string | null;
+    };
+    /**
      * SetSkillConsentRequest
      * @description Record consent for a community/third-party speciality (Spec S3, S3-D-2).
      *
@@ -6820,7 +6922,7 @@ export interface operations {
   delete_conversation_v1_conversations__conversation_id__delete: {
     parameters: {
       query?: {
-        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9) — exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Off by default: a plain delete leaves the persona's memory intact. */
+        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised: the conversation, its messages and its memory stay, though its attached documents may already be removed; try again to finish. Off by default: a plain delete leaves the persona's memory intact. */
         forget_memory?: boolean;
       };
       header?: never;
@@ -6837,6 +6939,37 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  preview_conversation_forget_v1_conversations__conversation_id__forget_preview_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ConversationForgetPreview"];
+        };
       };
       /** @description Validation Error */
       422: {
@@ -7070,6 +7203,72 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["TurnIntoFileResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_initiative_hold_v1_conversations__conversation_id__initiative_hold_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeHoldResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_initiative_hold_v1_conversations__conversation_id__initiative_hold_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        conversation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetInitiativeHoldRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["InitiativeHoldResponse"];
         };
       };
       /** @description Validation Error */

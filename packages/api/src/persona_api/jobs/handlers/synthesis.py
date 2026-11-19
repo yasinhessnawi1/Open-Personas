@@ -225,6 +225,7 @@ class SynthesisHandler:
                 prompt_tokens=billable.prompt_tokens,
                 completion_tokens=billable.completion_tokens,
                 cost_usd=billable.cost_usd,
+                failed_tries=billable.failed_tries,
                 surface="synthesis",
                 billing_key=synthesis_idempotency_key(payload),
                 cost_source=self._cost_source,

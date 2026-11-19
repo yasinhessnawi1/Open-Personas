@@ -203,9 +203,10 @@ class PricedRound:
         provider: The served provider (the chain's ``ServedCall``, or a bare backend's
             own name). An empty ``model`` means no model served the round.
         model: The served model.
-        unrecovered: Failed tries of this call that reported usage (an empty or
-            degenerate completion). NOT charged (D-ORCH-11-18-h); priced only to be
-            logged as unrecovered cost.
+        failed_tries: Failed tries of this call that reported usage (an empty or
+            degenerate completion, which the provider still bills). CHARGED, each at
+            the model that made it (D-ORCH-11-18-s); one that reported no tokens costs
+            nothing.
     """
 
     prompt_tokens: int
@@ -213,7 +214,7 @@ class PricedRound:
     cost_usd: float | None
     provider: str
     model: str
-    unrecovered: tuple[BackendAttempt, ...] = ()
+    failed_tries: tuple[BackendAttempt, ...] = ()
 
 
 #: How certain each priced basis is, for labelling a turn whose rounds differ (D3):
@@ -259,9 +260,13 @@ def price_rounds(
     * D4: an unpriced round inside a turn with a priced round adds 0 cents and logs
       a warning naming its provider and model. A turn with no priced round is
       ``(0.0, "unpriced")``: the existing unpriced path (warn-once, the floor).
-    * D3: the turn's basis is the least certain basis among its priced rounds.
-    * D1: a round's ``unrecovered`` failed tries are priced and logged at INFO as
-      unrecovered cost, and never added to the total.
+    * D3: the turn's basis is the least certain basis among its priced parts, the
+      failed tries included.
+    * D-ORCH-11-18-s (reverses D1 of D-ORCH-11-18-h): each of a round's
+      ``failed_tries`` that reported tokens is priced at the model that made it and
+      added to the total, inside the same single rounding (and the caller's single
+      ceil), with an INFO line saying what it charged. One that reported no tokens
+      costs nothing. An unpriced one adds 0 cents and is named in a warning (D4).
 
     Args:
         rounds: The turn's rounds in order.
@@ -274,8 +279,18 @@ def price_rounds(
     cents = 0.0
     bases: list[CostBasis] = []
     unpriced: list[PricedRound] = []
+    unpriced_tries: list[BackendAttempt] = []
     for priced_round in rounds:
-        _log_unrecovered(priced_round, source, surface)
+        for attempt in priced_round.failed_tries:
+            priced_try = _price_failed_try(attempt, source, surface)
+            if priced_try is None:
+                continue  # it reported no tokens: it costs nothing
+            try_cents, try_basis = priced_try
+            if try_basis == "unpriced":
+                unpriced_tries.append(attempt)
+                continue
+            cents += try_cents
+            bases.append(try_basis)
         if not priced_round.model:
             continue
         round_cents, basis = compute_turn_cost(
@@ -304,25 +319,40 @@ def price_rounds(
             prompt=priced_round.prompt_tokens,
             completion=priced_round.completion_tokens,
         )
+    for attempt in unpriced_tries:
+        _logger.warning(
+            "unpriced failed model try in a priced turn; it adds 0 cents "
+            "surface={surface} provider={provider} model={model} error={error}",
+            surface=surface,
+            provider=attempt.provider,
+            model=attempt.model,
+            error=attempt.error_class,
+        )
     return round(cents, CENTS_ROUND_DECIMALS), least_certain_basis(bases)
 
 
-def _log_unrecovered(priced_round: PricedRound, source: CostSource | None, surface: str) -> None:
-    """Log each failed try of ``priced_round`` that cost tokens, with its price (D1)."""
-    for attempt in priced_round.unrecovered:
-        usage = attempt.usage
-        if usage is None:
-            continue
-        cents, basis = compute_turn_cost(
-            provider=attempt.provider,
-            model=attempt.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            actual_cost_usd=usage.cost_usd,
-            source=source,
-        )
+def _price_failed_try(
+    attempt: BackendAttempt, source: CostSource | None, surface: str
+) -> tuple[float, CostBasis] | None:
+    """Price one failed try at the model that made it (D-ORCH-11-18-s).
+
+    ``None`` when it reported no tokens (no usage, or zero tokens and no actual): it
+    costs nothing and labels nothing. A priced try is logged at INFO with what it adds.
+    """
+    usage = attempt.usage
+    if usage is None or not attempt.reported_tokens:
+        return None
+    cents, basis = compute_turn_cost(
+        provider=attempt.provider,
+        model=attempt.model,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        actual_cost_usd=usage.cost_usd,
+        source=source,
+    )
+    if basis != "unpriced":
         _logger.info(
-            "unrecovered model cost: a failed try, not charged "
+            "failed model try charged "
             "surface={surface} provider={provider} model={model} error={error} "
             "prompt_tokens={prompt} completion_tokens={completion} "
             "cost_cents={cents} basis={basis}",
@@ -335,3 +365,4 @@ def _log_unrecovered(priced_round: PricedRound, source: CostSource | None, surfa
             cents=cents,
             basis=basis,
         )
+    return cents, basis

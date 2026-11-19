@@ -204,6 +204,20 @@ class TestBillTurn:
         assert ledger.calls[0]["cost_cents"] == pytest.approx(0.77)
         assert ledger.calls[0]["amount"] == 1  # ceil(0.77) floored to the min 1
 
+    def test_a_cartesia_spoken_turn_charges_for_its_characters(self) -> None:
+        """R9-235: a turn spoken by Cartesia used to price its TTS at zero, because the
+        row was per minute and the meter hands only characters. It now bills the chars."""
+        ledger = _RecordingLedger()
+        meter = _meter(
+            ledger, tts_provider="cartesia", tts_model="sonic-3.5", streamed_seconds=[0.0]
+        )
+        meter.note_tts_chars(1234)  # 1234 chars x 5.0 cents/1k = 6.17 cents, ceil 7
+        asyncio.run(meter.bill_turn(1))
+        assert len(ledger.calls) == 1
+        assert ledger.calls[0]["cost_cents"] == pytest.approx(6.17)
+        assert ledger.calls[0]["amount"] == 7
+        assert ledger.calls[0]["cost_basis"] == "provider_meter"
+
     def test_per_turn_billing_key_is_unique_per_turn(self) -> None:
         ledger = _RecordingLedger()
         box = [0.0]
@@ -621,8 +635,8 @@ def test_rounds_that_sum_to_whole_cents_never_ceil_to_an_extra_credit() -> None:
     assert charge["amount"] == 3
 
 
-def test_a_rounds_failed_tries_ride_to_pricing_to_be_logged_not_charged() -> None:
-    """D1 (D-ORCH-11-18-h): the accumulator keeps a round's unrecovered tries for the log."""
+def test_a_rounds_failed_tries_ride_to_pricing() -> None:
+    """The accumulator keeps a round's failed tries for pricing (D-ORCH-11-18-s)."""
     from persona.backends.types import BackendAttempt, TokenUsage
 
     wasted = BackendAttempt(
@@ -639,8 +653,35 @@ def test_a_rounds_failed_tries_ride_to_pricing_to_be_logged_not_charged() -> Non
         cost_usd=None,
         provider="anthropic",
         model="fallback-model",
-        unrecovered=(wasted,),
+        failed_tries=(wasted,),
     )
     (llm_round,) = acc.take_turn().llm_rounds
-    assert llm_round.unrecovered == (wasted,)
+    assert llm_round.failed_tries == (wasted,)
     assert (llm_round.prompt_tokens, llm_round.model) == (10, "fallback-model")
+
+
+def test_a_failed_try_that_cost_tokens_is_in_the_voice_turns_charge() -> None:
+    """D-ORCH-11-18-s: the answer's 2.0 cent actual plus the failed try's 0.4 cent actual."""
+    from persona.backends.types import BackendAttempt, TokenUsage
+
+    wasted = BackendAttempt(
+        index=0,
+        provider="openrouter",
+        model="primary-model",
+        error_class="EmptyCompletionError",
+        usage=TokenUsage(prompt_tokens=700, completion_tokens=0, total_tokens=700, cost_usd=0.004),
+    )
+    ledger = _RecordingLedger()
+    meter = _meter(ledger)
+    meter.note_llm_usage(
+        prompt_tokens=100,
+        completion_tokens=100,
+        cost_usd=0.02,
+        provider="openrouter",
+        model="fallback-model",
+        failed_tries=(wasted,),
+    )
+    asyncio.run(meter.bill_turn(1))
+    (kw,) = ledger.calls
+    assert kw["cost_cents"] == pytest.approx(2.4)
+    assert kw["amount"] == 3  # one ceil over the turn, the failed try inside it
