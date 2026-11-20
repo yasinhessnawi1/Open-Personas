@@ -22,6 +22,9 @@ from persona.stores.episodic import EpisodicStore
 from persona_api.approvals import ApprovalStore
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import MemoryNodeChangedError, TurnNotActiveError
+from persona_api.jobs.handlers.conversation_memory_forget import (
+    conversation_memory_forget_queue_available,
+)
 from persona_api.jobs.handlers.file_extract import (
     enqueue_file_extract,
     file_extract_queue_ready,
@@ -44,6 +47,7 @@ from persona_api.schemas import (
 from persona_api.services import (
     audit_service,
     chat_service,
+    conversation_memory_forget,
     document_service,
     forget_conversation_graph,
     memory_service,
@@ -169,7 +173,11 @@ async def delete_conversation(
             "this conversation as a source; GET .../forget-preview counts them. 409 "
             "while Memory is being reorganised: the conversation, its messages and its "
             "memory stay, though its attached documents may already be removed; try "
-            "again to finish. "
+            "again to finish. A failed episodic forget is never left behind (R9-311): "
+            "where a background worker runs, it is recorded with the delete and retried "
+            "until done; elsewhere it runs first, and a failure keeps the conversation "
+            "for a retry (with the documents, its episodic memory may then be gone "
+            "already). "
             "Off by default: a plain delete leaves the persona's memory intact."
         ),
     ),
@@ -192,7 +200,11 @@ async def delete_conversation(
        ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s
        docstring for the exact ∪ content-match cascade. A no-op when the
        memory backend isn't composed (community/no-DB edition) — the
-       conversation delete itself is unaffected either way.
+       conversation delete itself is unaffected either way. Durable (R9-311,
+       :mod:`persona_api.services.conversation_memory_forget`): with a worker here
+       that runs the forget job, the forget is recorded in the row delete's
+       transaction and retried until done; without one it runs before the row, so
+       a failure leaves the conversation for a retry.
     5. **Knowledge-graph facts** (R9-304), with ``forget_memory=true``: in the
        row delete's own transaction, before the delete: see
        :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
@@ -240,6 +252,21 @@ async def delete_conversation(
             document_store=build_document_store(),
         )
 
+    # R9-311: how the episodic forget is kept from being stranded by a failure. Durable when a
+    # worker here runs the forget job; otherwise the forget runs before the row delete.
+    memory_plan = (
+        conversation_memory_forget.plan(
+            owner_id=user.id,
+            conversation_id=conversation_id,
+            durable=conversation_memory_forget_queue_available(
+                job_queue=getattr(request.app.state, "job_queue", None),
+                in_process_worker=getattr(request.app.state, "in_process_worker", None),
+            ),
+        )
+        if episodic_store is not None
+        else None
+    )
+
     # R9-304: forgetting the memory also takes the facts learned here out of the graph, in the
     # row delete's own transaction (see forget_conversation_graph). A no-op off Postgres.
     graph_forget = (
@@ -265,6 +292,7 @@ async def delete_conversation(
             match_texts=match_texts,
             match_floor=memory_service.ForgetSettings().similarity_floor,
             graph_forget=graph_forget,
+            memory_plan=memory_plan,
         )
     except GraphNodeBusyError as exc:
         # The row and the graph are one transaction, so both stay (the documents above may be

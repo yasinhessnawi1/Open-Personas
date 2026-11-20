@@ -70,6 +70,7 @@ __all__ = [
     "credit_transactions",
     "credits",
     "day_spend",
+    "forgotten_conversations",
     "free_model_daily_usage",
     "graph_consolidation_markers",
     "graph_edges",
@@ -1662,6 +1663,23 @@ wellbeing_disclosures = Table(
         "(released_seq IS NULL) = (released_at IS NULL)",
         name="ck_wellbeing_disclosures_release_pair",
     ),
+)
+
+
+# R9-311 (migration 068): a conversation whose memory was forgotten. Written in the
+# transaction that deletes the conversation's row with ``forget_memory``; read by the memory
+# owner guard, which refuses a memory row stamped with a forgotten conversation, so a write that
+# was still in flight cannot bring the memory back after the forget. Ids and a time only. It
+# goes with its persona (FK cascade at the persona erasure's row step) or its account.
+forgotten_conversations = Table(
+    "forgotten_conversations",
+    metadata,
+    Column("conversation_id", Text, primary_key=True),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    Column("forgotten_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("idx_forgotten_conversations_owner", "owner_id"),
+    Index("idx_forgotten_conversations_persona", "persona_id"),
 )
 
 
