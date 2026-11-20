@@ -496,6 +496,118 @@ async def test_aclose_cancels_inflight_without_finalizing() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# R9-313: a turn that will not end cannot hold up the api's shutdown
+# --------------------------------------------------------------------------- #
+
+
+class _StuckLoop:
+    """A turn whose cancel cannot land: it swallows every cancel and waits on ``stuck``.
+
+    The shape of a turn whose undo is waiting on a database write that hangs (the
+    R9-308 image hold waits for its thread without forwarding a cancel).
+    """
+
+    def __init__(self, started: asyncio.Event, stuck: asyncio.Event) -> None:
+        self._started = started
+        self._stuck = stuck
+
+    async def turn(self, *_a: object, **_k: object) -> AsyncIterator[StreamChunk]:
+        self._started.set()
+        while not self._stuck.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._stuck.wait()
+        yield StreamChunk(delta="x", is_final=True)  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_aclose_gives_up_on_a_turn_that_will_not_end_and_logs_it() -> None:
+    from loguru import logger as _loguru_logger
+
+    started, stuck = asyncio.Event(), asyncio.Event()
+    reg = ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=0.05)
+    handle = _start(reg, _StuckLoop(started, stuck))
+    await started.wait()
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    try:
+        # Bounded by the test itself, so a regression fails here instead of hanging the run.
+        await asyncio.wait_for(reg.aclose(), timeout=5)
+    finally:
+        _loguru_logger.remove(sink_id)
+        stuck.set()
+        assert handle.task is not None
+        with contextlib.suppress(asyncio.CancelledError):
+            await handle.task
+    abandoned = [line for line in captured if "abandoned" in line]
+    assert len(abandoned) == 1
+    assert _CONV in abandoned[0]
+    assert _OWNER in abandoned[0]
+
+
+@pytest.mark.asyncio
+async def test_aclose_waits_for_every_turn_at_once_not_one_after_another() -> None:
+    from loguru import logger as _loguru_logger
+
+    started_a, started_b, stuck = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    reg = ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=0.5)
+    first = _start(reg, _StuckLoop(started_a, stuck))
+    second = reg.start(
+        conversation_id="conv_other",
+        owner_id=_OWNER,
+        assistant_message_id="msg_assistant_2",
+        loop=_StuckLoop(started_b, stuck),
+        conversation=_conversation(),
+        user_message="hello",
+    )
+    await started_a.wait()
+    await started_b.wait()
+    captured: list[str] = []
+    sink_id = _loguru_logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        await asyncio.wait_for(reg.aclose(), timeout=5)
+        elapsed = loop.time() - began
+    finally:
+        _loguru_logger.remove(sink_id)
+        stuck.set()
+        for handle in (first, second):
+            assert handle.task is not None
+            with contextlib.suppress(asyncio.CancelledError):
+                await handle.task
+    # One shared budget: two stuck turns one after the other would take twice the bound.
+    assert elapsed < 0.95
+    abandoned = " ".join(line for line in captured if "abandoned" in line)
+    assert _CONV in abandoned
+    assert "conv_other" in abandoned
+
+
+@pytest.mark.asyncio
+async def test_aclose_does_not_wait_out_the_bound_when_every_turn_ends() -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _BlockingLoop:
+        async def turn(self, *_a: object, **_k: object) -> AsyncIterator[StreamChunk]:
+            started.set()
+            await release.wait()
+            yield StreamChunk(delta="x", is_final=True)  # pragma: no cover
+
+    reg = ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=30)
+    handle = _start(reg, _BlockingLoop())
+    await started.wait()
+    await asyncio.wait_for(reg.aclose(), timeout=5)
+    assert handle.task is not None
+    assert handle.task.cancelled()
+
+
+@pytest.mark.parametrize("bound", [0, -1])
+def test_a_shutdown_bound_must_be_positive(bound: float) -> None:
+    """Zero would mean "give up at once", not "off" (round 2 L3)."""
+    with pytest.raises(ValueError, match="shutdown_timeout_s"):
+        ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=bound)
+
+
+# --------------------------------------------------------------------------- #
 # R9-033 — an empty assistant reply must never persist as a silent empty bubble
 # --------------------------------------------------------------------------- #
 

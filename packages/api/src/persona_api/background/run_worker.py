@@ -23,8 +23,7 @@ available if the blocking callback proves fragile — not the v0.1 default.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from persona.billing import BillingConfig, credits_charged
 from persona.errors import DailySpendCapExceededError
@@ -38,6 +37,8 @@ from persona_runtime.interaction_scope import (
 )
 from sqlalchemy import text
 
+from persona_api.background.shutdown import cancel_and_wait
+from persona_api.config import DEFAULT_RUN_SHUTDOWN_TIMEOUT_S
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import (
     SandboxRequestContext,
@@ -301,7 +302,13 @@ class RunRegistry:
         cost_source: CostSource | None = None,
         billing_config: BillingConfig | None = None,
         agentic_floor: int = 1,
+        shutdown_timeout_s: float = DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
+        if shutdown_timeout_s <= 0:
+            msg = "shutdown_timeout_s must be positive"
+            raise ValueError(msg)
+        # R9-313: how long ``aclose`` waits for the cancelled runs, all together.
+        self._shutdown_timeout_s = shutdown_timeout_s
         self._engine = rls_engine
         self._handles: dict[str, RunHandle] = {}
         # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
@@ -627,13 +634,19 @@ class RunRegistry:
             )
 
     async def aclose(self) -> None:
-        """Cancel all in-flight run tasks on shutdown (S08-2: lost, but viewable)."""
-        for handle in self._handles.values():
+        """Cancel all in-flight run tasks on shutdown (S08-2: lost, but viewable).
+
+        R9-313: bounded like the chat turns. Every run is told to stop (its cancel token, for
+        the loop's next step boundary) and cancelled, then they are waited for together, at
+        most ``shutdown_timeout_s``. A run still going at the bound is logged and left; the
+        restart sweep marks its row on the next boot.
+        """
+        live: dict[asyncio.Future[Any], str] = {}
+        for handle in list(self._handles.values()):
             if handle.task is not None and not handle.task.done():
                 handle.cancel_token.cancel()
-                handle.task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await handle.task
+                live[handle.task] = f"run={handle.run_id} owner={handle.owner_id}"
+        await cancel_and_wait(live, timeout=self._shutdown_timeout_s, what="agentic run")
 
 
 # Re-export the callback aliases for the service's type hints.

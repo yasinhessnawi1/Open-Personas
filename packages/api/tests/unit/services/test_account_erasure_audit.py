@@ -326,3 +326,35 @@ def test_a_stale_offset_with_nothing_to_move_is_removed(tmp_path: Path) -> None:
     assert rekey_store_audit_file(tmp_path, owner_id=_OWNER, erasure_id=_ERASURE) == 0
 
     assert not stale.exists()
+
+
+class _RecordingConn:
+    """A Postgres-dialect connection that records each statement and finds no rows."""
+
+    def __init__(self) -> None:
+        self.dialect = type("D", (), {"name": "postgresql"})()
+        self.sql: list[str] = []
+
+    def execute(self, statement: object, _params: object = None) -> object:
+        self.sql.append(str(statement))
+
+        class _Empty:
+            rowcount = 0
+
+            def all(self) -> list[object]:
+                return []
+
+        return _Empty()
+
+
+def test_the_store_audit_rekey_lifts_the_statement_timeout_first() -> None:
+    """R9-313: ``written_by`` has no index and the table is never pruned, so the UPDATE scans
+    every tenant's events; a statement timeout would fail the erasure on every retry."""
+    from persona_api.services.account_erasure_audit import rekey_store_audit_rows  # noqa: PLC0415
+
+    conn = _RecordingConn()
+
+    rekey_store_audit_rows(conn, owner_id=_OWNER, erasure_id=_ERASURE)  # type: ignore[arg-type]
+
+    assert conn.sql[0] == "SELECT set_config('statement_timeout', '0', true)"
+    assert any("written_by" in sql for sql in conn.sql[1:])

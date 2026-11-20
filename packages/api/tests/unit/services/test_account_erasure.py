@@ -336,10 +336,12 @@ def test_the_row_step_locks_the_graph_then_the_user_then_relists_then_deletes() 
     assert _row_step(conn) == {"users": 1, "retained": 0}
 
     assert conn.sql[0] == "SET LOCAL lock_timeout = '30s'", "it fails rather than hangs"
-    assert "pg_advisory_xact_lock" in conn.sql[1], "the graph maintenance lock first"
-    assert conn.sql[2].startswith("SELECT users.id")
-    assert conn.sql[2].endswith("FOR UPDATE"), "no persona insert can commit past this"
-    assert conn.sql[3].startswith("SELECT personas.id"), "the personas listed again under it"
+    # R9-313: the owner-wide cascade has no size bound; the lock waits keep theirs above.
+    assert conn.sql[1] == "SELECT set_config('statement_timeout', '0', true)"
+    assert "pg_advisory_xact_lock" in conn.sql[2], "the graph maintenance lock first"
+    assert conn.sql[3].startswith("SELECT users.id")
+    assert conn.sql[3].endswith("FOR UPDATE"), "no persona insert can commit past this"
+    assert conn.sql[4].startswith("SELECT personas.id"), "the personas listed again under it"
     assert conn.sql[-1].startswith("DELETE FROM users"), "the delete is last"
 
 

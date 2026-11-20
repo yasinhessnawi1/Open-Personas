@@ -31,6 +31,7 @@ from persona.logging import get_logger
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from persona_api.db.connection_bounds import lift_statement_timeout
 from persona_api.db.models import audit_log as audit_log_t
 from persona_api.db.models import credit_transactions as credit_transactions_t
 from persona_api.db.models import erasures as erasures_t
@@ -452,6 +453,10 @@ def _step_row(deps: AccountEraseDeps, erasure: Erasure) -> dict[str, int]:
     with deps.engine.begin() as conn:
         if conn.dialect.name == "postgresql":
             conn.execute(text(f"SET LOCAL lock_timeout = '{ROW_LOCK_TIMEOUT}'"))
+        # R9-313: the cascade below deletes everything the owner ever wrote in one statement;
+        # its size has no bound, and a timeout would fail the erasure on every retry. The lock
+        # waits stay bounded by the lock_timeout above.
+        lift_statement_timeout(conn)
         take_graph_maintenance_lock(conn, owner)
         held = conn.execute(
             select(users_t.c.id).where(users_t.c.id == owner).with_for_update()

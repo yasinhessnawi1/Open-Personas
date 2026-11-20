@@ -99,6 +99,9 @@ FIXED_VALUES = {
     "false",
     "persona",
     "https://acme-staging-v02.api.letsencrypt.org/directory",
+    # R9-313: api.env's shutdown bounds (WORKER_DRAIN_SECONDS, the shutdown budget).
+    "12",
+    "20",
     # The web's origins on Vercel (owner, 2026-11-07): api.env and voice.env CORS.
     "https://openpersonas.si,https://app.openpersonas.si,https://www.openpersonas.si",
 }
@@ -316,6 +319,72 @@ def test_the_api_cannot_be_scaled_out() -> None:
     api = _compose()["services"]["api"]
     assert api["container_name"] == "open-persona-api"
     assert api["deploy"]["replicas"] == 1
+
+
+def _seconds(value: str) -> float:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value)
+    assert match is not None, value
+    return float(match.group(1))
+
+
+def test_the_api_shutdown_fits_inside_its_stop_grace() -> None:
+    """R9-313: uvicorn's grace plus the lifespan budget end before SIGKILL, with room to exit.
+
+    Docker sends SIGKILL at ``stop_grace_period``. Uvicorn waits ``--timeout-graceful-shutdown``
+    for open requests, then the lifespan spends ``PERSONA_API_SHUTDOWN_BUDGET_SECONDS``. The
+    slow closers get that budget less the first phase's cap and the final reserve, and the
+    worker's drain and the run and chat-turn bounds must all fit in what they get.
+    """
+    from persona_api.background import shutdown  # noqa: PLC0415
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_SHUTDOWN_BUDGET_S,
+    )
+
+    grace = _seconds(_compose()["services"]["api"]["stop_grace_period"])
+    cmd = (ROOT / "packages" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    graceful = re.search(r'"--timeout-graceful-shutdown",\s*"(\d+)"', cmd)
+    assert graceful is not None, "uvicorn would wait for an open SSE stream until SIGKILL"
+    env = dict(_template("api"))
+    budget = float(env["PERSONA_API_SHUTDOWN_BUDGET_SECONDS"])
+    drain = float(env["WORKER_DRAIN_SECONDS"])
+    closers = budget - shutdown.PRE_CLOSE_CAP_S - shutdown.FINAL_RESERVE_S
+
+    assert float(graceful.group(1)) + budget <= grace - 5, "no room left for the process exit"
+    assert float(graceful.group(1)) + DEFAULT_SHUTDOWN_BUDGET_S <= grace - 5
+    assert closers > drain
+    assert closers > DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
+    assert closers > DEFAULT_RUN_SHUTDOWN_TIMEOUT_S
+
+
+def test_the_code_defaults_are_the_server_values() -> None:
+    """Round 3 N2: an existing host keeps its old api.env, so production runs on the CODE
+    defaults, not on this template. They must be the same values, so a revert of either one
+    (the 270 s drain coming back) fails here."""
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_SHUTDOWN_BUDGET_S,
+        DEFAULT_WORKER_DRAIN_SECONDS,
+        APIConfig,
+    )
+
+    env = dict(_template("api"))
+    assert float(env["WORKER_DRAIN_SECONDS"]) == DEFAULT_WORKER_DRAIN_SECONDS
+    assert float(env["PERSONA_API_SHUTDOWN_BUDGET_SECONDS"]) == DEFAULT_SHUTDOWN_BUDGET_S
+    fields = APIConfig.model_fields
+    assert fields["worker_drain_seconds"].default == DEFAULT_WORKER_DRAIN_SECONDS
+    assert fields["shutdown_budget_seconds"].default == DEFAULT_SHUTDOWN_BUDGET_S
+
+
+def test_render_passes_the_shutdown_bounds_through_unchanged() -> None:
+    """Fixed values, never copied from .env, where a dev 270 s drain would be cut by SIGKILL."""
+    render = _load_render()
+    for name in ("WORKER_DRAIN_SECONDS", "PERSONA_API_SHUTDOWN_BUDGET_SECONDS"):
+        value = dict(_template("api"))[name]
+        dotenv = {name: "270"}
+        assert render.resolve(
+            name, value, dotenv, livekit="selfhosted", chains_from_dotenv=False
+        ) == (value, "fixed")
 
 
 def test_host_network_only_for_caddy_and_livekit() -> None:

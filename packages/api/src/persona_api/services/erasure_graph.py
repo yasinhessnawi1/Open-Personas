@@ -62,6 +62,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
+from persona_api.db.connection_bounds import lift_statement_timeout
 from persona_api.db.models import graph_edges, graph_entities, graph_node_entities
 from persona_api.db.models import graph_node_versions as versions_t
 from persona_api.db.models import graph_nodes as nodes_t
@@ -1199,7 +1200,10 @@ def erased_personas_in_graph(
     """
     if engine.dialect.name != "postgresql":
         return []
-    with engine.connect() as conn:
+    with engine.begin() as conn:
+        # R9-313: a scan across every owner that grows with each completed erasure; bounded,
+        # it would one day fail on every sweep and the backstop would stop looking.
+        lift_statement_timeout(conn)
         return [(str(o), str(p)) for o, p in conn.execute(_LEFTOVERS, {"since": since})]
 
 
@@ -1225,6 +1229,10 @@ def erase_persona_graph(
     if engine.dialect.name != "postgresql":
         return {}
     with engine.begin() as conn:
+        # R9-313: the erasure must finish. With ``wait`` and no ``lock_timeout`` it waits out
+        # the owner's consolidation run, which can take minutes, and the owner-wide graph
+        # rewrite after it has no row bound; a statement timeout would fail it on every retry.
+        lift_statement_timeout(conn)
         # First, before any row lock: a consolidation run of this owner finishes before this
         # starts, and none starts until this commits (D-R9-284-graph-mutex; why no deadlock
         # cycle passes through it: persona.graph.maintenance_lock). The persona row itself was
