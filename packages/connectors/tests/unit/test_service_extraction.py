@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from persona_api.config import APIConfig
 from persona_api.services.origination_delivery import ChannelDeliverers
 from persona_connectors import service
 from persona_connectors.config import ConnectorConfig
@@ -68,7 +69,7 @@ async def _build(config: ConnectorConfig, http: httpx.AsyncClient) -> Connectors
     """Drive the REAL ``build_connectors`` with every heavy collaborator injected."""
     return await service.build_connectors(
         connector_config=config,
-        api_config=MagicMock(),
+        api_config=APIConfig(),  # a real config: the shared builders read real values from it
         rls_engine=MagicMock(),
         dispatch_engine=MagicMock(),
         runtime_factory=MagicMock(),

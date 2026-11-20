@@ -26,6 +26,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from persona_api.background.connectors_host import mount_connector_routes
+from persona_api.config import APIConfig
 from persona_api.errors import register_exception_handlers
 from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware
 from persona_connectors import service
@@ -87,7 +88,7 @@ def connectors_app() -> Iterator[FastAPI]:
     async def _build() -> Any:  # noqa: ANN401 — the bundle
         return await service.build_connectors(
             connector_config=_all_platforms_config(),
-            api_config=MagicMock(),
+            api_config=APIConfig(),  # a real config: the shared builders read real values from it
             rls_engine=MagicMock(),
             dispatch_engine=MagicMock(),
             runtime_factory=MagicMock(),
