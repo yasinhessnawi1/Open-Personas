@@ -72,7 +72,7 @@ from persona_runtime.agentic.call_ledger import CallLedger
 from persona_runtime.agentic.compactor import StepHistoryCompactor
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.pruner import PROTECTED_STEPS, ToolResultPruner
-from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage
+from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage, UsageCall
 from persona_runtime.agentic.step import (
     CallSkippedNote,
     ContextPrunedNote,
@@ -196,6 +196,35 @@ def _failed_tries(response: ChatResponse) -> tuple[BackendAttempt, ...]:
     if served is None:
         return ()
     return served.charged_failed_tries()
+
+
+def _usage_of(
+    step: int, backend: ChatBackend, response: ChatResponse, *, call: UsageCall = "step"
+) -> StepUsage:
+    """One model call's usage, under the model that SERVED it (R9-296).
+
+    The step's own call and the two summary calls (R9-299) are reported through this
+    one builder, so the api prices all three from the same fields.
+    """
+    provider, model = served_identity(backend, response.served)
+    return StepUsage(
+        step=max(step, 0),
+        provider=provider,
+        model=model,
+        prompt_tokens=response.usage.prompt_tokens,
+        completion_tokens=response.usage.completion_tokens,
+        cost_usd=response.usage.cost_usd,
+        failed_tries=_failed_tries(response),
+        call=call,
+    )
+
+
+async def _report(
+    on_step_usage: Callable[[StepUsage], Awaitable[None]] | None, usage: StepUsage
+) -> None:
+    """Hand ``usage`` to the caller's meter; no meter means an unmetered run."""
+    if on_step_usage is not None:
+        await on_step_usage(usage)
 
 
 class AgenticLoop:
@@ -413,7 +442,9 @@ class AgenticLoop:
                     # a salvageable cancellation into an error, so on failure ``output`` stays
                     # None and the run terminates exactly as it did before this change.
                     if steps:
-                        output = await self._safe_best_effort_summary(context)
+                        output = await self._safe_best_effort_summary(
+                            context, step=len(steps) - 1, on_step_usage=on_step_usage
+                        )
                     await self._emit(on_event, RunEvent.cancelled(step_num))
                     break
 
@@ -444,21 +475,9 @@ class AgenticLoop:
                 # incremental billing. The caller meters + may flip ``cancel_token``;
                 # the next iteration's boundary check (top of the loop) then stops the
                 # run cleanly, the in-flight step below completes first.
-                if on_step_usage is not None:
-                    # R9-296: the model that SERVED the step, from the response's own
-                    # trace; a chain's ``provider_name`` / ``model_name`` are its primary.
-                    provider, model = served_identity(backend, response.served)
-                    await on_step_usage(
-                        StepUsage(
-                            step=step_num,
-                            provider=provider,
-                            model=model,
-                            prompt_tokens=response.usage.prompt_tokens,
-                            completion_tokens=response.usage.completion_tokens,
-                            cost_usd=response.usage.cost_usd,
-                            failed_tries=_failed_tries(response),
-                        )
-                    )
+                # R9-296: the model that SERVED the step, from the response's own
+                # trace; a chain's ``provider_name`` / ``model_name`` are its primary.
+                await _report(on_step_usage, _usage_of(step_num, backend, response))
 
                 if response.tool_calls:
                     step, last_bad_tool, context = await self._handle_tool_calls(
@@ -528,7 +547,17 @@ class AgenticLoop:
                     await self._emit(on_event, RunEvent.reasoning(step_num, response.content))
 
                 step_message_counts.append(max(0, len(context) - context_before_step))
-                compacted = await self._maybe_compact(context, backend)
+                # R9-299: once the token is set the run is ending, and the next boundary
+                # salvages it. A compaction started now would only feed that salvage, a
+                # paid call for nothing, so it is not started.
+                cancelling = cancel_token is not None and cancel_token.is_cancelled
+                compacted = (
+                    context
+                    if cancelling
+                    else await self._maybe_compact(
+                        context, backend, step=step_num, on_step_usage=on_step_usage
+                    )
+                )
                 if compacted is not context:
                     # The compactor rewrote history into a summary, so the counts no longer
                     # describe this context. What survived IS the recent tail, so treat it as
@@ -549,7 +578,11 @@ class AgenticLoop:
                     steps[-1] = _with_note(steps[-1], prune_note)
             else:
                 status = RunStatus.MAX_STEPS_REACHED
-                output = self._clean_output(await self._best_effort_summary(context))
+                output = self._clean_output(
+                    await self._best_effort_summary(
+                        context, step=len(steps) - 1, on_step_usage=on_step_usage
+                    )
+                )
                 await self._emit(on_event, RunEvent.max_steps(self._max_steps, output))
         except GatedActionProposedError:
             # The A3 approval gate is a control signal, not a failure. The proposal is
@@ -854,13 +887,19 @@ class AgenticLoop:
     # ----- compaction bridge (D-06-4; the loop owns the async pre-compute) --
 
     async def _maybe_compact(
-        self, context: list[ConversationMessage], backend: ChatBackend
+        self,
+        context: list[ConversationMessage],
+        backend: ChatBackend,
+        *,
+        step: int,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
     ) -> list[ConversationMessage]:
         """Compact the step history if it crosses the tier budget (§6, D-06-4).
 
         The loop predicts compaction, pre-computes the small-tier summary on the
         middle slice (the one ``await``), and hands the compactor the resolved
-        string. Never ``asyncio.run()`` in a sync callable.
+        string. Never ``asyncio.run()`` in a sync callable. The summary is a paid
+        call, so its usage goes to the run's meter like a step's (R9-299).
         """
         budget = _backend_max_tokens(backend)
         if not self._compactor.should_compact(context, budget):
@@ -868,7 +907,7 @@ class AgenticLoop:
         middle = self._compactor.middle_to_summarise(context)
         if not middle:
             return context
-        summary = await self._summarise(middle)
+        summary = await self._summarise(middle, step=step, on_step_usage=on_step_usage)
         return self._compactor.compact_if_needed(context, budget, summary=summary)
 
     async def _maybe_prune(
@@ -907,18 +946,33 @@ class AgenticLoop:
         )
         return pruned, ContextPrunedNote(before_tokens=before, after_tokens=after)
 
-    async def _summarise(self, messages: list[ConversationMessage]) -> str:
+    async def _summarise(
+        self,
+        messages: list[ConversationMessage],
+        *,
+        step: int,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
+    ) -> str:
         """Summarise an excerpt on the background tier (the one async summary call).
 
         Spec P9: internal compaction — unread — the background surface (small).
+        R9-299: the call is reported to the run's meter as a ``compaction`` usage, so
+        the owner is charged for it as for a step (D-M3-1).
         """
         backend = self._tiers.get(tier_for("background"))
         rendered = "\n".join(f"{m.role}: {m.content}" for m in messages)
         prompt = [self._system(_SUMMARISE_INSTRUCTION), self._user(rendered)]
         response = await backend.chat(prompt)
+        await _report(on_step_usage, _usage_of(step, backend, response, call="compaction"))
         return response.content.strip()
 
-    async def _safe_best_effort_summary(self, context: list[ConversationMessage]) -> str | None:
+    async def _safe_best_effort_summary(
+        self,
+        context: list[ConversationMessage],
+        *,
+        step: int,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
+    ) -> str | None:
         """:meth:`_best_effort_summary`, but a failure yields ``None`` instead of raising.
 
         Used on the cancellation path (R9-109), where the run is already ending and the
@@ -927,17 +981,59 @@ class AgenticLoop:
         cancellation is exactly when the environment is least healthy (a tripped
         wall-clock box, a draining worker). Max-steps keeps the unguarded call, because
         there the summary IS the deliverable and a failure should surface.
+
+        R9-299: the call is metered like a step. A meter that raises here is logged and
+        the salvage is kept: the model has already been paid for the summary, and
+        dropping it would cost the owner the work as well as the call.
         """
         try:
-            return await self._best_effort_summary(context)
+            backend, response = await self._best_effort_summary_call(context)
         except Exception as exc:  # noqa: BLE001 - salvage is strictly optional
             _logger.info(
                 "cancellation summary failed; ending without one ({error})", error=str(exc)
             )
             return None
+        await self._report_summary(step, backend, response, on_step_usage)
+        return response.content.strip()
 
-    async def _best_effort_summary(self, context: list[ConversationMessage]) -> str:
-        """Best-effort summary at max-steps, generated on the frontier tier (§4.1)."""
+    async def _best_effort_summary(
+        self,
+        context: list[ConversationMessage],
+        *,
+        step: int,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
+    ) -> str:
+        """Best-effort summary at max-steps, generated on the frontier tier (§4.1).
+
+        R9-299: reported to the run's meter as a ``summary`` usage. The model call itself
+        is unguarded (a failure surfaces, as before), but a meter that raises is logged
+        and the summary is kept, as on the cancellation path: it is the run's
+        deliverable and the model has already been paid for it.
+        """
+        backend, response = await self._best_effort_summary_call(context)
+        await self._report_summary(step, backend, response, on_step_usage)
+        return response.content.strip()
+
+    @staticmethod
+    async def _report_summary(
+        step: int,
+        backend: ChatBackend,
+        response: ChatResponse,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
+    ) -> None:
+        """Meter a best-effort summary; a meter that raises never costs the summary."""
+        try:
+            await _report(on_step_usage, _usage_of(step, backend, response, call="summary"))
+        except Exception as exc:  # noqa: BLE001 - the summary outlives its meter
+            _logger.warning(
+                "best-effort summary could not be metered; keeping it ({error})",
+                error=str(exc),
+            )
+
+    async def _best_effort_summary_call(
+        self, context: list[ConversationMessage]
+    ) -> tuple[ChatBackend, ChatResponse]:
+        """The best-effort summary's model call, and the backend it went to."""
         try:
             backend = self._tiers.get("frontier")
         except TierNotConfiguredError:
@@ -950,8 +1046,7 @@ class AgenticLoop:
             ),
             self._user(rendered),
         ]
-        response = await backend.chat(prompt)
-        return response.content.strip()
+        return backend, await backend.chat(prompt)
 
     # ----- use_skill intercept (D-04-10 / D-06-9) --------------------------
 

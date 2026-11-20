@@ -944,7 +944,18 @@ class ConversationLoop:
         # command, one batched UPDATE, sync on the request's owner-scoped
         # engine; fail-soft inside (a failed reinforcement never breaks a turn).
         reinforce_recalled(self._stores, persona_id, context)
-        history, compacted = await self._manage_history(conversation)
+        # R9-299: the compaction summary is a paid model call, so its usage is kept and
+        # priced with the turn's own rounds at write-back (one charge, one TurnLog row).
+        history, compacted, compaction_rounds = await self._manage_history(conversation)
+        if compaction_rounds:
+            # A gate below can end the turn before any answer round, with no TurnLog.
+            # The summary is already paid for, so the turn carries its cost from here:
+            # the chat worker charges ``last_turn_cost_cents`` proportionally, where a
+            # turn with no recorded cost gets the flat floor. A turn that reaches
+            # write-back replaces this with the full figure, compaction included.
+            self._last_turn_cost_cents, self._last_turn_cost_basis = price_rounds(
+                compaction_rounds, source=self._cost_source, surface="chat"
+            )
 
         # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so. Runs first — "cancel that" /
         # "pause it" is about an existing task, not a new one. Pause/resume apply immediately; a
@@ -1820,6 +1831,7 @@ class ConversationLoop:
             backend=backend,
             served=last_served,
             priced_rounds=priced_rounds,
+            compaction_rounds=compaction_rounds,
             usage=usage,
             latency_ms=latency_ms,
             tool_calls=tool_call_count,
@@ -2170,24 +2182,29 @@ class ConversationLoop:
 
     async def _manage_history(
         self, conversation: Conversation
-    ) -> tuple[list[ConversationMessage], bool]:
+    ) -> tuple[list[ConversationMessage], bool, tuple[PricedRound, ...]]:
         """Run history management with the pre-computed-summary bridge (D-05-X).
 
-        Returns the prompt-ready history and whether compaction fired this turn.
+        Returns the prompt-ready history, whether compaction fired this turn, and the
+        summary call's usage as a priced round (empty when nothing was summarised).
+        The turn prices that round with its own (R9-299): the summary is a provider
+        call made because this turn ran, so the owner of the turn pays for it.
         """
         compacted = self._will_compact(conversation)
         precomputed: str | None = None
+        compaction_rounds: tuple[PricedRound, ...] = ()
         if compacted:
             boundary = conversation.turn_count - self._history.keep_recent
             new_range = list(conversation.messages[conversation.compacted_up_to : boundary])
-            precomputed = await self._summarise(new_range)
+            precomputed, compaction_round = await self._summarise(new_range)
+            compaction_rounds = (compaction_round,)
 
         def _assembler(_messages: list[ConversationMessage]) -> str:
             # manage() only calls this when compacting; precomputed is set then.
             return precomputed or ""
 
         history = self._history.manage(conversation, summariser=_assembler)
-        return history, compacted
+        return history, compacted, compaction_rounds
 
     def _will_compact(self, conversation: Conversation) -> bool:
         """Replica of manage()'s 'will I summarise this turn?' decision (D-05-X).
@@ -2200,11 +2217,14 @@ class ConversationLoop:
         boundary = turn_count - self._history.keep_recent
         return boundary > conversation.compacted_up_to
 
-    async def _summarise(self, messages: list[ConversationMessage]) -> str:
+    async def _summarise(self, messages: list[ConversationMessage]) -> tuple[str, PricedRound]:
         """Summarise an excerpt on the background tier (the one async summary call).
 
         Spec P9: an unread, narrow, high-volume job — the background surface
         (small), now stated via the policy instead of an incidental literal.
+
+        Returns the summary text and the call's usage under the model that served it
+        (R9-299), for the turn to price with its own rounds.
         """
         backend = self._tiers.get(tier_for("background"))
         rendered = "\n".join(f"{m.role}: {m.content}" for m in messages)
@@ -2215,7 +2235,7 @@ class ConversationLoop:
             ConversationMessage(role="user", content=rendered, created_at=datetime.now(UTC)),
         ]
         response = await backend.chat(prompt)
-        return response.content.strip()
+        return response.content.strip(), _priced_round(backend, response.usage, response.served)
 
     def _decide_routing(
         self,
@@ -2680,6 +2700,7 @@ class ConversationLoop:
         mcp_unavailable_requested: list[str] | None = None,
         served: ServedCall | None = None,
         priced_rounds: Sequence[PricedRound] = (),
+        compaction_rounds: Sequence[PricedRound] = (),
     ) -> None:
         # M2 review (I2): ``usage`` arrives ALREADY summed across every round
         # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
@@ -2700,6 +2721,12 @@ class ConversationLoop:
         failed_prompt, failed_completion = _failed_try_tokens(priced_rounds)
         prompt_tokens += failed_prompt
         completion_tokens += failed_completion
+        # R9-299: the history compaction's summary call is charged with the turn, so
+        # its tokens (and its own failed tries') join the row's sums the same way. The
+        # SSE final chunk's ``usage`` stays the answer's own.
+        compaction_prompt, compaction_completion = _round_tokens(compaction_rounds)
+        prompt_tokens += compaction_prompt
+        completion_tokens += compaction_completion
         # Spec 20 T19 (D-20-9): populate the multi-model fallback fields from
         # the last round's own served trace (R9-223); a bare backend (no trace)
         # yields the zero-fallback default shape. Computed FIRST (Spec M2,
@@ -2731,8 +2758,13 @@ class ConversationLoop:
         # the summed tokens at the last round's model. A one-round turn prices
         # exactly as before. A turn with no usage-carrying round keeps the old
         # zero-token call at the served pair, so its basis is unchanged too.
-        if priced_rounds:
-            cost, cost_basis = price_rounds(priced_rounds, source=self._cost_source, surface="chat")
+        #
+        # R9-299: the compaction summary is priced as one more round, at the model that
+        # served it, inside the same single rounding and the worker's single ceil. A
+        # turn that did not compact prices exactly as before.
+        rounds = [*priced_rounds, *compaction_rounds]
+        if rounds:
+            cost, cost_basis = price_rounds(rounds, source=self._cost_source, surface="chat")
         else:
             cost, cost_basis = compute_turn_cost(
                 provider=served_provider,
@@ -2887,6 +2919,14 @@ def _failed_try_tokens(rounds: Sequence[PricedRound]) -> tuple[int, int]:
             if attempt.usage is not None:
                 prompt += attempt.usage.prompt_tokens
                 completion += attempt.usage.completion_tokens
+    return prompt, completion
+
+
+def _round_tokens(rounds: Sequence[PricedRound]) -> tuple[int, int]:
+    """The prompt and completion tokens of ``rounds``, their failed tries included."""
+    failed_prompt, failed_completion = _failed_try_tokens(rounds)
+    prompt = sum(r.prompt_tokens for r in rounds) + failed_prompt
+    completion = sum(r.completion_tokens for r in rounds) + failed_completion
     return prompt, completion
 
 

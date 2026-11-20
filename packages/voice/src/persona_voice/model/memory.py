@@ -34,6 +34,8 @@ from persona.logging import get_logger
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
 
+from persona_voice.model.history import SmallTierSummariser
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
@@ -93,6 +95,7 @@ class VoiceTurnRecorder:
         # by construction — this method MUST NOT raise (V4 runs it in ``finally``),
         # and the meter is itself fail-soft.
         self._billing_meter = billing_meter
+        self._bind_summariser_meter()
         self._turn_seq = 0
         # V9 (V9-D-1/D-2): persists each committed turn to the durable ``messages``
         # transcript (byte-for-byte with a chat turn). Optional — None on any path
@@ -106,6 +109,9 @@ class VoiceTurnRecorder:
         # Hold references to background compaction tasks so they are not GC'd
         # mid-flight (the standard asyncio fire-and-forget guard).
         self._bg_tasks: set[Any] = set()
+        # R9-299: whether a compaction is running. Two over the same range would each be
+        # a paid model call summarising the same turns, so only one runs at a time.
+        self._compacting = False
 
     def set_billing_meter(self, meter: VoiceTurnBillingMeter) -> None:
         """Late-bind the per-turn billing meter (Spec M3, T6b-1).
@@ -115,6 +121,18 @@ class VoiceTurnRecorder:
         fires the first turn.
         """
         self._billing_meter = meter
+        self._bind_summariser_meter()
+
+    def _bind_summariser_meter(self) -> None:
+        """Point the compaction summary's usage at the billing meter (R9-299, D-M3-1).
+
+        The background compaction makes its own small-tier model call. Bound here, the
+        one place that holds both the summariser and the meter, so wiring the meter
+        also meters the compaction: the summary's usage lands in the meter's current
+        turn and is billed with the next committed one.
+        """
+        if self._billing_meter is not None and isinstance(self._summariser, SmallTierSummariser):
+            self._summariser.set_usage_listener(self._billing_meter)
 
     def note_user_message(self, text: str, *, synthetic: bool = False) -> None:
         """Record this turn's transcribed user message (correlation key).
@@ -260,14 +278,45 @@ class VoiceTurnRecorder:
             written_by=_WRITTEN_BY,
         )
 
+    async def _run_compaction(
+        self,
+        compactor: VoiceHistoryCompactor,
+        summariser: Callable[[list[ConversationMessage]], Awaitable[str]],
+    ) -> None:
+        """Run one compaction, then free the slot whatever happened (R9-299)."""
+        try:
+            await compactor.compact(self._ctx.conversation, summariser)
+        finally:
+            self._compacting = False
+
     def _maybe_schedule_compaction(self) -> None:
         """Schedule off-critical-path compaction if due (D-V5-3)."""
         if self._compactor is None or self._summariser is None:
             return
+        if self._compacting:
+            return  # one is in flight; the next turn schedules again if still due
         if not self._compactor.is_compaction_due(self._ctx.conversation):
             return
-        task = self._schedule(self._compactor.compact(self._ctx.conversation, self._summariser))
+        self._compacting = True
+        try:
+            task = self._schedule(self._run_compaction(self._compactor, self._summariser))
+        except Exception as exc:  # noqa: BLE001 - the commit path must never raise
+            # Nothing was scheduled, so nothing will free the slot but this.
+            self._compacting = False
+            _LOG.warning(
+                "voice compaction could not be scheduled (persona_id={pid}): {err}",
+                pid=self._ctx.persona_id,
+                err=repr(exc)[:200],
+            )
+            return
         # Keep a reference until done so the task is not garbage-collected.
         if isinstance(task, asyncio.Task):
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
+            # A task cancelled before its first step never runs the coroutine's own
+            # ``finally``, so the slot is also freed when the task is done, however it
+            # ended. Freeing it twice is harmless.
+            task.add_done_callback(self._free_compaction_slot)
+
+    def _free_compaction_slot(self, _task: object) -> None:
+        self._compacting = False

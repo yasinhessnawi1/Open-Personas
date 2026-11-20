@@ -75,7 +75,10 @@ async def test_run_is_cut_off_at_a_step_boundary_on_exhaustion() -> None:
     assert run.status is RunStatus.CANCELLED, "an exhausted run must be cut off, not completed"
     # Exactly 3 steps ran (the balance covered 3), then the next boundary stopped it.
     assert len(run.steps) == 3
-    assert len(watcher.usages) == 3
+    # The three steps, then the cancellation's salvage summary (R9-109), which is a
+    # paid call and so is reported too (R9-299). The empty balance captures nothing
+    # for it: the meter still never takes more than the balance holds.
+    assert [u.call for u in watcher.usages] == ["step", "step", "step", "summary"]
     assert watcher.captured_total == 3  # captured == balance, never more
     assert watcher.balance == 0  # floored at 0, never negative
 
