@@ -54,10 +54,12 @@ class _Conn:
 
     def __init__(self) -> None:
         self.sql: list[str] = []
+        self.params: list[dict[str, Any]] = []
 
     def execute(self, stmt: Any, params: object = None) -> _Result:  # noqa: ANN401, ARG002
         sql = _sql(stmt)
         self.sql.append(sql)
+        self.params.append({} if isinstance(stmt, str) else dict(stmt.compile(dialect=_PG).params))
         if "FROM memory_chunks" in sql:
             return _Result(["s1", "v2"])
         if sql.startswith("SELECT conversations.persona_id"):
@@ -122,3 +124,29 @@ def test_a_durable_record_enqueues_every_id_with_the_mark() -> None:
     mark = _index(conn, "INSERT INTO forgotten_conversations")
     job = _index(conn, "INSERT INTO jobs")
     assert mark < job
+
+
+def test_the_job_carries_the_ids_captured_under_the_lock_as_well_as_those_found_before() -> None:
+    """The pre-found legacy ids and the stamped ids read under the row lock, all of them."""
+    conn = _Conn()
+
+    service.record(conn, ["legacy1"], owner_id="u1", conversation_id="c1", durable=True)  # type: ignore[arg-type]
+
+    job = conn.params[_index(conn, "INSERT INTO jobs")]
+    assert job["type"] == service.JOB_TYPE
+    assert job["owner_id"] == "u1"
+    assert job["payload"] == {
+        "persona_id": "p1",
+        "conversation_id": "c1",
+        "chunk_ids": ["legacy1", "s1", "v2"],
+    }
+    assert job["idempotency_key"] == "conversation_memory_forget:c1"
+
+
+def test_the_mark_is_for_exactly_this_conversation_owner_and_persona() -> None:
+    conn = _Conn()
+
+    service.record(conn, [], owner_id="u1", conversation_id="c1", durable=False)  # type: ignore[arg-type]
+
+    mark = conn.params[_index(conn, "INSERT INTO forgotten_conversations")]
+    assert mark == {"conversation_id": "c1", "owner_id": "u1", "persona_id": "p1"}
