@@ -34,6 +34,8 @@ from persona.logging import get_logger
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource, mint_chunk_id
 from persona.schema.conversation import ConversationMessage
 
+from persona_voice.model.history import SmallTierSummariser
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
@@ -93,6 +95,7 @@ class VoiceTurnRecorder:
         # by construction — this method MUST NOT raise (V4 runs it in ``finally``),
         # and the meter is itself fail-soft.
         self._billing_meter = billing_meter
+        self._bind_summariser_meter()
         self._turn_seq = 0
         # V9 (V9-D-1/D-2): persists each committed turn to the durable ``messages``
         # transcript (byte-for-byte with a chat turn). Optional — None on any path
@@ -115,6 +118,18 @@ class VoiceTurnRecorder:
         fires the first turn.
         """
         self._billing_meter = meter
+        self._bind_summariser_meter()
+
+    def _bind_summariser_meter(self) -> None:
+        """Point the compaction summary's usage at the billing meter (R9-299, D-M3-1).
+
+        The background compaction makes its own small-tier model call. Bound here, the
+        one place that holds both the summariser and the meter, so wiring the meter
+        also meters the compaction: the summary's usage lands in the meter's current
+        turn and is billed with the next committed one.
+        """
+        if self._billing_meter is not None and isinstance(self._summariser, SmallTierSummariser):
+            self._summariser.set_usage_listener(self._billing_meter)
 
     def note_user_message(self, text: str, *, synthetic: bool = False) -> None:
         """Record this turn's transcribed user message (correlation key).

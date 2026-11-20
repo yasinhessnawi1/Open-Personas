@@ -177,3 +177,26 @@ async def test_a_legs_steps_are_summed_and_rounded_once_before_the_ceil() -> Non
         provider_cents=cents, infra_flat_cents=0.0, markup=BillingConfig().credit_markup, floor=1
     )
     assert charge == 3
+
+
+@pytest.mark.asyncio
+async def test_a_legs_summary_calls_are_in_the_legs_cost() -> None:
+    """R9-299: a leg's compaction and best-effort summary calls arrive through
+    ``on_step_usage`` beside its steps, and the leg's one charge sums them all."""
+    with collect_llm_usage() as distillation:
+        cost = _LegCost(None, distillation)
+        for call in ("step", "compaction", "summary"):
+            await cost.on_step_usage(
+                StepUsage(
+                    step=0,
+                    provider="anthropic",
+                    model="claude-sonnet-4-6",
+                    prompt_tokens=1000,
+                    completion_tokens=100,
+                    cost_usd=None,
+                    call=call,  # type: ignore[arg-type]
+                )
+            )
+        cents, basis = cost.result()
+    assert cents == pytest.approx(3 * 0.45)
+    assert basis == "estimate_static"

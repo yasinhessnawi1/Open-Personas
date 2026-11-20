@@ -131,3 +131,21 @@ async def test_a_steps_failed_try_that_cost_tokens_is_in_the_charge() -> None:
     kw = policy.calls[-1]
     assert kw["cost_cents"] == pytest.approx(3.4)
     assert kw["amount"] == 4  # one ceil over the step, failed try included
+
+
+@pytest.mark.parametrize("call", ["compaction", "summary"])
+@pytest.mark.asyncio
+async def test_a_summary_call_is_charged_exactly_like_a_step(call: str) -> None:
+    """R9-299: the loop now reports its compaction and best-effort summary calls through
+    ``on_step_usage``. The watcher charges them as it charges a step: the same pricing,
+    the same capture, the same owner, the same cutoff decision."""
+    step_policy = _FakePolicy(captured=3, new_balance=97)
+    await _watcher(step_policy, CancelToken()).on_step_usage(_usage())
+    summary_policy = _FakePolicy(captured=3, new_balance=97)
+    token = CancelToken()
+
+    await _watcher(summary_policy, token).on_step_usage(_usage().model_copy(update={"call": call}))
+
+    assert summary_policy.calls == step_policy.calls
+    assert summary_policy.calls[-1]["user_id"] == "u1"
+    assert not token.is_cancelled
