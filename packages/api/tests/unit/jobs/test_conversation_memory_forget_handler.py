@@ -58,14 +58,21 @@ def _fake_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "EpisodicStore", _Store)
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, *, forgotten: bool) -> list[dict[str, Any]]:
+def _run(
+    monkeypatch: pytest.MonkeyPatch, *, forgotten: bool, attempt: int | None = 1
+) -> list[dict[str, Any]]:
     asked: list[dict[str, Any]] = []
 
     def _is_forgotten(conn: object, **kwargs: Any) -> bool:  # noqa: ANN401
         asked.append({"conn": conn, **kwargs})
         return forgotten
 
+    def _attempt(conn: object, job_id: str) -> int | None:
+        assert (conn, job_id) == ("the owner's connection", "job-1")
+        return attempt
+
     monkeypatch.setattr(handler_module, "is_forgotten", _is_forgotten)
+    monkeypatch.setattr(handler_module, "job_attempt", _attempt)
     handler = ConversationMemoryForgetHandler(backend="backend", audit_logger="audit")  # type: ignore[arg-type]
     asyncio.run(handler.handle(_PAYLOAD, _Context()))  # type: ignore[arg-type]
     return asked
@@ -110,6 +117,59 @@ def test_a_store_failure_fails_the_job_so_the_queue_retries_it(
         _run(monkeypatch, forgotten=True)
 
 
+def _alerts(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+    alerts: list[tuple[str, dict[str, Any]]] = []
+
+    def _error(msg: str, **kwargs: Any) -> None:  # noqa: ANN401
+        if msg.startswith("OPERATOR ALERT"):
+            alerts.append((msg, kwargs))
+
+    monkeypatch.setattr(handler_module._log, "error", _error)  # noqa: SLF001
+    return alerts
+
+
+def _break_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _broken(self: _Store, persona_id: str, doc_ids: list[str]) -> None:  # noqa: ARG001
+        msg = "the memory store is unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(_Store, "remove_documents", _broken)
+
+
+def test_the_last_attempt_failing_alerts_the_operator_with_ids_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alerts = _alerts(monkeypatch)
+    _break_the_store(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        _run(monkeypatch, forgotten=True, attempt=service.JOB_MAX_ATTEMPTS)
+
+    ((message, fields),) = alerts
+    assert message.startswith("OPERATOR ALERT: conversation memory forget gave up")
+    assert fields == {
+        "cid": "c1",
+        "pid": "p1",
+        "oid": "u1",
+        "jid": "job-1",
+        "n": 2,
+        "err": "RuntimeError",
+    }, "ids, a count and the error class: never the memory or the exception's text"
+
+
+@pytest.mark.parametrize("attempt", [1, service.JOB_MAX_ATTEMPTS - 1, None])
+def test_an_attempt_that_will_be_retried_raises_no_alert(
+    monkeypatch: pytest.MonkeyPatch, attempt: int | None
+) -> None:
+    alerts = _alerts(monkeypatch)
+    _break_the_store(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        _run(monkeypatch, forgotten=True, attempt=attempt)
+
+    assert alerts == []
+
+
 def test_the_payload_is_ids_only_and_round_trips_through_json() -> None:
     stored = json.loads(json.dumps(_PAYLOAD.model_dump()))
 
@@ -151,15 +211,24 @@ def test_the_route_enqueues_only_where_a_worker_here_runs_the_job(
     )
 
 
-def test_off_postgres_the_record_step_records_nothing() -> None:
+class _SqliteConn:
     class _Dialect:
         name = "sqlite"
 
-    class _Conn:
-        dialect = _Dialect()
+    dialect = _Dialect()
 
-        def execute(self, *_a: object) -> None:
-            msg = "no statement may run off Postgres"
-            raise AssertionError(msg)
+    def execute(self, *_a: object) -> None:
+        msg = "no statement may run off Postgres"
+        raise AssertionError(msg)
 
-    assert service.record(_Conn(), ["s1"], owner_id="u1", conversation_id="c1", durable=True) == []  # type: ignore[arg-type]
+
+def test_off_postgres_the_record_step_records_nothing() -> None:
+    conn = _SqliteConn()
+
+    assert service.record(conn, ["s1"], owner_id="u1", conversation_id="c1", durable=False) == []  # type: ignore[arg-type]
+
+
+def test_a_durable_forget_off_postgres_is_refused_not_silently_dropped() -> None:
+    """Durable means the row delete commits the job; off Postgres nothing would hold it."""
+    with pytest.raises(service.DurableForgetUnavailableError):
+        service.record(_SqliteConn(), ["s1"], owner_id="u1", conversation_id="c1", durable=True)  # type: ignore[arg-type]

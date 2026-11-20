@@ -29,6 +29,7 @@ from persona_api.services.conversation_memory_forget import (
     ConversationMemoryForgetPayload,
     idempotency_key,
     is_forgotten,
+    job_attempt,
     remove,
 )
 
@@ -61,6 +62,9 @@ class ConversationMemoryForgetHandler:
                 persona_id=payload.persona_id,
                 conversation_id=payload.conversation_id,
             )
+            # Read now, while the database answers: the failure this attempt may meet is the
+            # same database being down.
+            attempt = job_attempt(conn, context.job_id)
         if not forgotten:
             _log.info(
                 "conversation memory forget skipped: not forgotten by this owner",
@@ -71,13 +75,40 @@ class ConversationMemoryForgetHandler:
         store = EpisodicStore(backend=self._backend, audit_logger=self._audit_logger)
         # Off the event loop: the store is synchronous. The owner's scope travels with the
         # copied context.
-        removed = await asyncio.to_thread(remove, store, payload.persona_id, payload.chunk_ids)
+        try:
+            removed = await asyncio.to_thread(remove, store, payload.persona_id, payload.chunk_ids)
+        except Exception as exc:
+            if attempt is not None and attempt >= JOB_MAX_ATTEMPTS:
+                _alert_gave_up(payload, context, exc)
+            raise
         _log.info(
             "conversation memory forget ran",
             owner_id=context.owner_id,
             conversation_id=payload.conversation_id,
             chunks=removed,
         )
+
+
+def _alert_gave_up(
+    payload: ConversationMemoryForgetPayload, context: JobContext, exc: Exception
+) -> None:
+    """The last attempt failed: the job is dead-lettered next, and the memory stays.
+
+    An ERROR line starting ``OPERATOR ALERT`` (the persona erasure sweep's form), with ids, a
+    count and the error class only. The payload's ids are the only way left to the gists and
+    core block derived from those chunks, so recovery is re-running this job from the dead row
+    (or ``jobs_archive``) before the archive is purged.
+    """
+    _log.error(
+        "OPERATOR ALERT: conversation memory forget gave up; its memory stays until the job "
+        "is re-run conversation={cid} persona={pid} owner={oid} job={jid} chunks={n} error={err}",
+        cid=payload.conversation_id,
+        pid=payload.persona_id,
+        oid=context.owner_id,
+        jid=context.job_id,
+        n=len(payload.chunk_ids),
+        err=type(exc).__name__,
+    )
 
 
 def register_conversation_memory_forget_handler(

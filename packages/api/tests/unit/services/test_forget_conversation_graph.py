@@ -157,8 +157,11 @@ def test_the_lock_comes_first_then_the_conversations_row_then_the_graph(
     assert counts == {"nodes_deleted": 2}
     assert conn.sql[0].startswith("SET LOCAL lock_timeout = '15s'"), "bounded, like a delete"
     assert "pg_advisory_xact_lock" in conn.sql[1], "the graph lock before any row lock"
-    assert "FROM conversations" in conn.sql[2]
-    assert conn.sql[2].rstrip().endswith("FOR UPDATE"), "waits for writes in flight, stops new"
+    # R9-311: the owner's rows next, held as the erasures take them (users, then persona).
+    assert "FROM users" in conn.sql[2]
+    assert "FROM personas" in conn.sql[3]
+    assert "FROM conversations" in conn.sql[4]
+    assert conn.sql[4].rstrip().endswith("FOR UPDATE"), "waits for writes in flight, stops new"
     assert taken == [("u1", {"interaction_id": _C})]
 
 

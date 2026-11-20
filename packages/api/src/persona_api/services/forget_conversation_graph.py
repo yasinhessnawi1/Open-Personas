@@ -46,6 +46,7 @@ from sqlalchemy import select, text
 
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import graph_nodes as nodes_t
+from persona_api.services.conversation_memory_forget import hold_owners
 from persona_api.services.erasure_graph import (
     Source,
     _naming,
@@ -109,6 +110,9 @@ def forget_conversation_graph(
     # The shape is fixed in core: digits and a unit, nothing else.
     conn.execute(text(f"SET LOCAL lock_timeout = '{DELETE_LOCK_TIMEOUT}'"))
     take_graph_maintenance_lock(conn, owner_id)
+    # R9-311: the owner's rows before the conversation's, the erasures' order (users, persona,
+    # conversation), so a forget and a persona or account erasure cannot deadlock.
+    hold_owners(conn, owner_id=owner_id, conversation_id=conversation_id)
     held = conn.execute(
         select(conversations_t.c.id)
         .where(conversations_t.c.owner_id == owner_id, conversations_t.c.id == conversation_id)

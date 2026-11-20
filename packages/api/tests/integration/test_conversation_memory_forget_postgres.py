@@ -227,3 +227,35 @@ def test_the_job_does_nothing_for_a_conversation_its_owner_did_not_forget(
     )
 
     assert live in _ids(backend)
+
+
+def test_the_capture_takes_an_unstamped_later_version_of_a_stamped_chain(
+    rls: Engine, migrated_engine: Engine, embedder: HashEmbedder384
+) -> None:
+    """A rollback can write version 2 without the stamp; a retry must still reach it."""
+    backend = PostgresBackend(engine=rls, embedder=embedder)
+    first = _write(backend, _CONV)
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE memory_chunks SET superseded_by = 'v2-unstamped' WHERE id = :i"),
+            {"i": first},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO memory_chunks (id, persona_id, kind, text, embedding, content_hash, "
+                "metadata, logical_id, version) VALUES ('v2-unstamped', :p, 'episodic', 'x', "
+                "array_fill(0, ARRAY[384])::vector, 'h', '{}', :l, 2)"
+            ),
+            {"p": _PERSONA, "l": first},
+        )
+
+    with rls.connect() as conn:
+        transaction = conn.begin()
+        try:
+            captured = conversation_memory_forget.record(
+                conn, [], owner_id=_OWNER, conversation_id=_CONV, durable=False
+            )
+        finally:
+            transaction.rollback()
+
+    assert sorted(captured) == sorted([first, "v2-unstamped"])

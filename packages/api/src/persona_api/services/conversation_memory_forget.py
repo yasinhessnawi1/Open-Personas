@@ -40,12 +40,15 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from persona.jobs import JobPayload
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import forgotten_conversations as forgotten_t
+from persona_api.db.models import jobs as jobs_t
 from persona_api.db.models import memory_chunks as memory_chunks_t
+from persona_api.db.models import personas as personas_t
+from persona_api.db.models import users as users_t
 from persona_api.jobs.queue import enqueue_on
 
 if TYPE_CHECKING:
@@ -55,11 +58,14 @@ __all__ = [
     "JOB_MAX_ATTEMPTS",
     "JOB_TYPE",
     "ConversationMemoryForgetPayload",
+    "DurableForgetUnavailableError",
     "EpisodicForgetStore",
     "MemoryForgetPlan",
     "episodic_ids",
+    "hold_owners",
     "idempotency_key",
     "is_forgotten",
+    "job_attempt",
     "plan",
     "record",
     "remove",
@@ -74,6 +80,15 @@ JOB_DELAY = timedelta(seconds=30)
 JOB_MAX_ATTEMPTS = 30
 
 _EPISODIC = "episodic"
+
+
+class DurableForgetUnavailableError(RuntimeError):
+    """A durable forget was asked for where its job cannot be committed with the row delete.
+
+    Off Postgres there is no jobs table in the row's transaction and no guard, so recording
+    nothing would quietly bring back R9-311: the row goes and the forget is not held anywhere.
+    Raised inside the row delete's transaction, so the delete rolls back.
+    """
 
 
 class ConversationMemoryForgetPayload(JobPayload):
@@ -167,10 +182,15 @@ def record(
 
     Returns the ids of the chunks stamped with the conversation, captured under its row lock.
     Postgres only: ``[]`` elsewhere, and when the conversation is not the owner's (the delete
-    then answers 404 and rolls back).
+    then answers 404 and rolls back). ``durable`` off Postgres raises
+    :class:`DurableForgetUnavailableError` rather than record nothing.
     """
     if conn.dialect.name != "postgresql":
+        if durable:
+            msg = "a durable conversation forget needs Postgres"
+            raise DurableForgetUnavailableError(msg)
         return []
+    hold_owners(conn, owner_id=owner_id, conversation_id=conversation_id)
     persona_id = conn.execute(
         select(conversations_t.c.persona_id)
         .where(conversations_t.c.id == conversation_id, conversations_t.c.owner_id == owner_id)
@@ -202,15 +222,46 @@ def record(
     return captured
 
 
+def hold_owners(conn: Connection, *, owner_id: str, conversation_id: str) -> None:
+    """Hold the owner's ``users`` row, then the conversation's persona, ``FOR KEY SHARE``.
+
+    The mark and the job reference both rows, so their inserts take these locks anyway. Taken
+    here, before the conversation's row is locked, the order is the erasures': an account
+    erasure locks ``users`` and a persona erasure the persona before either reaches the
+    conversation through the cascade. Taken after, a forget and an erasure running together
+    could each hold what the other waits for. A no-op re-lock when the graph step took them.
+    """
+    # ``read`` with ``key_share`` is ``FOR KEY SHARE`` (``key_share`` alone: ``FOR NO KEY UPDATE``).
+    conn.execute(
+        select(users_t.c.id)
+        .where(users_t.c.id == owner_id)
+        .with_for_update(read=True, key_share=True)
+    )
+    persona_of = (
+        select(conversations_t.c.persona_id)
+        .where(conversations_t.c.id == conversation_id, conversations_t.c.owner_id == owner_id)
+        .scalar_subquery()
+    )
+    conn.execute(
+        select(personas_t.c.id)
+        .where(personas_t.c.id == persona_of, personas_t.c.owner_id == owner_id)
+        .with_for_update(read=True, key_share=True, of=personas_t)
+    )
+
+
 def _stamped_ids(conn: Connection, *, persona_id: str, conversation_id: str) -> list[str]:
-    """Every episodic row stamped with the conversation, every version of it included."""
-    stamp = memory_chunks_t.c.metadata["conversation_id"].as_string()
+    """Every version of every episodic chain a row stamped with the conversation belongs to.
+
+    Not only the stamped rows: a rollback writes a new version that need not carry the stamp, and
+    a gist built on it is reached on a retry only through its id (the raw rows being gone by
+    then). Versions share a ``logical_id``.
+    """
+    chunks = memory_chunks_t.c
+    stamped = chunks.metadata["conversation_id"].as_string() == conversation_id
+    scope = (chunks.persona_id == persona_id, chunks.kind == _EPISODIC)
+    chains = select(chunks.logical_id).where(*scope, stamped, chunks.logical_id.is_not(None))
     rows = conn.execute(
-        select(memory_chunks_t.c.id).where(
-            memory_chunks_t.c.persona_id == persona_id,
-            memory_chunks_t.c.kind == _EPISODIC,
-            stamp == conversation_id,
-        )
+        select(chunks.id).where(*scope, or_(stamped, chunks.logical_id.in_(chains)))
     ).scalars()
     return sorted(str(chunk_id) for chunk_id in rows)
 
@@ -225,6 +276,12 @@ def is_forgotten(conn: Connection, *, owner_id: str, persona_id: str, conversati
         )
     ).first()
     return found is not None
+
+
+def job_attempt(conn: Connection, job_id: str) -> int | None:
+    """Which attempt of the job this is (the claim counts it), or ``None`` if it is not found."""
+    attempt = conn.execute(select(jobs_t.c.attempt).where(jobs_t.c.id == job_id)).scalar()
+    return None if attempt is None else int(attempt)
 
 
 def plan(*, owner_id: str, conversation_id: str, durable: bool) -> MemoryForgetPlan:
