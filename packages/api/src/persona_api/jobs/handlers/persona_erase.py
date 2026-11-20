@@ -19,14 +19,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from persona.errors import PermanentJobError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.stores.postgres import PostgresBackend
 from pydantic import field_validator
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from persona_api.db.audit_factory import build_audit_logger
 from persona_api.db.engine import aware_utc
@@ -390,13 +390,19 @@ class PersonaEraseSweep:
         """Claim the erasure of every create that never finished (R9-293 review HIGH-2).
 
         A row with ``create_complete`` false older than :data:`ABANDONED_CREATE_GRACE` is a
-        create whose process died between its commit and its undo. Its erasure is claimed,
-        fenced and its row deleted as the route does (``begin_persona_erasure``), and the
-        resume runs the rest. A younger one may still be finishing, and is left alone.
+        create whose process died between its commit and its undo. Its erasure is claimed and
+        its row deleted under the row's lock, still incomplete (``claim_abandoned_create``,
+        review MEDIUM-2), and the resume runs the rest. A younger one may still be finishing,
+        and is left alone. On Postgres the cutoff is the database's clock (review MEDIUM-2:
+        ``created_at`` is the database's ``now()``); the legacy SQLite edition uses this one.
         """
-        from persona_api.services.erasure_start import begin_persona_erasure  # noqa: PLC0415
+        from persona_api.services.erasure_start import claim_abandoned_create  # noqa: PLC0415
 
-        cutoff = self._clock() - ABANDONED_CREATE_GRACE
+        cutoff: Any = (
+            func.now() - ABANDONED_CREATE_GRACE
+            if self._engine.dialect.name == "postgresql"
+            else self._clock() - ABANDONED_CREATE_GRACE
+        )
         try:
             with self._engine.connect() as conn:
                 abandoned = conn.execute(
@@ -410,11 +416,8 @@ class PersonaEraseSweep:
             return
         for persona_id, owner_id in abandoned:
             try:
-                begin_persona_erasure(
-                    rls_engine=self._engine,
-                    platform_engine=self._engine,
-                    owner_id=str(owner_id),
-                    persona_id=str(persona_id),
+                claim_abandoned_create(
+                    self._engine, owner_id=str(owner_id), persona_id=str(persona_id)
                 )
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
                 _log.error(

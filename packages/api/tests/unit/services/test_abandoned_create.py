@@ -139,3 +139,59 @@ def test_a_create_that_finished_is_complete_and_listed(seeded: Seeded, embedder:
 def test_the_seeded_personas_are_complete(seeded: Seeded) -> None:
     """Rows written without the column (the default) are complete, as every existing row is."""
     assert all(_rows(seeded).values())
+
+
+def test_a_create_that_finished_before_the_lock_is_kept(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review MEDIUM-2, the first race: the sweep read it as abandoned, the create finished,
+    then the sweep's claim took the row lock. The row is complete by then: kept, no claim."""
+    from persona_api.services.erasure_start import claim_abandoned_create  # noqa: PLC0415
+    from sqlalchemy import update  # noqa: PLC0415
+
+    pid = _crashed_create(seeded, embedder, monkeypatch)
+    with seeded.engine.begin() as conn:
+        conn.execute(update(personas_t).where(personas_t.c.id == pid).values(create_complete=True))
+
+    assert claim_abandoned_create(seeded.engine, owner_id=OWNER, persona_id=pid) is None
+
+    assert _rows(seeded)[pid] is True
+    assert ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid) is None
+
+
+def test_a_create_swept_before_it_finished_fails_and_is_undone(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review MEDIUM-2, the second race: the sweep claims and deletes the row while the
+    identity is still being indexed. The create's last UPDATE finds no incomplete row, so the
+    create fails and its undo runs: it never answers for a persona that is gone."""
+    from persona.registry import PersonaRegistry  # noqa: PLC0415
+    from persona_api.services.erasure_start import claim_abandoned_create  # noqa: PLC0415
+
+    real_load = PersonaRegistry.load_persona
+    swept: list[object] = []
+
+    def _swept_meanwhile(self: PersonaRegistry, persona: Any) -> None:  # noqa: ANN401
+        real_load(self, persona)
+        swept.append(
+            claim_abandoned_create(seeded.engine, owner_id=OWNER, persona_id=persona.persona_id)
+        )
+
+    monkeypatch.setattr(PersonaRegistry, "load_persona", _swept_meanwhile)
+    undone: list[str] = []
+
+    with pytest.raises(RuntimeError, match="swept before it finished"):
+        persona_service.create_persona(
+            rls_engine=seeded.engine,
+            embedder=embedder,  # type: ignore[arg-type]
+            audit_root=seeded.audit_root,
+            owner_id=OWNER,
+            yaml_str=_YAML,
+            memory_backend=seeded.memory,
+            audit_logger=seeded.audit,
+            compensate=undone.append,
+        )
+
+    assert len(swept) == 1
+    assert swept[0] is not None, "the sweep claimed it"
+    assert len(undone) == 1, "the create's undo ran"

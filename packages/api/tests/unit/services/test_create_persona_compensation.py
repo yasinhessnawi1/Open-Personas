@@ -7,6 +7,7 @@ caller's ``compensate`` runs with the new persona's id, and the original error i
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -34,8 +35,8 @@ class _Begin:
     def __exit__(self, *_exc: object) -> None:
         return None
 
-    def execute(self, *_a: Any) -> None:  # noqa: ANN401
-        return None
+    def execute(self, *_a: Any) -> Any:  # noqa: ANN401
+        return SimpleNamespace(rowcount=1)
 
 
 class _Engine:
@@ -116,6 +117,40 @@ def test_a_registry_that_cannot_be_built_is_undone_too(monkeypatch: pytest.Monke
     with pytest.raises(ConnectionError, match="unreachable"):
         persona_service.create_persona(
             rls_engine=_Engine(),  # type: ignore[arg-type]
+            embedder=object(),  # type: ignore[arg-type]
+            audit_root=None,  # type: ignore[arg-type]
+            owner_id="u1",
+            yaml_str=_YAML,
+            compensate=undone.append,
+        )
+
+    assert len(undone) == 1
+
+
+def test_a_final_update_that_fails_is_undone_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review M10: the identity is indexed, then marking the row complete fails."""
+
+    class _UpdateFails(_Begin):
+        def execute(self, stmt: Any, *_a: Any) -> Any:  # noqa: ANN401
+            if str(stmt).startswith("UPDATE"):
+                msg = "the connection dropped"
+                raise ConnectionError(msg)
+            return SimpleNamespace(rowcount=1)
+
+    class _Engine2:
+        def begin(self) -> _Begin:
+            return _UpdateFails()
+
+    class _Indexes:
+        def load_persona(self, persona: Any) -> None:  # noqa: ANN401, ARG002
+            return None
+
+    undone: list[str] = []
+    monkeypatch.setattr(persona_service, "_build_registry", lambda *_a: _Indexes())
+
+    with pytest.raises(ConnectionError, match="dropped"):
+        persona_service.create_persona(
+            rls_engine=_Engine2(),  # type: ignore[arg-type]
             embedder=object(),  # type: ignore[arg-type]
             audit_root=None,  # type: ignore[arg-type]
             owner_id="u1",

@@ -417,9 +417,17 @@ def create_persona(
         registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
         registry.load_persona(persona)
         with rls_engine.begin() as conn:
-            conn.execute(
-                update(personas_t).where(personas_t.c.id == persona_id).values(create_complete=True)
+            # Review MEDIUM-2: only an incomplete row turns complete. If the abandoned-create
+            # sweep took it first, this matches nothing, and the create fails (and is undone)
+            # rather than answering for a persona that is gone.
+            finished = conn.execute(
+                update(personas_t)
+                .where(personas_t.c.id == persona_id, personas_t.c.create_complete.is_(False))
+                .values(create_complete=True)
             )
+            if finished.rowcount != 1:
+                msg = "the persona's create was swept before it finished"
+                raise RuntimeError(msg)
     except Exception:
         _undo_create(compensate, persona_id)
         raise

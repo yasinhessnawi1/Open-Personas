@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING, Any
 
 from persona.errors import PersonaNotFoundError
 from persona.logging import get_logger
+from sqlalchemy import select
 
+from persona_api.db.models import personas as personas_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.persona_erase import (
     RESUME_GRACE,
@@ -45,6 +47,7 @@ from persona_api.services.erasure_service import (
     fence_persona,
 )
 from persona_api.services.legacy_audit_sweep import run_legacy_sweep_logged
+from persona_api.services.persona_service import delete_persona_row
 from persona_api.workspace_paths import is_persona_id
 
 if TYPE_CHECKING:
@@ -54,6 +57,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "begin_persona_erasure",
+    "claim_abandoned_create",
     "dispatch_persona_erasure",
     "erase_persona_now",
     "erase_deps_from_state",
@@ -147,6 +151,40 @@ def run_persona_erasure_inline(deps: PersonaEraseDeps, erasure: Erasure) -> None
             eid=erasure.id,
             err=type(exc).__name__,
         )
+
+
+def claim_abandoned_create(engine: Engine, *, owner_id: str, persona_id: str) -> Erasure | None:
+    """Claim the erasure of a create that never finished, or nothing (R9-293 review MEDIUM-2).
+
+    The persona's row is locked (FOR UPDATE) while it is still incomplete, and held through
+    the capture, the claim and the row's delete: a create finishing at that moment waits on
+    the lock, then finds no incomplete row, fails and is undone. A row that turned complete
+    before the lock is kept, and nothing is claimed (``None``). The resume runs the rest of
+    the erasure, the fence included.
+    """
+    ledger = ErasureLedger(engine)
+    with engine.begin() as conn:
+        held = conn.execute(
+            select(personas_t.c.id)
+            .where(
+                personas_t.c.id == persona_id,
+                personas_t.c.owner_id == owner_id,
+                personas_t.c.create_complete.is_(False),
+            )
+            .with_for_update()
+        ).first()
+        if held is None:
+            return None
+        captured = capture_persona(conn, owner_id=owner_id, persona_id=persona_id)
+        erasure = ledger.claim(
+            owner_id=owner_id,
+            subject_kind=SubjectKind.PERSONA,
+            subject_id=persona_id,
+            captured=captured,
+        )
+        delete_persona_row(conn, owner_id=owner_id, persona_id=persona_id)
+    ledger.record_step(erasure.id, "row", {"personas": 1})
+    return erasure
 
 
 def erase_persona_now(
