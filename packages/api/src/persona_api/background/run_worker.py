@@ -479,26 +479,32 @@ class RunRegistry:
                 or str(exc),
             )
         finally:
-            # R9-299: a compaction the run never got past is still owed. First, while the
-            # owner's scope is still bound; billing here must never break the teardown.
-            if billing_watcher is not None:
-                try:
-                    await billing_watcher.flush()
-                except Exception as exc:  # noqa: BLE001 - teardown must never crash
-                    _log.warning(
-                        "agentic run could not charge its held compaction rid={rid}: {err}",
-                        rid=handle.run_id,
-                        err=str(exc),
-                    )
-            if interaction_token is not None:
-                reset_interaction(interaction_token)
-            reset_sandbox_request_context(sandbox_token)
-            # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
-            # (clean / cancel / error / shutdown). Best-effort — teardown must never
-            # crash (the TTL staleness sweep in ``admit_long_op`` is the crash backstop).
-            self._release_op_slot(handle)
-            current_user_id.reset(token)
-            await handle.events.put(None)  # end-of-stream sentinel for SSE
+            try:
+                # R9-299: a compaction the run never got past is still owed. First, while
+                # the owner's scope is still bound; billing here must never break the
+                # teardown. Its own ``finally`` holds the teardown, because the capture
+                # is an ``await``: a second cancellation landing there is not an
+                # ``Exception`` and would otherwise skip every line below.
+                if billing_watcher is not None:
+                    try:
+                        await billing_watcher.flush()
+                    except Exception as exc:  # noqa: BLE001 - teardown must never crash
+                        _log.warning(
+                            "agentic run could not charge its held compaction rid={rid}: {err}",
+                            rid=handle.run_id,
+                            err=str(exc),
+                        )
+            finally:
+                if interaction_token is not None:
+                    reset_interaction(interaction_token)
+                reset_sandbox_request_context(sandbox_token)
+                # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
+                # (clean / cancel / error / shutdown). Best-effort: teardown must never
+                # crash (the TTL staleness sweep in ``admit_long_op`` is the crash
+                # backstop).
+                self._release_op_slot(handle)
+                current_user_id.reset(token)
+                await handle.events.put(None)  # end-of-stream sentinel for SSE
 
     def _release_op_slot(self, handle: RunHandle) -> None:
         if handle.op_token is None:

@@ -303,6 +303,48 @@ class TestOffCriticalPathCompaction:
         scheduled[1].close()
 
     @pytest.mark.asyncio
+    async def test_a_compaction_cancelled_before_it_starts_frees_the_slot(self) -> None:
+        """A task cancelled before its first step never runs the coroutine's own
+        cleanup, so the slot is freed from the task's done callback. Without that,
+        compaction would stop for the rest of the call."""
+        import asyncio  # noqa: PLC0415
+
+        ctx, _ = _context(messages=_long_history())
+        tasks: list[asyncio.Task[Any]] = []
+
+        def cancel_at_once(coro: Any) -> asyncio.Task[Any]:
+            task = asyncio.get_running_loop().create_task(coro)
+            task.cancel()  # before it has run a single step
+            tasks.append(task)
+            return task
+
+        recorder = _compacting_recorder(ctx, scheduler=cancel_at_once)
+        await _commit(recorder, "one")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await _commit(recorder, "two")
+
+        assert len(tasks) == 2  # the slot came back, so the next turn scheduled again
+        tasks[1].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_a_scheduler_that_raises_frees_the_slot_and_never_raises(self) -> None:
+        ctx, _ = _context(messages=_long_history())
+        attempts: list[Any] = []
+
+        def broken(coro: Any) -> None:
+            attempts.append(coro)
+            coro.close()
+            if len(attempts) == 1:
+                raise RuntimeError("no event loop to schedule on")
+
+        recorder = _compacting_recorder(ctx, scheduler=broken)
+        await _commit(recorder, "one")  # must not raise: the commit path never does
+        await _commit(recorder, "two")
+
+        assert len(attempts) == 2  # the failed schedule did not keep the slot
+
+    @pytest.mark.asyncio
     async def test_no_compaction_scheduled_for_short_conversation(self) -> None:
         ctx, _ = _context()
         scheduled: list[Any] = []
@@ -389,3 +431,28 @@ class TestPerTurnBilling:
             BargedReply(heard_text="hello", truncated=False, token_count=1)
         )
         assert len(ctx.conversation.messages) == 2  # commit happened, no billing wired
+
+
+def _long_history() -> list[ConversationMessage]:
+    """16 prior messages: compaction is due once the next turn lands."""
+    return [
+        ConversationMessage(role="user", content=f"t{i}", created_at=datetime.now(UTC))
+        for i in range(16)
+    ]
+
+
+def _compacting_recorder(ctx: VoiceTurnContext, *, scheduler: Any) -> VoiceTurnRecorder:
+    async def summariser(messages: list[ConversationMessage]) -> str:
+        return "summary"
+
+    return VoiceTurnRecorder(
+        ctx,
+        compactor=VoiceHistoryCompactor(ctx.history_manager),
+        summariser=summariser,
+        scheduler=scheduler,
+    )
+
+
+async def _commit(recorder: VoiceTurnRecorder, text: str) -> None:
+    recorder.note_user_message(text)
+    await recorder.on_reply_committed(BargedReply(heard_text="ok", truncated=False, token_count=1))

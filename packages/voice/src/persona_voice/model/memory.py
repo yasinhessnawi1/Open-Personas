@@ -298,8 +298,25 @@ class VoiceTurnRecorder:
         if not self._compactor.is_compaction_due(self._ctx.conversation):
             return
         self._compacting = True
-        task = self._schedule(self._run_compaction(self._compactor, self._summariser))
+        try:
+            task = self._schedule(self._run_compaction(self._compactor, self._summariser))
+        except Exception as exc:  # noqa: BLE001 - the commit path must never raise
+            # Nothing was scheduled, so nothing will free the slot but this.
+            self._compacting = False
+            _LOG.warning(
+                "voice compaction could not be scheduled (persona_id={pid}): {err}",
+                pid=self._ctx.persona_id,
+                err=repr(exc)[:200],
+            )
+            return
         # Keep a reference until done so the task is not garbage-collected.
         if isinstance(task, asyncio.Task):
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
+            # A task cancelled before its first step never runs the coroutine's own
+            # ``finally``, so the slot is also freed when the task is done, however it
+            # ended. Freeing it twice is harmless.
+            task.add_done_callback(self._free_compaction_slot)
+
+    def _free_compaction_slot(self, _task: object) -> None:
+        self._compacting = False

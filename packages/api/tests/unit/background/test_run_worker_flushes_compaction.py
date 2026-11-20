@@ -13,6 +13,8 @@ loop double that reports usage the way the real loop does.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,6 +26,7 @@ from persona_api.db.community import (
 )
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
+from persona_api.sandbox import get_sandbox_request_context
 from persona_runtime.agentic.run import Run, StepUsage
 from sqlalchemy import insert
 
@@ -113,3 +116,39 @@ async def test_a_run_that_ends_after_a_compaction_still_pays_for_it(engine: Engi
     assert held["cost_cents"] == pytest.approx(0.75)
     assert held["amount"] == 1
     assert held["user_id"] == _OWNER
+
+
+class _CancelledOnTheFlush(_Policy):
+    """The step captures; the teardown flush is cancelled mid-capture."""
+
+    def capture_up_to(self, **kw: object) -> tuple[int, int]:
+        if self.calls:
+            raise asyncio.CancelledError
+        return super().capture_up_to(**kw)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_flush_still_runs_the_whole_teardown(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second cancellation during the flush's capture is a ``BaseException``: the flush
+    must not be what skips the slot release, the context resets and the end-of-stream
+    sentinel the SSE reader waits on."""
+    registry = RunRegistry(engine, credits_policy=_CancelledOnTheFlush())  # type: ignore[arg-type]
+    released: list[str] = []
+    monkeypatch.setattr(registry, "_release_op_slot", lambda h: released.append(h.run_id))
+
+    handle = registry.start(
+        run_id=_RUN_ID,
+        owner_id=_OWNER,
+        loop=_CompactsThenBreaks(),  # type: ignore[arg-type]
+        task_text="t",
+    )
+    assert handle.task is not None
+    with contextlib.suppress(asyncio.CancelledError):
+        await handle.task
+
+    assert released == [_RUN_ID]
+    assert get_sandbox_request_context() is None
+    events = [handle.events.get_nowait() for _ in range(handle.events.qsize())]
+    assert events[-1] is None  # the sentinel was sent
