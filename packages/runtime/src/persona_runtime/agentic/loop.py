@@ -547,8 +547,16 @@ class AgenticLoop:
                     await self._emit(on_event, RunEvent.reasoning(step_num, response.content))
 
                 step_message_counts.append(max(0, len(context) - context_before_step))
-                compacted = await self._maybe_compact(
-                    context, backend, step=step_num, on_step_usage=on_step_usage
+                # R9-299: once the token is set the run is ending, and the next boundary
+                # salvages it. A compaction started now would only feed that salvage, a
+                # paid call for nothing, so it is not started.
+                cancelling = cancel_token is not None and cancel_token.is_cancelled
+                compacted = (
+                    context
+                    if cancelling
+                    else await self._maybe_compact(
+                        context, backend, step=step_num, on_step_usage=on_step_usage
+                    )
                 )
                 if compacted is not context:
                     # The compactor rewrote history into a summary, so the counts no longer
@@ -985,13 +993,7 @@ class AgenticLoop:
                 "cancellation summary failed; ending without one ({error})", error=str(exc)
             )
             return None
-        try:
-            await _report(on_step_usage, _usage_of(step, backend, response, call="summary"))
-        except Exception as exc:  # noqa: BLE001 - the salvage outlives its meter
-            _logger.warning(
-                "cancellation summary could not be metered; keeping it ({error})",
-                error=str(exc),
-            )
+        await self._report_summary(step, backend, response, on_step_usage)
         return response.content.strip()
 
     async def _best_effort_summary(
@@ -1003,13 +1005,30 @@ class AgenticLoop:
     ) -> str:
         """Best-effort summary at max-steps, generated on the frontier tier (§4.1).
 
-        R9-299: reported to the run's meter as a ``summary`` usage. A meter that raises
-        fails the run here exactly as it does on a step, since this summary is the
-        run's deliverable and is billed like one.
+        R9-299: reported to the run's meter as a ``summary`` usage. The model call itself
+        is unguarded (a failure surfaces, as before), but a meter that raises is logged
+        and the summary is kept, as on the cancellation path: it is the run's
+        deliverable and the model has already been paid for it.
         """
         backend, response = await self._best_effort_summary_call(context)
-        await _report(on_step_usage, _usage_of(step, backend, response, call="summary"))
+        await self._report_summary(step, backend, response, on_step_usage)
         return response.content.strip()
+
+    @staticmethod
+    async def _report_summary(
+        step: int,
+        backend: ChatBackend,
+        response: ChatResponse,
+        on_step_usage: Callable[[StepUsage], Awaitable[None]] | None,
+    ) -> None:
+        """Meter a best-effort summary; a meter that raises never costs the summary."""
+        try:
+            await _report(on_step_usage, _usage_of(step, backend, response, call="summary"))
+        except Exception as exc:  # noqa: BLE001 - the summary outlives its meter
+            _logger.warning(
+                "best-effort summary could not be metered; keeping it ({error})",
+                error=str(exc),
+            )
 
     async def _best_effort_summary_call(
         self, context: list[ConversationMessage]

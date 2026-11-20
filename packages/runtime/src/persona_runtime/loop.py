@@ -947,6 +947,15 @@ class ConversationLoop:
         # R9-299: the compaction summary is a paid model call, so its usage is kept and
         # priced with the turn's own rounds at write-back (one charge, one TurnLog row).
         history, compacted, compaction_rounds = await self._manage_history(conversation)
+        if compaction_rounds:
+            # A gate below can end the turn before any answer round, with no TurnLog.
+            # The summary is already paid for, so the turn carries its cost from here:
+            # the chat worker charges ``last_turn_cost_cents`` proportionally, where a
+            # turn with no recorded cost gets the flat floor. A turn that reaches
+            # write-back replaces this with the full figure, compaction included.
+            self._last_turn_cost_cents, self._last_turn_cost_basis = price_rounds(
+                compaction_rounds, source=self._cost_source, surface="chat"
+            )
 
         # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so. Runs first — "cancel that" /
         # "pause it" is about an existing task, not a new one. Pause/resume apply immediately; a

@@ -132,6 +132,13 @@ class _RunBillingWatcher:
     loop stops at the NEXT step boundary — the in-flight step finishes cleanly, and a
     runaway loop cannot consume unbounded uncharged cost. The DB write is offloaded
     off the event loop so the per-step billing never stalls other background tasks.
+
+    R9-299: the loop also reports its two summary calls. The best-effort ``summary`` is
+    the run's deliverable and is charged like a step. A ``compaction`` is not a step,
+    and the floor is the per-step infra charge (D-M3-4 amendment), so it pays no floor
+    of its own: it is held and priced with the NEXT usage, in one ``price_rounds`` call
+    with one ceil and one floor. :meth:`flush` charges whatever is still held when the
+    run ends, so a run that stops straight after a compaction still pays for it once.
     """
 
     def __init__(
@@ -157,21 +164,44 @@ class _RunBillingWatcher:
         # CROSSES below $2. None → community/flag-off (no auto-top-up).
         self._gateway = gateway
         self._topup_tasks: set[asyncio.Task[None]] = set()
+        #: Compactions reported since the last charge, waiting for the next usage to
+        #: share its floor (R9-299). Replaced, never mutated in place.
+        self._held: tuple[PricedRound, ...] = ()
 
     async def on_step_usage(self, usage: StepUsage) -> None:
-        # Priced as one round (exactly compute_turn_cost for one round), so the step's
-        # failed tries that cost tokens are charged at their own model (D-ORCH-11-18-s).
+        # Each round is priced at its own served model, so the step's failed tries that
+        # cost tokens are charged at their own model too (D-ORCH-11-18-s).
+        priced = PricedRound(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cost_usd=usage.cost_usd,
+            provider=usage.provider,
+            model=usage.model,
+            failed_tries=usage.failed_tries,
+        )
+        if usage.call == "compaction":
+            self._held = (*self._held, priced)
+            return
+        rounds = (*self._held, priced)
+        self._held = ()
+        await self._charge(rounds)
+
+    async def flush(self) -> None:
+        """Charge the compactions still held when the run ends (R9-299).
+
+        Called from the worker's terminal ``finally``. Nothing held charges nothing, so
+        a second call is a no-op.
+        """
+        if not self._held:
+            return
+        rounds = self._held
+        self._held = ()
+        await self._charge(rounds)
+
+    async def _charge(self, rounds: tuple[PricedRound, ...]) -> None:
+        """Price ``rounds`` together and capture them: one ceil, one floor."""
         cost_cents, basis = price_rounds(
-            [
-                PricedRound(
-                    prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens,
-                    cost_usd=usage.cost_usd,
-                    provider=usage.provider,
-                    model=usage.model,
-                    failed_tries=usage.failed_tries,
-                )
-            ],
+            rounds,
             source=self._cost_source,
             surface="agentic_run",
         )
@@ -449,6 +479,17 @@ class RunRegistry:
                 or str(exc),
             )
         finally:
+            # R9-299: a compaction the run never got past is still owed. First, while the
+            # owner's scope is still bound; billing here must never break the teardown.
+            if billing_watcher is not None:
+                try:
+                    await billing_watcher.flush()
+                except Exception as exc:  # noqa: BLE001 - teardown must never crash
+                    _log.warning(
+                        "agentic run could not charge its held compaction rid={rid}: {err}",
+                        rid=handle.run_id,
+                        err=str(exc),
+                    )
             if interaction_token is not None:
                 reset_interaction(interaction_token)
             reset_sandbox_request_context(sandbox_token)

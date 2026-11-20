@@ -137,3 +137,69 @@ async def test_a_run_without_a_meter_still_summarises() -> None:
 
     assert run.status is RunStatus.MAX_STEPS_REACHED
     assert run.output == "what was done and what remains"
+
+
+async def test_a_cancelled_run_does_not_start_a_compaction() -> None:
+    """Once the cancel token is set the run is ending: the next boundary salvages it.
+    A compaction started now would only feed that salvage, so it is not started."""
+    summary = _summary_response(prompt=900, completion=150, model="claude-sonnet-4-6")
+    script = [_resp("thinking A"), _resp("thinking B"), _resp("thinking C"), summary]
+    loop, _stores, backend = _make_loop(script)
+    backend.max_tokens = 30  # step 2 would compact
+    small = ScriptedBackend([], provider_name="openai", model_name="small-summariser")
+    loop._tiers._cache["small"] = small
+    token = CancelToken()
+    seen: list[str] = []
+
+    async def meter(usage: StepUsage) -> None:
+        seen.append(usage.call)
+        if len(seen) == 3:  # the wallet runs out on step 2
+            token.cancel()
+
+    run = await loop.run("do it", on_step_usage=meter, cancel_token=token)
+
+    assert run.status is RunStatus.CANCELLED
+    assert small.chat_calls == 0
+    assert seen == ["step", "step", "step", "summary"]
+
+
+async def test_a_billing_failure_on_the_step_cap_summary_keeps_the_summary() -> None:
+    """The step-cap summary is the run's deliverable and has been paid for: a meter that
+    raises on it is logged, and the run still ends with its summary."""
+    summary = _summary_response(prompt=700, completion=120, model="claude-sonnet-4-6")
+    loop, _stores, _backend = _make_loop([_resp("thinking A"), summary], max_steps=1)
+
+    async def meter(usage: StepUsage) -> None:
+        if usage.call == "summary":
+            raise RuntimeError("ledger unavailable")
+
+    run = await loop.run("do it", on_step_usage=meter)
+
+    assert run.status is RunStatus.MAX_STEPS_REACHED
+    assert run.output == "what was done and what remains"
+
+
+async def test_a_compaction_a_fallback_served_is_reported_at_the_fallback() -> None:
+    """The compaction is priced at the model that SERVED it, with the primary's wasted
+    try riding along for the pricer to charge (R9-296, D-ORCH-11-18-s)."""
+    from persona.backends.multi_model import MultiModelChatBackend
+    from test_loop_step_usage_cutoff import _DownPrimary  # type: ignore[import-not-found]
+
+    script = [_resp("thinking A"), _resp("thinking B"), _resp("thinking C"), _resp("[FINAL] ok")]
+    loop, _stores, backend = _make_loop(script)
+    backend.max_tokens = 30
+    fallback = ScriptedBackend([], provider_name="openai", model_name="gpt-4o")
+    loop._tiers._cache["small"] = MultiModelChatBackend(
+        [_DownPrimary(), fallback],  # type: ignore[list-item]
+        max_retries_per_backend=0,
+    )
+    recorder = _Recorder()
+
+    await loop.run("do it", on_step_usage=recorder.on_step_usage)
+
+    (compaction,) = [u for u in recorder.usages if u.call == "compaction"]
+    assert (compaction.provider, compaction.model) == ("openai", "gpt-4o")
+    (wasted,) = compaction.failed_tries
+    assert wasted.model == "claude-sonnet-4-6"
+    assert wasted.usage is not None
+    assert wasted.usage.prompt_tokens == 800

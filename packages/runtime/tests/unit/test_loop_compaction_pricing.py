@@ -81,7 +81,7 @@ class _Summariser:
         yield  # pragma: no cover
 
 
-def _loop(answer: _Member, summariser: _Summariser) -> ConversationLoop:
+def _loop(answer: _Member, summariser: _Summariser, **extra: Any) -> ConversationLoop:
     chain = MultiModelChatBackend([answer])
     registry = TierRegistry(
         {t: TierConfig(name=t, backend_config=_CFG) for t in ("frontier", "mid", "small")}
@@ -104,6 +104,7 @@ def _loop(answer: _Member, summariser: _Summariser) -> ConversationLoop:
         tier_registry=registry,
         turn_log_writer=MemoryTurnLogWriter(),
         cost_source=_RateTable(),
+        **extra,
     )
 
 
@@ -164,3 +165,29 @@ async def test_a_turn_that_does_not_compact_is_priced_as_before() -> None:
     assert log.history_compacted is False
     assert loop.last_turn_cost_cents == pytest.approx(20.0)
     assert (log.prompt_tokens, log.completion_tokens) == (_PROMPT, _COMPLETION)
+
+
+async def test_a_turn_that_ends_at_a_gate_after_compacting_carries_the_compaction() -> None:
+    """A gate (here: confirming a pending initiative proposal) ends the turn before any
+    answer round, with no TurnLog. The compaction already ran, so ``last_turn_cost_cents``
+    carries its cost: the chat worker then charges it proportionally instead of the
+    flat floor it charges a turn with no recorded cost."""
+    summariser = _Summariser()
+    answer = _Member("dear", [])  # never reached: the gate answers
+    loop = _loop(answer, summariser, initiative_pending_provider=lambda: "notice-1")
+
+    chunks = [chunk async for chunk in loop.turn(_conversation(12), "yes")]
+
+    assert chunks[-1].is_final
+    assert summariser.calls == 1
+    assert loop.last_turn_cost_cents == pytest.approx(2.0)  # the summary at vendor/cheap
+    assert loop.last_turn_cost_basis == "estimate_static"
+
+
+async def test_a_turn_that_ends_at_a_gate_without_compacting_records_no_cost() -> None:
+    """Unchanged: no compaction, no model call, no recorded cost (the flat floor)."""
+    loop = _loop(_Member("dear", []), _Summariser(), initiative_pending_provider=lambda: "n1")
+
+    _ = [chunk async for chunk in loop.turn(_conversation(4), "yes")]
+
+    assert loop.last_turn_cost_cents is None

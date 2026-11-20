@@ -109,6 +109,9 @@ class VoiceTurnRecorder:
         # Hold references to background compaction tasks so they are not GC'd
         # mid-flight (the standard asyncio fire-and-forget guard).
         self._bg_tasks: set[Any] = set()
+        # R9-299: whether a compaction is running. Two over the same range would each be
+        # a paid model call summarising the same turns, so only one runs at a time.
+        self._compacting = False
 
     def set_billing_meter(self, meter: VoiceTurnBillingMeter) -> None:
         """Late-bind the per-turn billing meter (Spec M3, T6b-1).
@@ -275,13 +278,27 @@ class VoiceTurnRecorder:
             written_by=_WRITTEN_BY,
         )
 
+    async def _run_compaction(
+        self,
+        compactor: VoiceHistoryCompactor,
+        summariser: Callable[[list[ConversationMessage]], Awaitable[str]],
+    ) -> None:
+        """Run one compaction, then free the slot whatever happened (R9-299)."""
+        try:
+            await compactor.compact(self._ctx.conversation, summariser)
+        finally:
+            self._compacting = False
+
     def _maybe_schedule_compaction(self) -> None:
         """Schedule off-critical-path compaction if due (D-V5-3)."""
         if self._compactor is None or self._summariser is None:
             return
+        if self._compacting:
+            return  # one is in flight; the next turn schedules again if still due
         if not self._compactor.is_compaction_due(self._ctx.conversation):
             return
-        task = self._schedule(self._compactor.compact(self._ctx.conversation, self._summariser))
+        self._compacting = True
+        task = self._schedule(self._run_compaction(self._compactor, self._summariser))
         # Keep a reference until done so the task is not garbage-collected.
         if isinstance(task, asyncio.Task):
             self._bg_tasks.add(task)

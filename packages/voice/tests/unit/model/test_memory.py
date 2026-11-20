@@ -262,6 +262,47 @@ class TestOffCriticalPathCompaction:
         scheduled[0].close()  # clean up the un-run coroutine
 
     @pytest.mark.asyncio
+    async def test_a_second_compaction_waits_for_the_first(self) -> None:
+        """R9-299: two compactions over the same range must not run at once. Each is a
+        paid model call, and the second would summarise what the first is summarising.
+        While one is in flight no other is scheduled; once it finishes the next can be."""
+        prior = [
+            ConversationMessage(role="user", content=f"t{i}", created_at=datetime.now(UTC))
+            for i in range(16)
+        ]
+        ctx, _ = _context(messages=prior)
+        scheduled: list[Any] = []
+        calls = 0
+
+        async def summariser(messages: list[ConversationMessage]) -> str:
+            nonlocal calls
+            calls += 1
+            return "summary"
+
+        recorder = VoiceTurnRecorder(
+            ctx,
+            compactor=VoiceHistoryCompactor(ctx.history_manager),
+            summariser=summariser,
+            scheduler=scheduled.append,
+        )
+        for text in ("one", "two"):
+            recorder.note_user_message(text)
+            await recorder.on_reply_committed(
+                BargedReply(heard_text="ok", truncated=False, token_count=1)
+            )
+        assert len(scheduled) == 1  # the second turn found one in flight
+
+        await scheduled[0]  # the first compaction finishes
+        recorder.note_user_message("three")
+        await recorder.on_reply_committed(
+            BargedReply(heard_text="ok", truncated=False, token_count=1)
+        )
+
+        assert calls == 1
+        assert len(scheduled) == 2  # free again, so the next one is scheduled
+        scheduled[1].close()
+
+    @pytest.mark.asyncio
     async def test_no_compaction_scheduled_for_short_conversation(self) -> None:
         ctx, _ = _context()
         scheduled: list[Any] = []
