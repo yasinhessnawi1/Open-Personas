@@ -58,7 +58,7 @@ __all__ = [
 #: The lifespan teardown's one budget.
 DEFAULT_SHUTDOWN_BUDGET_S = 20.0
 #: How long the worker lets in-flight jobs finish before cancelling them (lease reclaim).
-DEFAULT_WORKER_DRAIN_SECONDS = 15.0
+DEFAULT_WORKER_DRAIN_SECONDS = 12.0
 #: How long shutdown waits for cancelled chat turns before giving up on them.
 DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S = 10.0
 #: How long shutdown waits for cancelled agentic runs before giving up on them.
@@ -218,10 +218,11 @@ class APIConfig(BaseSettings):
     # Spec A0 worker runtime knobs (all config-driven — D-A0-3 concurrency, D-A0-5
     # drain). Poll uses a jittered interval so N workers don't thunder the claim
     # query in lockstep. ``worker_drain_seconds`` must fit inside the shutdown budget
-    # (R9-313: 15 s of the 20 s, inside the container's 30 s stop grace; it was 270, sized
-    # for a 300 s Fly kill_timeout that no deploy has had since, so SIGKILL always cut it
-    # short). A job the drain cancels is requeued when its lease lapses. The claim lease is
-    # a bootstrap; per-job-type heartbeat (D-A0-1) extends it during execution.
+    # (R9-313: 12 s, inside the closers' share of the 20 s budget, itself inside the
+    # container's 30 s stop grace). It was 270, sized for a 300 s Fly kill_timeout that no
+    # deploy has had since, so SIGKILL always cut it short. A job the drain cancels is
+    # requeued when its lease lapses. The claim lease is a bootstrap; per-job-type heartbeat
+    # (D-A0-1) extends it during execution.
     worker_concurrency: int = Field(default=4, ge=1, validation_alias="WORKER_CONCURRENCY")
     worker_poll_interval_seconds: float = Field(
         default=1.0, gt=0, validation_alias="WORKER_POLL_INTERVAL_SECONDS"

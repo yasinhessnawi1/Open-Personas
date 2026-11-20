@@ -2,9 +2,18 @@
 
 Docker gives the api 30 s from SIGINT to SIGKILL (deploy/server/docker-compose.yml). Uvicorn
 spends up to ``--timeout-graceful-shutdown`` (5 s) on open requests, then the lifespan tears
-down under one :class:`ShutdownDeadline` (``PERSONA_API_SHUTDOWN_BUDGET_SECONDS``, 20 s). The
-worker drain, the connector transports and the in-flight runs and chat turns share that budget,
-concurrently; whatever is still running at the deadline is given up on and logged.
+down under one :class:`ShutdownDeadline` (``PERSONA_API_SHUTDOWN_BUDGET_SECONDS``, 20 s),
+spent in three phases so no one hung step can take it all:
+
+1. the small steps first (background task cancels, the telemetry flush), together capped at
+   :data:`PRE_CLOSE_CAP_S`;
+2. the slow closers together (the worker drain, the connector transports, the in-flight runs
+   and chat turns), with :data:`FINAL_RESERVE_S` held back;
+3. the reserve: the sandbox pool first (an E2B sandbox not destroyed keeps billing until E2B's
+   own timeout), then the MCP runtime and the runtime factory.
+
+Whatever is still running when its phase ends is given up on and logged. With the defaults the
+closers get at least 20 - 3 - 3 = 14 s, more than the worker's 12 s drain.
 
 Two rules every wait here keeps:
 
@@ -16,8 +25,10 @@ Two rules every wait here keeps:
   ``running`` is reconciled by the restart sweep on the next boot.
 
 What this cannot bound: a thread already inside a database call. ``asyncio.run`` joins the
-default executor's threads on exit, so a thread stuck there holds the process until its
-statement or TCP bound ends it (minutes) or SIGKILL at the grace does, whichever is first.
+default executor's threads on exit, and also waits for every task still pending (a turn that
+waits on such a thread without forwarding its cancel is one), so a thread stuck there holds the
+process until its statement or TCP bound ends it (minutes) or SIGKILL at the grace does,
+whichever is first.
 SIGKILL is the backstop. The kernel then closes the socket, and Postgres rolls back the
 transaction the thread had open, so no write is left half done.
 """
@@ -33,7 +44,12 @@ from persona.logging import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-__all__ = ["ShutdownDeadline", "cancel_and_wait"]
+__all__ = ["FINAL_RESERVE_S", "PRE_CLOSE_CAP_S", "ShutdownDeadline", "cancel_and_wait"]
+
+#: The most the steps before the slow closers may spend, all together.
+PRE_CLOSE_CAP_S = 3.0
+#: Held back from the slow closers for the sandbox pool, the MCP runtime and the runtime factory.
+FINAL_RESERVE_S = 3.0
 
 _log = get_logger("api.shutdown")
 
@@ -91,16 +107,27 @@ class ShutdownDeadline:
         """Seconds left in the budget, never negative."""
         return max(0.0, self._ends_at - self._clock())
 
-    async def run(self, steps: Mapping[str, Awaitable[object]]) -> list[str]:
+    def capped(self, cap_s: float) -> ShutdownDeadline:
+        """A phase of this budget that ends after ``cap_s`` seconds, or with it if sooner."""
+        phase = ShutdownDeadline(max(cap_s, 1e-9), clock=self._clock)
+        phase._ends_at = min(phase._ends_at, self._ends_at)  # noqa: SLF001 - same class
+        return phase
+
+    async def run(
+        self, steps: Mapping[str, Awaitable[object]], *, reserve_s: float = 0.0
+    ) -> list[str]:
         """Run the named steps together; give up on any still running when the budget ends.
 
-        A step given up on is cancelled and not waited for. Returns their names. A step that
-        fails is logged and does not stop the others.
+        ``reserve_s`` is held back: the steps get the remaining budget less it, so the steps
+        that run after them are left at least that long. A step given up on is cancelled and
+        not waited for. Returns their names. A step that fails is logged and does not stop the
+        others.
         """
         if not steps:
             return []
         tasks = {asyncio.ensure_future(step): name for name, step in steps.items()}
-        done, pending = await asyncio.wait(tasks, timeout=self.remaining())
+        timeout = max(0.0, self.remaining() - reserve_s)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
         _log_errors(done, tasks, what="shutdown step")
         abandoned = [tasks[task] for task in pending]
         for task in pending:

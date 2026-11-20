@@ -161,3 +161,61 @@ async def test_the_deadline_cancels_background_tasks_within_its_budget() -> None
 def test_a_deadline_needs_a_positive_budget() -> None:
     with pytest.raises(ValueError, match="budget"):
         ShutdownDeadline(0)
+
+
+def test_a_capped_phase_ends_at_its_cap_or_with_the_budget() -> None:
+    """Round 3 N3: the small steps before the closers cannot spend the whole budget."""
+    now = [0.0]
+    deadline = ShutdownDeadline(20, clock=lambda: now[0])
+
+    assert deadline.capped(3).remaining() == 3
+    now[0] = 18.5
+    assert deadline.capped(3).remaining() == 1.5, "never past the whole budget"
+
+
+@pytest.mark.asyncio
+async def test_a_hung_step_in_a_capped_phase_leaves_the_rest_of_the_budget() -> None:
+    release = asyncio.Event()
+    deadline = ShutdownDeadline(5)
+    try:
+        abandoned = await asyncio.wait_for(
+            deadline.capped(0.1).run({"telemetry flush": _ignores_cancel(release)}), timeout=5
+        )
+    finally:
+        release.set()
+
+    assert abandoned == ["telemetry flush"]
+    assert deadline.remaining() > 4
+
+
+@pytest.mark.asyncio
+async def test_the_reserve_is_held_back_for_the_steps_after() -> None:
+    """Round 3 N3: a stuck closer group leaves the sandbox and MCP closes their reserve."""
+    release = asyncio.Event()
+    deadline = ShutdownDeadline(0.6)
+    try:
+        abandoned = await asyncio.wait_for(
+            deadline.run({"chat turns": _ignores_cancel(release)}, reserve_s=0.4), timeout=5
+        )
+    finally:
+        release.set()
+
+    assert abandoned == ["chat turns"]
+    assert deadline.remaining() > 0.3
+    assert await deadline.run({"sandbox pool": asyncio.sleep(0.05)}) == []
+
+
+def test_the_default_phases_leave_the_closers_more_than_the_drain() -> None:
+    """With the defaults the slow closers get at least budget - cap - reserve."""
+    from persona_api.background import shutdown  # noqa: PLC0415
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_SHUTDOWN_BUDGET_S,
+        DEFAULT_WORKER_DRAIN_SECONDS,
+    )
+
+    window = DEFAULT_SHUTDOWN_BUDGET_S - shutdown.PRE_CLOSE_CAP_S - shutdown.FINAL_RESERVE_S
+    assert window > DEFAULT_WORKER_DRAIN_SECONDS
+    assert window > DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
+    assert window > DEFAULT_RUN_SHUTDOWN_TIMEOUT_S

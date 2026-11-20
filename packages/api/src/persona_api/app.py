@@ -37,6 +37,7 @@ from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 
+from persona_api.background import shutdown as _shutdown
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.background.run_worker import RunRegistry
 from persona_api.background.shutdown import ShutdownDeadline
@@ -1160,6 +1161,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # (a job's lease lapses and it is requeued, a turn or run is reconciled at next boot).
         # persona_api.background.shutdown has the reasoning, and the one thing it cannot bound.
         deadline = ShutdownDeadline(config.shutdown_budget_seconds)
+        # Phase 1 (R9-313 round 3): the small steps, together capped so a hung one (a
+        # telemetry flush on a dead pool) cannot spend the budget the closers need.
+        before = deadline.capped(_shutdown.PRE_CLOSE_CAP_S)
         # R9-027: stop AWAITING the crisis-encoder warm-up first. Cancelling the
         # task ends the awaiting side promptly; the load itself (if still running)
         # continues on its daemon thread and is deliberately NEVER joined (neither
@@ -1168,7 +1172,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Spec M2 (D-M2-6): the catalog-freshness poller, before the engines/factory close.
         # Spec V14 (T5a): the one-shot voice remap pass, before the engines it uses close.
         # R9-165: the skill summary warm-up, before the registry it may still call closes.
-        await deadline.cancel(
+        await before.cancel(
             {
                 "crisis encoder warm-up": getattr(app.state, "crisis_encoder_warmup", None),
                 "catalog refresh": catalog_refresh_task,
@@ -1179,10 +1183,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Flush + stop telemetry FIRST so a final drain lands before engines close
         # (R5-D-3; best-effort: it never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:
-            await deadline.run({"telemetry flush": app.state.telemetry_buffer.aclose()})
+            await before.run({"telemetry flush": app.state.telemetry_buffer.aclose()})
         # R9-284: the periodic erasure sweep of a worker-less process (a finished task where a
         # worker sweeps instead), and the account erasures.
-        await deadline.cancel(
+        await before.cancel(
             {
                 "erasure resume": getattr(app.state, "erasure_resume_task", None),
                 "account erasure": getattr(app.state, "account_erasure_task", None),
@@ -1191,8 +1195,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         account_erase_runner = getattr(app.state, "account_erase_runner", None)
         if account_erase_runner is not None:
             account_erase_runner.close()  # an erasure cut short resumes at the next start
-        # R9-313: the four slow closers run together, so the worker's drain (15 s on the
-        # server) no longer delays the cancel of the runs and chat turns behind it.
+        # Phase 2 (R9-313): the four slow closers run together, so the worker's drain (12 s
+        # on the server) no longer delays the cancel of the runs and chat turns behind it.
+        # They get what is left less the final reserve.
         # Spec I1 (D-I1-8): the connector runners still drain HERE, before the runtime
         # factory closes and before either engine is disposed. A transport cancelled
         # after disposal could still be mid-turn against a dead pool; this ordering is
@@ -1202,15 +1207,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if in_process_worker is not None:
             closers["in-process worker drain"] = in_process_worker.aclose()  # K2 T8d
         if embedded_connectors is not None:
-            closers["embedded connectors"] = embedded_connectors.aclose()
+            closers["connector runners"] = embedded_connectors.stop_runners()
         if run_registry is not None:
             closers["agentic runs"] = run_registry.aclose()  # S08-2
         if chat_turn_registry is not None:
             closers["chat turns"] = chat_turn_registry.aclose()  # D-P1-restart-sweep
-        await deadline.run(closers)
-        if runtime_factory is not None:
-            # tier_registry.aclose() + MCP disconnect (D-05-4)
-            await deadline.run({"runtime factory": runtime_factory.aclose()})
+        await deadline.run(closers, reserve_s=_shutdown.FINAL_RESERVE_S)
+        # R9-313 round 3 (N1): the connectors' HTTP client backs the channel deliverers the
+        # worker's jobs send through, so it closes only once the drain above has returned.
+        if embedded_connectors is not None:
+            await deadline.run(
+                {"connector http client": embedded_connectors.close_http()},
+                reserve_s=_shutdown.FINAL_RESERVE_S,
+            )
+        # Phase 3: the reserve. The sandbox pool first: an E2B sandbox not destroyed keeps
+        # billing until E2B's own timeout.
         if sandbox_pool is not None:
             # Cancels the reaper, drains sessions, closes substrate
             # (D-12-12 Gate 4 mid-exec-kill cleanliness inherits).
@@ -1218,6 +1229,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if mcp_runtime is not None:
             # Spec N6: cancel the cross-tenant idle-reaper
             await deadline.run({"mcp runtime": mcp_runtime.aclose()})
+        if runtime_factory is not None:
+            # tier_registry.aclose() + MCP disconnect (D-05-4)
+            await deadline.run({"runtime factory": runtime_factory.aclose()})
         if admin_engine is not None:
             admin_engine.dispose()
         if rls_engine is not None:

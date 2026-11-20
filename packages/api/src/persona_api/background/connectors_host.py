@@ -140,7 +140,12 @@ class EmbeddedConnectors:
         )
 
     async def aclose(self) -> None:
-        """Cancel every runner, await its exit, then close the shared client.
+        """Stop the runners, then close the shared client (both halves, in that order)."""
+        await self.stop_runners()
+        await self.close_http()
+
+    async def stop_runners(self) -> None:
+        """Cancel every runner and await its exit. The shared HTTP client stays open.
 
         The runners are infinite loops (long-poll, gateway socket, socket mode, the idle
         sweep), so cancellation IS the drain: there is no graceful-exit signal to request,
@@ -154,6 +159,17 @@ class EmbeddedConnectors:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        _log.info("embedded connector runners stopped")
+
+    async def close_http(self) -> None:
+        """Close the shared HTTP client.
+
+        R9-313 round 3 (N1): the same client backs the channel deliverers bound into the api's
+        :class:`ChannelDeliverers`, which the in-process worker's origination, approval and
+        task jobs send through. The lifespan stops the runners alongside the worker's drain,
+        so it calls this only once the drain has returned: a job finishing inside its drain
+        can still reach Telegram, Discord or Slack.
+        """
         await self._http.aclose()
         _log.info("embedded connectors stopped")
 
