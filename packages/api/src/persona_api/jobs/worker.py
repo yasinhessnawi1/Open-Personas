@@ -760,8 +760,11 @@ def build_worker(
     # The pure-config asserts run here before the engine is built; the is_superuser
     # probe runs once the rls_engine exists (community: never gated).
     check_cloud_config_guard(config)
-    dispatch_engine = create_db_engine(dispatch_url)
-    rls_engine = make_rls_engine(config.effective_app_database_url)
+    # R9-313: both engines bound a hung statement, a pool wait and a dead socket.
+    dispatch_engine = create_db_engine(dispatch_url, bounds=config.db_connection_bounds)
+    rls_engine = make_rls_engine(
+        config.effective_app_database_url, bounds=config.db_connection_bounds
+    )
     check_cloud_config_guard(config, probe_engine=rls_engine)
     scheduler_tick = (
         scheduler_tick_builder(dispatch_engine, rls_engine)

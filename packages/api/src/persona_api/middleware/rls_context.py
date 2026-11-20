@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import Request  # runtime: FastAPI must recognise the Request param
 from sqlalchemy import Connection, create_engine, event  # Connection: runtime dep annotation
 
+from persona_api.db.connection_bounds import DbConnectionBounds, engine_options
+
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
@@ -106,7 +108,9 @@ def _reset_connection(dbapi_conn: Any) -> None:  # noqa: ANN401 — DBAPI conn i
     dbapi_conn.commit()
 
 
-def make_rls_engine(url: str, *, pool_size: int = 5) -> Engine:
+def make_rls_engine(
+    url: str, *, pool_size: int = 5, bounds: DbConnectionBounds | None = None
+) -> Engine:
     """Build a sync engine whose pool RLS-scopes every connection structurally.
 
     Every checkout sets ``app.current_user_id`` from :data:`current_user_id`
@@ -120,8 +124,12 @@ def make_rls_engine(url: str, *, pool_size: int = 5) -> Engine:
             superusers — spec 07 D-07-5).
         pool_size: Connection-pool size. >1 so a slow sync store call doesn't
             serialise concurrent CRUD (research §5).
+        bounds: The statement, pool, connect and keepalive bounds (R9-313). ``None`` applies
+            the defaults, so the worker and the standalone connectors are bounded too.
     """
-    engine = create_engine(url, pool_size=pool_size)
+    engine = create_engine(
+        url, pool_size=pool_size, **engine_options(url, bounds or DbConnectionBounds())
+    )
 
     # The DBAPI connection + pool record/proxy are dynamically typed (psycopg3
     # raw connection, SQLAlchemy pool internals); the event-listener signature is

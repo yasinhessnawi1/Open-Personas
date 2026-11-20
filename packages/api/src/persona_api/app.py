@@ -272,7 +272,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             managed_url = community_db_manager.start()
             run_migrations(managed_url)
             community_managed_url = managed_url
-            rls_engine = make_rls_engine(managed_url, pool_size=config.db_pool_size)
+            rls_engine = make_rls_engine(
+                managed_url, pool_size=config.db_pool_size, bounds=config.db_connection_bounds
+            )
             # Spec K10 (T8, D-K10-4): auto-import a legacy SQLite + Chroma install on
             # the first managed boot — the legacy-data branching (data present →
             # import-first, then boot managed; absent → fresh embedded). A no-op when
@@ -293,7 +295,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Cloud: Postgres + RLS (today's behavior, unchanged).
         if config.effective_app_database_url:
             rls_engine = make_rls_engine(
-                config.effective_app_database_url, pool_size=config.db_pool_size
+                config.effective_app_database_url,
+                pool_size=config.db_pool_size,
+                bounds=config.db_connection_bounds,
             )
             # Spec R2 R2-D-1 (defense-in-depth): now that the rls_engine exists, probe
             # its role — refuse to serve if it is a PostgreSQL superuser (RLS-bypassing),
@@ -304,7 +308,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # freshly authenticated Clerk user has no `users` row (webhook mirroring
         # deferred, spec 08), yet everything FKs users.id. The auth dep upserts it
         # via this RLS-bypassing engine. None when no superuser DSN is set.
-        admin_engine = create_db_engine(config.database_url) if config.database_url else None
+        admin_engine = (
+            create_db_engine(config.database_url, bounds=config.db_connection_bounds)
+            if config.database_url
+            else None
+        )
         if rls_engine is not None:
             memory_backend = PostgresBackend(engine=rls_engine, embedder=app.state.embedder)
     app.state.rls_engine = rls_engine

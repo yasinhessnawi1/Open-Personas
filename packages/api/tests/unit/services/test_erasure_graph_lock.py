@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 _DIALECT = type("D", (), {"name": "postgresql"})()
+#: R9-313: the step's first statement lifts the statement timeout for its transaction, so the
+#: lock wait and the owner-wide rewrite after it are never cut off.
+_LIFT = "SELECT set_config('statement_timeout', '0', true)"
 
 
 class _StopError(Exception):
@@ -31,6 +34,8 @@ class _Conn:
 
     def execute(self, stmt: Any, params: Any = None) -> None:  # noqa: ANN401
         self._log.append((str(stmt), params))
+        if str(stmt) == _LIFT:
+            return
         raise _StopError
 
 
@@ -51,7 +56,8 @@ def test_the_graph_step_takes_the_owners_lock_before_any_row_lock() -> None:
     with pytest.raises(_StopError):
         erase_persona_graph(engine, owner_id="u1", persona_id="persona_" + "a" * 32)  # type: ignore[arg-type]
 
-    ((first, params),) = engine.log
+    (lift, _), (first, params) = engine.log
+    assert lift == _LIFT, "R9-313: the wait below must not be cut off by statement_timeout"
     assert first.startswith("SELECT pg_advisory_xact_lock(")
     assert f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)" in first
     assert params == {"owner": "u1"}
@@ -96,7 +102,8 @@ def test_without_waiting_a_busy_lock_raises_before_any_other_statement() -> None
     with pytest.raises(GraphMaintenanceBusyError):
         erase_persona_graph(engine, owner_id="u1", persona_id="persona_" + "a" * 32, wait=False)  # type: ignore[arg-type]
 
-    ((first, params),) = engine.log
+    (lift, _), (first, params) = engine.log
+    assert lift == _LIFT
     assert first.startswith("SELECT pg_try_advisory_xact_lock(")
     assert params == {"owner": "u1"}
 
@@ -175,7 +182,7 @@ def test_a_bounded_wait_sets_a_local_lock_timeout_before_the_lock() -> None:
     class _TwoStatements(_Conn):
         def execute(self, stmt: Any, params: Any = None) -> _EmptyResult:  # noqa: ANN401
             self._log.append((str(stmt), params))
-            if len(self._log) == 2:
+            if len(self._log) == 3:
                 raise _StopError
             return _EmptyResult()
 
@@ -193,7 +200,8 @@ def test_a_bounded_wait_sets_a_local_lock_timeout_before_the_lock() -> None:
             lock_timeout_ms=60_000,
         )
 
-    (timeout_sql, timeout_params), (lock_sql, _) = engine.log
+    (lift, _), (timeout_sql, timeout_params), (lock_sql, _) = engine.log
+    assert lift == _LIFT
     assert timeout_sql == "SELECT set_config('lock_timeout', :t, true)", "true: this txn only"
     assert timeout_params == {"t": "60000ms"}
     assert lock_sql.startswith("SELECT pg_advisory_xact_lock(")

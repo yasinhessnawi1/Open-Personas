@@ -29,10 +29,23 @@ from persona_runtime.legs.semantic_distiller import DEFAULT_DISTILL_TIMEOUT_S
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from persona_api.db.connection_bounds import (
+    DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_KEEPALIVES_COUNT,
+    DEFAULT_KEEPALIVES_IDLE_S,
+    DEFAULT_KEEPALIVES_INTERVAL_S,
+    DEFAULT_POOL_TIMEOUT_S,
+    DEFAULT_STATEMENT_TIMEOUT_MS,
+    DbConnectionBounds,
+)
+
 if TYPE_CHECKING:
     from persona.skills.sources.github import GithubRepoSpec
 
-__all__ = ["APIConfig", "Edition"]
+__all__ = ["DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S", "APIConfig", "Edition"]
+
+#: R9-313: how long shutdown waits for cancelled chat turns before giving up on them.
+DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S = 10.0
 
 
 class Edition(StrEnum):
@@ -587,6 +600,23 @@ class APIConfig(BaseSettings):
     # Connection pool (research §5 — roomy pool removes store/CRUD contention).
     db_pool_size: int = 5
 
+    # R9-313: bounds on every api Postgres connection (persona_api.db.connection_bounds has
+    # the reasoning and the sizing). Zero switches the statement, connect and keepalive bounds
+    # off. The statement timeout sits well above the longest lock wait any statement takes
+    # (the erasure backstop's 60 s); a value set in the DSN itself wins over these.
+    db_statement_timeout_ms: int = Field(default=DEFAULT_STATEMENT_TIMEOUT_MS, ge=0)
+    db_pool_timeout_seconds: float = Field(default=DEFAULT_POOL_TIMEOUT_S, gt=0)
+    db_connect_timeout_seconds: int = Field(default=DEFAULT_CONNECT_TIMEOUT_S, ge=0)
+    db_keepalives_idle_seconds: int = Field(default=DEFAULT_KEEPALIVES_IDLE_S, ge=0)
+    db_keepalives_interval_seconds: int = Field(default=DEFAULT_KEEPALIVES_INTERVAL_S, ge=0)
+    db_keepalives_count: int = Field(default=DEFAULT_KEEPALIVES_COUNT, ge=0)
+    # R9-313: how long shutdown waits for cancelled chat turns before it gives up on them and
+    # logs each one. Inside the container's 30 s stop grace, with room for the rest of the
+    # teardown. A turn given up on is reconciled by the restart sweep on the next boot.
+    chat_turn_shutdown_timeout_seconds: float = Field(
+        default=DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S, ge=0
+    )
+
     # External file storage (R5-D-4). "local" (default → the workspace volume,
     # byte-unchanged) or "s3" (generic S3 — Tigris / R2 / MinIO / AWS via boto3).
     # S3 lifts the Fly-volume single-Machine pin so artifacts/uploads/images are
@@ -984,6 +1014,18 @@ class APIConfig(BaseSettings):
         """
         url = self.app_database_url or self.database_url
         return url.replace("+asyncpg", "+psycopg")
+
+    @property
+    def db_connection_bounds(self) -> DbConnectionBounds:
+        """The statement, pool, connect and keepalive bounds every api engine applies (R9-313)."""
+        return DbConnectionBounds(
+            statement_timeout_ms=self.db_statement_timeout_ms,
+            pool_timeout_s=self.db_pool_timeout_seconds,
+            connect_timeout_s=self.db_connect_timeout_seconds,
+            keepalives_idle_s=self.db_keepalives_idle_seconds,
+            keepalives_interval_s=self.db_keepalives_interval_seconds,
+            keepalives_count=self.db_keepalives_count,
+        )
 
     @property
     def jwt_algorithms_list(self) -> list[str]:

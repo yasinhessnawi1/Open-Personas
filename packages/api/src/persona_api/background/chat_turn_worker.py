@@ -30,7 +30,6 @@ to ``interrupted`` by the startup sweep (D-P1-restart-sweep).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 import time
 from typing import TYPE_CHECKING, Protocol
@@ -43,6 +42,7 @@ from persona_runtime.interaction_scope import (
     reset_interaction,
 )
 
+from persona_api.config import DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
 from persona_api.errors import (
     CreditsExhaustedError,
     DailySpendCapExceededError,
@@ -186,8 +186,14 @@ class ChatTurnRegistry:
         task_reschedule_service: TaskRescheduleService | None = None,
         initiative_verb_service: InitiativeVerbService | None = None,
         delivers_images: bool = True,
+        shutdown_timeout_s: float = DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
+        if shutdown_timeout_s < 0:
+            msg = "shutdown_timeout_s must be zero or positive"
+            raise ValueError(msg)
         self._sink = sink
+        # R9-313: how long ``aclose`` waits for the cancelled turns, all together.
+        self._shutdown_timeout_s = shutdown_timeout_s
         # R9-308: whether this registry's surface can show a generated image. Bound onto
         # each turn's request context, where the chat image charge reads it; the connector
         # registry passes False, so a persona's image on Telegram is made and not charged.
@@ -987,9 +993,39 @@ class ChatTurnRegistry:
         Shutdown cancellation is NOT a user cancel — the tasks end without a
         terminal finalize; the startup sweep (D-P1-restart-sweep) reconciles the
         ``running`` rows to ``interrupted`` on next boot.
+
+        R9-313: the wait is bounded, once for all turns together. A cancel lands only at an
+        ``await``, and some undo paths deliberately wait out a database write in a thread
+        without forwarding the cancel (the R9-308 image hold), so a write that hangs would
+        otherwise hold up the whole shutdown. A turn still running at the bound is given up
+        on and logged; its database work is bounded by the engines' ``statement_timeout``.
+        ``asyncio.wait`` rather than ``wait_for``: on timeout ``wait_for`` cancels the task
+        again and waits for that cancel to land, which is exactly what cannot happen here.
         """
-        for handle in list(self._handles.values()):
-            if handle.task is not None and not handle.task.done():
-                handle.task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await handle.task
+        live = {
+            handle.task: handle
+            for handle in list(self._handles.values())
+            if handle.task is not None and not handle.task.done()
+        }
+        if not live:
+            return
+        for task in live:
+            task.cancel()
+        done, pending = await asyncio.wait(live, timeout=self._shutdown_timeout_s)
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                _log.warning(
+                    "chat turn {cid} ended with an error during shutdown: {err}",
+                    cid=live[task].conversation_id,
+                    err=str(task.exception()),
+                )
+        for task in pending:
+            handle = live[task]
+            _log.warning(
+                "chat turn abandoned at shutdown: still running after {bound}s; "
+                "conversation={cid} owner={owner} message={mid}",
+                bound=self._shutdown_timeout_s,
+                cid=handle.conversation_id,
+                owner=handle.owner_id,
+                mid=handle.assistant_message_id,
+            )

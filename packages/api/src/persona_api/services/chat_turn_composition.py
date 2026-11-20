@@ -106,4 +106,7 @@ def build_chat_turn_registry(
         task_reschedule_service=task_reschedule_service,
         initiative_verb_service=initiative_verb_service,
         delivers_images=delivers_images,
+        # R9-313: shutdown gives up on a turn that will not end
+        # (PERSONA_API_CHAT_TURN_SHUTDOWN_TIMEOUT_SECONDS).
+        shutdown_timeout_s=config.chat_turn_shutdown_timeout_seconds,
     )
