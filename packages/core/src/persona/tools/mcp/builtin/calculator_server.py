@@ -19,7 +19,10 @@ from persona.tools.builtin.calculator import make_calculator_tool
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
-__all__ = ["build"]
+__all__ = ["CHILD_ENV", "build"]
+
+#: Env names this server needs beyond the shared base (R9-258). None: pure arithmetic.
+CHILD_ENV: frozenset[str] = frozenset()
 
 # Build the underlying AsyncTool once per process — pure + stateless.
 _CALCULATOR_TOOL = make_calculator_tool()

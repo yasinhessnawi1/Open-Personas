@@ -143,6 +143,32 @@ describe("reduceChatEvent — the shared live reducer", () => {
   });
 });
 
+describe("reduceChatEvent: an approval answered in chat", () => {
+  it("carries the held note of an approval_resolved done onto the turn", () => {
+    // The chat route answers a decision cue with a single `done` frame (no chunks); its
+    // `note` says why the task waits (D-ORCH-11-18-d (2)). It was dropped on the floor.
+    const done = {
+      event: "done",
+      data: {
+        kind: "approval_resolved",
+        outcome: "approve",
+        executed: true,
+        note: "held_paused",
+        status: "consumed",
+      },
+    } as unknown as ChatEvent;
+    expect(reduceChatEvent(base, done).approvalHeld).toBe("heldWhilePaused");
+  });
+
+  it("leaves an ordinary turn's done without a held note", () => {
+    const done = {
+      event: "done",
+      data: { usage: {}, tier: "mid", format_hints: {} },
+    } as ChatEvent;
+    expect(reduceChatEvent(base, done).approvalHeld).toBeUndefined();
+  });
+});
+
 describe("toChatEvent — persisted entry → ChatEvent", () => {
   it("maps a text delta to a chunk event", () => {
     expect(toChatEvent({ kind: "text", delta: "hi" })).toEqual({

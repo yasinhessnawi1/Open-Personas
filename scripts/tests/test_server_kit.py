@@ -99,6 +99,9 @@ FIXED_VALUES = {
     "false",
     "persona",
     "https://acme-staging-v02.api.letsencrypt.org/directory",
+    # R9-313: api.env's shutdown bounds (WORKER_DRAIN_SECONDS, the shutdown budget).
+    "12",
+    "20",
     # The web's origins on Vercel (owner, 2026-11-07): api.env and voice.env CORS.
     "https://openpersonas.si,https://app.openpersonas.si,https://www.openpersonas.si",
 }
@@ -316,6 +319,72 @@ def test_the_api_cannot_be_scaled_out() -> None:
     api = _compose()["services"]["api"]
     assert api["container_name"] == "open-persona-api"
     assert api["deploy"]["replicas"] == 1
+
+
+def _seconds(value: str) -> float:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value)
+    assert match is not None, value
+    return float(match.group(1))
+
+
+def test_the_api_shutdown_fits_inside_its_stop_grace() -> None:
+    """R9-313: uvicorn's grace plus the lifespan budget end before SIGKILL, with room to exit.
+
+    Docker sends SIGKILL at ``stop_grace_period``. Uvicorn waits ``--timeout-graceful-shutdown``
+    for open requests, then the lifespan spends ``PERSONA_API_SHUTDOWN_BUDGET_SECONDS``. The
+    slow closers get that budget less the first phase's cap and the final reserve, and the
+    worker's drain and the run and chat-turn bounds must all fit in what they get.
+    """
+    from persona_api.background import shutdown  # noqa: PLC0415
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_SHUTDOWN_BUDGET_S,
+    )
+
+    grace = _seconds(_compose()["services"]["api"]["stop_grace_period"])
+    cmd = (ROOT / "packages" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    graceful = re.search(r'"--timeout-graceful-shutdown",\s*"(\d+)"', cmd)
+    assert graceful is not None, "uvicorn would wait for an open SSE stream until SIGKILL"
+    env = dict(_template("api"))
+    budget = float(env["PERSONA_API_SHUTDOWN_BUDGET_SECONDS"])
+    drain = float(env["WORKER_DRAIN_SECONDS"])
+    closers = budget - shutdown.PRE_CLOSE_CAP_S - shutdown.FINAL_RESERVE_S
+
+    assert float(graceful.group(1)) + budget <= grace - 5, "no room left for the process exit"
+    assert float(graceful.group(1)) + DEFAULT_SHUTDOWN_BUDGET_S <= grace - 5
+    assert closers > drain
+    assert closers > DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
+    assert closers > DEFAULT_RUN_SHUTDOWN_TIMEOUT_S
+
+
+def test_the_code_defaults_are_the_server_values() -> None:
+    """Round 3 N2: an existing host keeps its old api.env, so production runs on the CODE
+    defaults, not on this template. They must be the same values, so a revert of either one
+    (the 270 s drain coming back) fails here."""
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_SHUTDOWN_BUDGET_S,
+        DEFAULT_WORKER_DRAIN_SECONDS,
+        APIConfig,
+    )
+
+    env = dict(_template("api"))
+    assert float(env["WORKER_DRAIN_SECONDS"]) == DEFAULT_WORKER_DRAIN_SECONDS
+    assert float(env["PERSONA_API_SHUTDOWN_BUDGET_SECONDS"]) == DEFAULT_SHUTDOWN_BUDGET_S
+    fields = APIConfig.model_fields
+    assert fields["worker_drain_seconds"].default == DEFAULT_WORKER_DRAIN_SECONDS
+    assert fields["shutdown_budget_seconds"].default == DEFAULT_SHUTDOWN_BUDGET_S
+
+
+def test_render_passes_the_shutdown_bounds_through_unchanged() -> None:
+    """Fixed values, never copied from .env, where a dev 270 s drain would be cut by SIGKILL."""
+    render = _load_render()
+    for name in ("WORKER_DRAIN_SECONDS", "PERSONA_API_SHUTDOWN_BUDGET_SECONDS"):
+        value = dict(_template("api"))[name]
+        dotenv = {name: "270"}
+        assert render.resolve(
+            name, value, dotenv, livekit="selfhosted", chains_from_dotenv=False
+        ) == (value, "fixed")
 
 
 def test_host_network_only_for_caddy_and_livekit() -> None:
@@ -1006,3 +1075,51 @@ def test_every_kit_timer_is_installed_enabled_and_checked() -> None:
     assert "systemctl is-active --quiet" in preflight
     for timer in (KIT / "systemd").glob("*.timer"):
         assert timer.name in enabled, f"provision.sh never enables {timer.name}"
+
+
+def test_deploy_prunes_the_build_cache_after_a_successful_build() -> None:
+    """R9-289: BuildKit's cache grows by every build; it goes once the build succeeded."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    build_block = deploy[deploy.index('if [ "${SKIP_BUILD}" = 0 ]; then\n  say "building') :]
+    build_block = build_block[: build_block.index("\nfi\n")]
+    assert build_block.index("compose build") < build_block.index("docker builder prune -f")
+    prune = next(line for line in build_block.splitlines() if "docker builder prune" in line)
+    assert '|| say "WARNING' in prune, "a prune that fails never fails the deploy"
+
+
+def test_every_compose_exec_and_run_in_deploy_reads_from_dev_null() -> None:
+    """R9-289: `compose exec` and `compose run` read stdin; fed a script on stdin, they would
+    swallow the rest of it (review M4 added the runs: migrate and the Caddyfile check)."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    # One logical command per entry: backslash continuations joined.
+    commands = deploy.replace("\\\n", " ").splitlines()
+    calls = [
+        c
+        for c in commands
+        if re.search(r"\bcompose (exec|run)\b", c) and not c.lstrip().startswith("#")
+    ]
+    assert len(calls) == 6, calls
+    assert all("</dev/null" in c for c in calls), [c for c in calls if "</dev/null" not in c]
+
+
+def test_deploy_never_prunes_images_or_the_whole_system() -> None:
+    """R9-289 review L7: only the build cache goes. The rollback is an image (:previous) and
+    the database is a volume, which an image or system prune could take with it."""
+    deploy = (KIT / "bin" / "deploy.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in deploy.splitlines() if not line.lstrip().startswith("#"))
+    # Round 3 LOW-3: one logical command per line, so a flag on a continued line still counts.
+    code = code.replace("\\\n", " ")
+    for destroys in (
+        "image prune",
+        "system prune",
+        "volume prune",
+        "volume rm",
+        "volume remove",
+        "image rm",
+        "image remove",
+    ):
+        assert destroys not in code, destroys
+    # Round 2 LOW-3: `down -v` drops the database volume; `rmi` the rollback image. Round 3
+    # LOW-3: so does `-v` inside a flag group (`down -fv`) or spelled `--volumes`.
+    assert not re.search(r"\bdown\b[^\n]*(\s-[a-z]*v\b|--volumes\b)", code), "down -v"
+    assert not re.search(r"\brmi\b", code), "rmi"

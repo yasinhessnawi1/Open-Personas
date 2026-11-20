@@ -15,7 +15,6 @@ requires it.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,8 +37,10 @@ from persona_runtime.errors import TierNotConfiguredError
 from persona_runtime.openrouter_subscription import resolve_openrouter_subscription_mode
 from persona_runtime.tier import tier_registry_from_env
 
+from persona_api.background import shutdown as _shutdown
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.background.run_worker import RunRegistry
+from persona_api.background.shutdown import ShutdownDeadline
 from persona_api.billing import build_event_dispatcher
 from persona_api.config import APIConfig, Edition
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
@@ -78,6 +79,7 @@ from persona_api.middleware.rate_limit import (
 )
 from persona_api.middleware.request_telemetry import RequestTelemetryMiddleware, TelemetryBuffer
 from persona_api.middleware.rls_context import make_rls_engine
+from persona_api.process_hardening import make_non_dumpable
 from persona_api.realtime.channel import UserEventChannel
 from persona_api.realtime.live_sessions import ChannelLiveSessions
 from persona_api.routes import (
@@ -93,6 +95,7 @@ from persona_api.routes import (
     documents,
     health,
     imagegen,
+    initiative_hold,
     mcp_servers,
     me,
     memory,
@@ -124,7 +127,7 @@ from persona_api.services.verb_service_composition import build_conversational_v
 from persona_api.storage import build_file_storage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
 
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
     from persona.stores.backend import Backend
@@ -270,7 +273,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             managed_url = community_db_manager.start()
             run_migrations(managed_url)
             community_managed_url = managed_url
-            rls_engine = make_rls_engine(managed_url, pool_size=config.db_pool_size)
+            rls_engine = make_rls_engine(
+                managed_url, pool_size=config.db_pool_size, bounds=config.db_connection_bounds
+            )
             # Spec K10 (T8, D-K10-4): auto-import a legacy SQLite + Chroma install on
             # the first managed boot — the legacy-data branching (data present →
             # import-first, then boot managed; absent → fresh embedded). A no-op when
@@ -291,7 +296,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Cloud: Postgres + RLS (today's behavior, unchanged).
         if config.effective_app_database_url:
             rls_engine = make_rls_engine(
-                config.effective_app_database_url, pool_size=config.db_pool_size
+                config.effective_app_database_url,
+                pool_size=config.db_pool_size,
+                bounds=config.db_connection_bounds,
             )
             # Spec R2 R2-D-1 (defense-in-depth): now that the rls_engine exists, probe
             # its role — refuse to serve if it is a PostgreSQL superuser (RLS-bypassing),
@@ -302,7 +309,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # freshly authenticated Clerk user has no `users` row (webhook mirroring
         # deferred, spec 08), yet everything FKs users.id. The auth dep upserts it
         # via this RLS-bypassing engine. None when no superuser DSN is set.
-        admin_engine = create_db_engine(config.database_url) if config.database_url else None
+        admin_engine = (
+            create_db_engine(config.database_url, bounds=config.db_connection_bounds)
+            if config.database_url
+            else None
+        )
         if rls_engine is not None:
             memory_backend = PostgresBackend(engine=rls_engine, embedder=app.state.embedder)
     app.state.rls_engine = rls_engine
@@ -449,6 +460,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             gateway=app.state.stripe_gateway,
             billing_config=BillingConfig(),
             agentic_floor=config.agentic_credit_floor,
+            # R9-313: shutdown gives up on a run that will not end.
+            shutdown_timeout_s=config.run_shutdown_timeout_seconds,
         )
         if rls_engine is not None
         else None
@@ -1142,76 +1155,83 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # R9-313: the whole teardown spends ONE budget (PERSONA_API_SHUTDOWN_BUDGET_SECONDS, 20 s),
+        # so it fits inside the container's 30 s stop grace after uvicorn's own 5 s. Every wait
+        # below gives up at the deadline and logs what it left; nothing given up on is lost
+        # (a job's lease lapses and it is requeued, a turn or run is reconciled at next boot).
+        # persona_api.background.shutdown has the reasoning, and the one thing it cannot bound.
+        deadline = ShutdownDeadline(config.shutdown_budget_seconds)
+        # Phase 1 (R9-313 round 3): the small steps, together capped so a hung one (a
+        # telemetry flush on a dead pool) cannot spend the budget the closers need.
+        before = deadline.capped(_shutdown.PRE_CLOSE_CAP_S)
         # R9-027: stop AWAITING the crisis-encoder warm-up first. Cancelling the
         # task ends the awaiting side promptly; the load itself (if still running)
-        # continues on its daemon thread and is deliberately NEVER joined — neither
-        # here nor by the loop's executor teardown — so a stuck HF download can no
+        # continues on its daemon thread and is deliberately NEVER joined (neither
+        # here nor by the loop's executor teardown), so a stuck HF download can no
         # longer hang TestClient.__exit__ or a real SIGTERM (the 2026-07-11 CI hang).
-        crisis_warmup_task = getattr(app.state, "crisis_encoder_warmup", None)
-        if crisis_warmup_task is not None:
-            crisis_warmup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await crisis_warmup_task
-        # Spec M2 (D-M2-6): stop the catalog-freshness poller before the
-        # engines/factory close (it only sleeps or runs a to_thread fetch;
-        # cancellation is clean at either point).
-        if catalog_refresh_task is not None:
-            catalog_refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await catalog_refresh_task
-        # Spec V14 (T5a): cancel the (likely already-finished, one-shot) voice
-        # remap reconciliation pass — cleanly, before the engines it reads/writes
-        # through close.
-        if voice_remap_task is not None:
-            voice_remap_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await voice_remap_task
-        # R9-165: the (usually long-finished) skill summary warm-up, cancelled before the
-        # registry it may still be calling through closes.
-        if skill_summary_task is not None:
-            skill_summary_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await skill_summary_task
+        # Spec M2 (D-M2-6): the catalog-freshness poller, before the engines/factory close.
+        # Spec V14 (T5a): the one-shot voice remap pass, before the engines it uses close.
+        # R9-165: the skill summary warm-up, before the registry it may still call closes.
+        await before.cancel(
+            {
+                "crisis encoder warm-up": getattr(app.state, "crisis_encoder_warmup", None),
+                "catalog refresh": catalog_refresh_task,
+                "voice remap": voice_remap_task,
+                "skill summary warm-up": skill_summary_task,
+            }
+        )
         # Flush + stop telemetry FIRST so a final drain lands before engines close
-        # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
+        # (R5-D-3; best-effort: it never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:
-            await app.state.telemetry_buffer.aclose()
+            await before.run({"telemetry flush": app.state.telemetry_buffer.aclose()})
         # R9-284: the periodic erasure sweep of a worker-less process (a finished task where a
-        # worker sweeps instead).
-        erasure_resume_task = getattr(app.state, "erasure_resume_task", None)
-        if erasure_resume_task is not None:
-            erasure_resume_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await erasure_resume_task
-        account_erasure_task = getattr(app.state, "account_erasure_task", None)
-        if account_erasure_task is not None:
-            account_erasure_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await account_erasure_task
+        # worker sweeps instead), and the account erasures.
+        await before.cancel(
+            {
+                "erasure resume": getattr(app.state, "erasure_resume_task", None),
+                "account erasure": getattr(app.state, "account_erasure_task", None),
+            }
+        )
         account_erase_runner = getattr(app.state, "account_erase_runner", None)
         if account_erase_runner is not None:
             account_erase_runner.close()  # an erasure cut short resumes at the next start
+        # Phase 2 (R9-313): the four slow closers run together, so the worker's drain (12 s
+        # on the server) no longer delays the cancel of the runs and chat turns behind it.
+        # They get what is left less the final reserve.
+        # Spec I1 (D-I1-8): the connector runners still drain HERE, before the runtime
+        # factory closes and before either engine is disposed. A transport cancelled
+        # after disposal could still be mid-turn against a dead pool; this ordering is
+        # load-bearing, and the T2 lifecycle test proves it by exiting a real
+        # TestClient context rather than asserting it in a comment.
+        closers: dict[str, Awaitable[object]] = {}
         if in_process_worker is not None:
-            await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
+            closers["in-process worker drain"] = in_process_worker.aclose()  # K2 T8d
         if embedded_connectors is not None:
-            # Spec I1 (D-I1-8): drain the connector runners HERE, before the runtime
-            # factory closes and before either engine is disposed. A transport cancelled
-            # after disposal could still be mid-turn against a dead pool; this ordering is
-            # load-bearing, and the T2 lifecycle test proves it by exiting a real
-            # TestClient context rather than asserting it in a comment.
-            await embedded_connectors.aclose()
+            closers["connector runners"] = embedded_connectors.stop_runners()
         if run_registry is not None:
-            await run_registry.aclose()  # cancel in-flight run tasks (S08-2)
+            closers["agentic runs"] = run_registry.aclose()  # S08-2
         if chat_turn_registry is not None:
-            await chat_turn_registry.aclose()  # cancel in-flight chat turns (D-P1-restart-sweep)
-        if runtime_factory is not None:
-            await runtime_factory.aclose()  # tier_registry.aclose() + MCP disconnect (D-05-4)
+            closers["chat turns"] = chat_turn_registry.aclose()  # D-P1-restart-sweep
+        await deadline.run(closers, reserve_s=_shutdown.FINAL_RESERVE_S)
+        # R9-313 round 3 (N1): the connectors' HTTP client backs the channel deliverers the
+        # worker's jobs send through, so it closes only once the drain above has returned.
+        if embedded_connectors is not None:
+            await deadline.run(
+                {"connector http client": embedded_connectors.close_http()},
+                reserve_s=_shutdown.FINAL_RESERVE_S,
+            )
+        # Phase 3: the reserve. The sandbox pool first: an E2B sandbox not destroyed keeps
+        # billing until E2B's own timeout.
         if sandbox_pool is not None:
             # Cancels the reaper, drains sessions, closes substrate
             # (D-12-12 Gate 4 mid-exec-kill cleanliness inherits).
-            await sandbox_pool.aclose()
+            await deadline.run({"sandbox pool": sandbox_pool.aclose()})
         if mcp_runtime is not None:
-            await mcp_runtime.aclose()  # Spec N6: cancel the cross-tenant idle-reaper
+            # Spec N6: cancel the cross-tenant idle-reaper
+            await deadline.run({"mcp runtime": mcp_runtime.aclose()})
+        if runtime_factory is not None:
+            # tier_registry.aclose() + MCP disconnect (D-05-4)
+            await deadline.run({"runtime factory": runtime_factory.aclose()})
         if admin_engine is not None:
             admin_engine.dispose()
         if rls_engine is not None:
@@ -1230,6 +1250,10 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
         config: An :class:`APIConfig`. Defaults to one loaded from the
             environment. Injected in tests to override DSNs/auth knobs.
     """
+    # R9-258 (D-ORCH-11-18-g): first, before anything is built. This process holds
+    # every api secret in its env and shares its uid and PID namespace with the
+    # built-in MCP children; non-dumpable, its /proc/<pid>/environ is closed to them.
+    make_non_dumpable()
     config = config or APIConfig()
 
     # Spec 33 D-33-4: refuse to start a community/no-auth process on a public
@@ -1340,6 +1364,7 @@ def _register_routers(app: FastAPI) -> None:
     """Include all route modules. Extended task-by-task in Phase 5."""
     app.include_router(personas.router)
     app.include_router(conversations.router)
+    app.include_router(initiative_hold.router)  # D-ORCH-11-18-u: "fine to bring this up"
     app.include_router(calls.router)  # spec V9: voice-call history
     app.include_router(runs.router)
     app.include_router(me.router)

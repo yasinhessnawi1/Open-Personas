@@ -75,6 +75,65 @@ async def test_run_is_cut_off_at_a_step_boundary_on_exhaustion() -> None:
     assert run.status is RunStatus.CANCELLED, "an exhausted run must be cut off, not completed"
     # Exactly 3 steps ran (the balance covered 3), then the next boundary stopped it.
     assert len(run.steps) == 3
-    assert len(watcher.usages) == 3
+    # The three steps, then the cancellation's salvage summary (R9-109), which is a
+    # paid call and so is reported too (R9-299). The empty balance captures nothing
+    # for it: the meter still never takes more than the balance holds.
+    assert [u.call for u in watcher.usages] == ["step", "step", "step", "summary"]
     assert watcher.captured_total == 3  # captured == balance, never more
     assert watcher.balance == 0  # floored at 0, never negative
+
+
+class _DownPrimary:
+    """A chain primary whose ``chat`` first returns an empty completion that cost tokens.
+
+    The chain treats it as a failure and falls through, so the step is served by the
+    fallback while the primary's wasted try is carried in the step's history.
+    """
+
+    provider_name = "anthropic"
+    model_name = "claude-sonnet-4-6"
+    supports_native_tools = False
+    supports_vision = False
+
+    async def chat(self, messages: object, **_kwargs: object) -> object:  # noqa: ARG002
+        from persona.backends.types import ChatResponse, TokenUsage
+
+        return ChatResponse(
+            content="",
+            usage=TokenUsage(prompt_tokens=800, completion_tokens=0, total_tokens=800),
+            model=self.model_name,
+            provider=self.provider_name,
+            latency_ms=1.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_step_a_fallback_served_is_reported_at_the_fallback() -> None:
+    """R9-296: the step meter named the chain's PRIMARY on every fallback step.
+
+    ``StepUsage`` is what the agentic-run watcher and the task leg price, so a step the
+    fallback answered was charged at the primary's rate.
+    """
+    from _fakes import ScriptedBackend  # type: ignore[import-not-found]
+    from persona.backends.multi_model import MultiModelChatBackend
+
+    loop, _stores, _backend = _make_loop([])
+    fallback = ScriptedBackend(
+        [], chat_script=[_resp("[FINAL] done")], provider_name="openai", model_name="gpt-4o"
+    )
+    chain = MultiModelChatBackend([_DownPrimary(), fallback], max_retries_per_backend=0)  # type: ignore[list-item]
+    loop._tiers._cache = {"frontier": chain, "mid": chain, "small": chain}  # type: ignore[attr-defined]  # noqa: SLF001
+    token = CancelToken()
+    watcher = _BalanceWatcher(balance=100, cancel_token=token)
+
+    run = await loop.run("do it", on_step_usage=watcher.on_step_usage, cancel_token=token)
+
+    assert run.status is RunStatus.COMPLETED
+    (usage,) = watcher.usages
+    assert (usage.provider, usage.model) == ("openai", "gpt-4o")
+    assert (usage.prompt_tokens, usage.completion_tokens) == (10, 5)  # the answer's own
+    # The primary's wasted try rides along, for the pricer to charge (D-ORCH-11-18-s).
+    (wasted,) = usage.failed_tries
+    assert (wasted.model, wasted.error_class) == ("claude-sonnet-4-6", "EmptyCompletionError")
+    assert wasted.usage is not None
+    assert wasted.usage.prompt_tokens == 800

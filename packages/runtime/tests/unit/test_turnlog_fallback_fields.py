@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from persona.backends.types import BackendAttempt, ServedCall
 from persona_runtime.logging import TurnLog
 from pydantic import ValidationError
 
@@ -279,9 +280,18 @@ class TestJSONLSerialization:
 class TestComputeFallbackFieldsHelper:
     """Verify the loop's ``_compute_fallback_fields`` projection helper.
 
-    Imported here to keep the unit boundary tight; integration with the
-    full ConversationLoop write-back path is covered in test_loop.py.
+    The input is the last round's :class:`ServedCall` (R9-223): the identity and the
+    attempt history the chain stamped on that round's own chunks. Integration with
+    the full ConversationLoop write-back path is in ``test_loop_served_model.py``.
     """
+
+    @staticmethod
+    def _attempt(
+        index: int, provider: str, model: str, error: str | None, *, retry: bool = False
+    ) -> BackendAttempt:
+        return BackendAttempt(
+            index=index, provider=provider, model=model, error_class=error, retry=retry
+        )
 
     def test_single_backend_no_attempts(self) -> None:
         from persona_runtime.loop import _compute_fallback_fields
@@ -290,7 +300,7 @@ class TestComputeFallbackFieldsHelper:
             provider_name = "nvidia"
             model_name = "nvidia/llama"
 
-        result = _compute_fallback_fields(cast("object", _FakeBareBackend()))  # type: ignore[arg-type]
+        result = _compute_fallback_fields(cast("object", _FakeBareBackend()), None)  # type: ignore[arg-type]
         assert result["tier_model_chosen"] == "nvidia/llama"
         assert result["tier_provider_used"] == "nvidia"
         assert result["tier_fallback_count"] == 0
@@ -298,85 +308,56 @@ class TestComputeFallbackFieldsHelper:
         assert result["tier_fallback_providers"] == []
         assert result["fallback_engaged"] is False
 
-    def test_wrapper_with_one_fallback(self) -> None:
-        from persona.backends.multi_model import AttemptRecord
+    def test_one_fallback_after_a_retry(self) -> None:
         from persona_runtime.loop import _compute_fallback_fields
 
-        class _FakeChild:
-            def __init__(self, provider: str, model: str) -> None:
-                self.provider_name = provider
-                self.model_name = model
-
-        class _FakeWrapper:
-            provider_name = "nvidia"
-            model_name = "nvidia/llama"
-            backends = [
-                _FakeChild("nvidia", "nvidia/llama"),
-                _FakeChild("anthropic", "claude-sonnet-4-6"),
-            ]
-            last_attempts = [
-                AttemptRecord(
-                    provider="nvidia",
-                    model="nvidia/llama",
-                    last_error_class="RateLimitError",
-                    last_error_status_code=429,
-                    retried_same_model=True,
-                ),
-            ]
-
-        result = _compute_fallback_fields(cast("object", _FakeWrapper()))  # type: ignore[arg-type]
-        # Winner is backends[len(attempts)] == backends[1] == anthropic.
+        served = ServedCall(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            attempts=(
+                self._attempt(0, "nvidia", "nvidia/llama", "RateLimitError"),
+                self._attempt(0, "nvidia", "nvidia/llama", "RateLimitError", retry=True),
+                self._attempt(1, "anthropic", "claude-sonnet-4-6", None),
+            ),
+        )
+        result = _compute_fallback_fields(cast("object", None), served)  # type: ignore[arg-type]
         assert result["tier_model_chosen"] == "claude-sonnet-4-6"
         assert result["tier_provider_used"] == "anthropic"
+        # One record per backend that fell through: the retry is not a second fallback.
         assert result["tier_fallback_count"] == 1
         assert result["tier_fallback_reasons"] == ["RateLimitError"]
         assert result["tier_fallback_providers"] == ["nvidia"]
         assert result["fallback_engaged"] is True
 
-    def test_wrapper_with_three_fallbacks(self) -> None:
-        from persona.backends.multi_model import AttemptRecord
+    def test_a_retry_on_the_serving_backend_is_not_a_fallback(self) -> None:
         from persona_runtime.loop import _compute_fallback_fields
 
-        class _FakeChild:
-            def __init__(self, provider: str, model: str) -> None:
-                self.provider_name = provider
-                self.model_name = model
+        served = ServedCall(
+            provider="nvidia",
+            model="nvidia/llama",
+            attempts=(
+                self._attempt(0, "nvidia", "nvidia/llama", "RateLimitError"),
+                self._attempt(0, "nvidia", "nvidia/llama", None, retry=True),
+            ),
+        )
+        result = _compute_fallback_fields(cast("object", None), served)  # type: ignore[arg-type]
+        assert result["tier_model_chosen"] == "nvidia/llama"
+        assert (result["tier_fallback_count"], result["fallback_engaged"]) == (0, False)
 
-        class _FakeWrapper:
-            provider_name = "nvidia"
-            model_name = "nvidia/llama"
-            backends = [
-                _FakeChild("nvidia", "nvidia/llama"),
-                _FakeChild("anthropic", "claude-sonnet-4-6"),
-                _FakeChild("deepseek", "deepseek-chat"),
-                _FakeChild("groq", "llama-3.1-8b-instant"),
-            ]
-            last_attempts = [
-                AttemptRecord(
-                    provider="nvidia",
-                    model="nvidia/llama",
-                    last_error_class="RateLimitError",
-                    last_error_status_code=429,
-                    retried_same_model=True,
-                ),
-                AttemptRecord(
-                    provider="anthropic",
-                    model="claude-sonnet-4-6",
-                    last_error_class="AuthenticationError",
-                    last_error_status_code=401,
-                    retried_same_model=False,
-                ),
-                AttemptRecord(
-                    provider="deepseek",
-                    model="deepseek-chat",
-                    last_error_class="BackendTimeoutError",
-                    last_error_status_code=None,
-                    retried_same_model=True,
-                ),
-            ]
+    def test_three_fallbacks(self) -> None:
+        from persona_runtime.loop import _compute_fallback_fields
 
-        result = _compute_fallback_fields(cast("object", _FakeWrapper()))  # type: ignore[arg-type]
-        # Winner is backends[3] == groq.
+        served = ServedCall(
+            provider="groq",
+            model="llama-3.1-8b-instant",
+            attempts=(
+                self._attempt(0, "nvidia", "nvidia/llama", "RateLimitError"),
+                self._attempt(1, "anthropic", "claude-sonnet-4-6", "AuthenticationError"),
+                self._attempt(2, "deepseek", "deepseek-chat", "BackendTimeoutError"),
+                self._attempt(3, "groq", "llama-3.1-8b-instant", None),
+            ),
+        )
+        result = _compute_fallback_fields(cast("object", None), served)  # type: ignore[arg-type]
         assert result["tier_model_chosen"] == "llama-3.1-8b-instant"
         assert result["tier_provider_used"] == "groq"
         assert result["tier_fallback_count"] == 3
@@ -390,33 +371,18 @@ class TestComputeFallbackFieldsHelper:
 
     def test_helper_output_passes_turnlog_validators(self) -> None:
         """End-to-end: helper output is directly accepted by TurnLog construction."""
-        from persona.backends.multi_model import AttemptRecord
         from persona_runtime.loop import _compute_fallback_fields
 
-        class _FakeChild:
-            def __init__(self, provider: str, model: str) -> None:
-                self.provider_name = provider
-                self.model_name = model
-
-        class _FakeWrapper:
-            provider_name = "nvidia"
-            model_name = "nvidia/llama"
-            backends = [
-                _FakeChild("nvidia", "nvidia/llama"),
-                _FakeChild("anthropic", "claude-sonnet-4-6"),
-            ]
-            last_attempts = [
-                AttemptRecord(
-                    provider="nvidia",
-                    model="nvidia/llama",
-                    last_error_class="RateLimitError",
-                    last_error_status_code=429,
-                    retried_same_model=True,
-                ),
-            ]
-
-        fields = _compute_fallback_fields(cast("object", _FakeWrapper()))  # type: ignore[arg-type]
-        # Must accept verbatim — invariants hold by construction.
+        served = ServedCall(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            attempts=(
+                self._attempt(0, "nvidia", "nvidia/llama", "RateLimitError"),
+                self._attempt(1, "anthropic", "claude-sonnet-4-6", None),
+            ),
+        )
+        fields = _compute_fallback_fields(cast("object", None), served)  # type: ignore[arg-type]
+        # Must accept verbatim: the invariants hold by construction.
         log = TurnLog(**_baseline_log_kwargs(), **fields)  # type: ignore[arg-type]
         assert log.fallback_engaged is True
         assert log.tier_fallback_count == 1

@@ -11,6 +11,16 @@ Per-spec entries are added by the close-out phase of each spec.
 
 ## [Unreleased]
 
+### Breaking
+- **persona-core (MIT): `Backend.upsert` takes three new keyword arguments, and a transport
+  must honour them (R9-271).** `supersedes` names each stored version a write replaces, with
+  the version number it was read at and the id replacing it; `requires` and `requires_kinds`
+  name the memories the write was built from. The call lands only if all of that still holds,
+  and otherwise raises `ChainConflictError` or `ForgottenEvidenceError` with nothing written.
+  The two shipped transports do this. **Migration for a custom transport:** accept the three
+  arguments, and before writing, check them the way `persona.stores.guarded.guarded_batch`
+  does (or call it, and write the batch it returns in one operation).
+
 ### Added
 - **Voice runs on Linux arm64 and builds as a linux/arm64 image.** A community edition on a
   Raspberry Pi 5, an Ampere or a Graviton host can now install voice with `uv sync` or
@@ -47,6 +57,15 @@ Per-spec entries are added by the close-out phase of each spec.
   never printed: the line says `withheld` or `malformed` instead.
 
 ### Changed
+- **You are now charged for a failed model attempt that still cost tokens.** When a
+  model returns an empty or garbled reply, the provider still bills us for the tokens
+  it read and wrote, and your persona then asks another model for the answer. Until
+  now you paid only for the answer and we absorbed the failed attempt. You now pay
+  for both, each at the price of the model that made it, and it is added to the same
+  charge as the answer, so it is rounded up once, not twice. An attempt that failed
+  before it used any tokens, such as a refused or timed-out request, still costs
+  nothing. This applies to chat, voice, agentic runs, task steps, persona drafting
+  and background work.
 - **A clone on Linux now installs the CPU build of PyTorch.** `uv sync` used to pull
   PyTorch's CUDA build on Linux, about 2.3 GB of NVIDIA libraries on x86 and ARM
   alike, though production never had a GPU and the api image now has to build on a
@@ -120,6 +139,42 @@ Per-spec entries are added by the close-out phase of each spec.
   with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **Forgetting a conversation's memory now forgets the facts learned from it (R9-304).**
+  Deleting a conversation with "Also forget what ... learned here" removed its episodic
+  memory but left the Memory facts synthesis drew from it, until each was forgotten by
+  hand. Now a fact only that conversation supports is removed, with its links and history,
+  and a fact another conversation also supports stays without that conversation as a
+  source. It happens in the same commit as the delete: if Memory is being reorganised the
+  delete answers 409, the conversation and its memory stay (its attached files may already
+  be gone), and trying again finishes it. A fact still being
+  learned from the conversation when it is forgotten is either removed with the rest or
+  refused. The delete dialog says how many facts would go. Two limits: a fact that stays keeps
+  its wording, which can include what the forgotten conversation added to it; and a fact still
+  being learned from any deleted conversation is now refused, also after a plain delete (the
+  conversation's messages are gone with it, so there was nothing left to learn from).
+- **A turn is billed at the model that answered it, every time.** Each tier's model chain
+  is shared by every conversation on it, and which model answered a call was read back
+  afterwards from that shared chain. When two conversations used the chain at once, one
+  could be billed at the other's model: too little when it fell back to a dearer model,
+  too much the other way. An image message was billed at the first model in the chain
+  even when that model cannot read images and never saw it. A chat turn with tool use
+  priced all of its model calls at the last call's model, so a cheap tool call followed
+  by a dearer answer cost almost twice what it should. Agentic runs, task steps and
+  background work were priced at the chain's first model whenever another one answered.
+  Each call now carries the model that served it, and every model call of a turn is
+  priced at its own model, the way voice already did. A same-model retry no longer
+  counts as a clean first answer when the router measures how fast a model replies.
+- **A forget that lands while a memory is being written now stays forgotten.** A versioned
+  write read its memory, decided, and then wrote the previous version back with its link
+  moved, so a forget that landed in between was undone and the deleted text came back. A
+  forget that renumbered the versions left a gap the history then refused to read. The write
+  now lands only if what it read is still there (R9-271).
+- **A memory summary or a gist written from something you forget during its model call no
+  longer appears.** Both are written by a model call that takes seconds, and a forget inside
+  it could leave a summary of what was forgotten in the prompt, in recall and in the episodic
+  browser, and send a graph candidate built from it. The write now lands only if everything
+  it was built from is still there; otherwise it is dropped and the next background pass
+  rebuilds from what remains.
 - **A persona that a chat channel had in front can be deleted again.** A Telegram,
   Slack or other channel remembers which persona you last talked to there, and
   deleting that persona failed: the database tried to forget the channel's owner

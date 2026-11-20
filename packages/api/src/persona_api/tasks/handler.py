@@ -57,6 +57,7 @@ from persona.tasks import (
     LegBox,
     RecentLegSummary,
     ResumeTrigger,
+    Revived,
     ScheduledFire,
     SpendKind,
     TaskState,
@@ -67,7 +68,12 @@ from persona.tasks import (
     micros_from_cents,
     reset_leg_spend_reporter,
 )
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import (
+    CENTS_ROUND_DECIMALS,
+    PricedRound,
+    least_certain_basis,
+    price_rounds,
+)
 from persona_runtime.legs import (
     CompactingCheckpointWriter,
     LegDisposition,
@@ -87,6 +93,7 @@ from persona_api.tasks.leg_retrieval import LegRetrieval  # noqa: TC001 (a const
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from persona.billing.basis import CostBasis
     from persona.jobs import JobContext, JobRegistry
     from persona.tasks import StuckReport, Task, TaskCheckpoint
     from persona_runtime.agentic.events import RunEvent
@@ -142,9 +149,13 @@ MAX_RECENT_LEG_SUMMARIES = 5
 #: WAITING_USER is the leg stopping on a question only the user can move, whose reply is
 #: refused while paused (D-W1-10). Every other outcome is held until Resume, which
 #: re-enqueues from the head (D-W1-30): CONTINUE's next leg and FAILED's retry would be jobs
-#: the claim consumes, and an approval park would strand the task, because an approval
-#: answered while paused enqueues a leg the claim consumes and Resume only clears a waiting
-#: task's overlay.
+#: the claim consumes. WAITING_APPROVAL was held too because, when this was written, an
+#: approval answered while paused enqueued a leg the claim consumed and Resume only cleared
+#: a waiting task's overlay, which stranded the task. Since R9-239 the resolver holds that
+#: leg instead (``persona_api.tasks.hold``: the decision is carried out and the task moves
+#: to ACTIVE under its pause, where Resume carries it on), so an approval park would no
+#: longer strand here. Keeping it held is unchanged behaviour; moving it into this set is a
+#: separate decision (a held gated leg re-runs on Resume and re-proposes).
 _SETTLED_UNDER_A_PAUSE: Final = frozenset({LegDisposition.COMPLETED, LegDisposition.WAITING_USER})
 
 
@@ -182,9 +193,18 @@ def task_leg_idempotency_key(payload: TaskLegPayload, *, retry: int = 0) -> str:
     appends a checkpoint must re-key or re-enqueue, or the dead-job match is lost. Change the
     shape here and the sweep's prefix together, or a revival silently finds nothing.
     """
-    anchor = "init" if payload.predecessor_seq is None else str(payload.predecessor_seq)
-    base = f"task:{payload.task_id}:after:{anchor}"
+    base = f"task:{payload.task_id}:after:{leg_anchor(payload.predecessor_seq)}"
     return base if retry <= 0 else f"{base}:retry:{retry}"
+
+
+def leg_anchor(seq: int | None) -> str:
+    """The head a leg key is anchored on: ``init`` before the first checkpoint, else the seq.
+
+    One spelling for the three places that must agree on it (R9-173): the key minted here,
+    the revival sweep's dead-job match, and the stuck park's record of the head it parked at
+    (R9-219).
+    """
+    return "init" if seq is None else str(seq)
 
 
 class LegRunnerBuilder(Protocol):
@@ -259,7 +279,9 @@ class _LegCost:
         self._cost_source = cost_source
         self._distillation = distillation
         self._step_cents = 0.0
-        self._basis: str | None = None
+        #: Each priced step's basis, in order. The leg is labelled from all of them
+        #: (D3, :meth:`_steps_basis`), never from the last one alone.
+        self._step_bases: list[CostBasis] = []
         #: What tools reported through the leg spend door, in cents, by kind. Every
         #: kind starts present at zero so the ledger is WRITTEN for each of them: a
         #: column that reads zero because a writer recorded zero is a measurement; one
@@ -282,18 +304,35 @@ class _LegCost:
         self._reported[kind] = self._reported.get(kind, 0.0) + max(cost_cents, 0.0)
 
     async def on_step_usage(self, usage: StepUsage) -> None:
-        cost_cents, basis = compute_turn_cost(
-            provider=usage.provider,
-            model=usage.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            actual_cost_usd=usage.cost_usd,
+        # Priced as one round (exactly compute_turn_cost for one round), so the step's
+        # failed tries that cost tokens are charged at their own model (D-ORCH-11-18-s).
+        cost_cents, basis = price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cost_usd=usage.cost_usd,
+                    provider=usage.provider,
+                    model=usage.model,
+                    failed_tries=usage.failed_tries,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg",
         )
         self._step_cents += cost_cents
-        # Prefer a genuine basis over ``unpriced`` (same-provider legs share one).
-        if basis != "unpriced" or self._basis is None:
-            self._basis = basis
+        self._step_bases.append(basis)
+
+    def _steps_basis(self) -> str | None:
+        """The steps' label: ``None`` when no step ran, else the least certain priced one.
+
+        Since R9-296 each step is priced at the model that served it, so one leg can hold
+        an OpenRouter actual and a static estimate; it is labelled as a chat turn is (D3),
+        ``unpriced`` only when no step was priced.
+        """
+        if not self._step_bases:
+            return None
+        return least_certain_basis(self._step_bases)
 
     def _distillation_cents(self) -> tuple[float, str | None]:
         """The checkpoint distiller's model call, priced like a step (D-W1-44).
@@ -305,15 +344,23 @@ class _LegCost:
         not distil bills exactly what it billed before.
         """
         totals = self._distillation.totals()
-        if not totals.prompt_tokens and not totals.completion_tokens:
+        charged_tries = any(a.reported_tokens for a in totals.failed_tries)
+        if not totals.prompt_tokens and not totals.completion_tokens and not charged_tries:
             return 0.0, None
-        return compute_turn_cost(
-            provider=totals.provider,
-            model=totals.model,
-            prompt_tokens=totals.prompt_tokens,
-            completion_tokens=totals.completion_tokens,
-            actual_cost_usd=totals.cost_usd,
+        # One round, its failed tries charged at their own model (D-ORCH-11-18-s).
+        return price_rounds(
+            [
+                PricedRound(
+                    prompt_tokens=totals.prompt_tokens,
+                    completion_tokens=totals.completion_tokens,
+                    cost_usd=totals.cost_usd,
+                    provider=totals.provider,
+                    model=totals.model,
+                    failed_tries=totals.failed_tries,
+                )
+            ],
             source=self._cost_source,
+            surface="task_leg_distillation",
         )
 
     def result(self) -> tuple[float, str | None]:
@@ -325,11 +372,15 @@ class _LegCost:
         the steps have none or came back unpriced.
         """
         distilled_cents, distilled_basis = self._distillation_cents()
-        steps_priced = self._basis is not None and self._basis != "unpriced"
-        basis: str | None = self._basis
+        steps_basis = self._steps_basis()
+        steps_priced = steps_basis is not None and steps_basis != "unpriced"
+        basis: str | None = steps_basis
         if not steps_priced and distilled_basis is not None:
             basis = distilled_basis
-        return self._step_cents + distilled_cents, basis
+        # Rounded once, to the micro-cents every part is priced in: a float sum of
+        # steps such as 0.1 + 2.7 + 0.2 lands on 3.0000000000000004, and the charge ceils
+        # the printed value, so an unrounded total bills an extra credit.
+        return round(self._step_cents + distilled_cents, CENTS_ROUND_DECIMALS), basis
 
     def ledger_spend(
         self,
@@ -869,7 +920,20 @@ class TaskLegHandler:
             except CreditsExhaustedError:
                 _log.info("task leg skipped (no credits)", task_id=task.id, state=task.state.value)
                 return
-        # The job firing IS the trigger arriving — resume a waiting task (one resume point).
+        # R9-239 (part 2): a Revived leg is only ever queued for a task that is not waiting
+        # (Resume on a paused live task, Raise cap, the stranded sweep). Finding the task
+        # waiting on the user means it parked on a question after the enqueue: a pause
+        # tripped the leg, Resume was pressed after its checkpoint landed, and the tripped
+        # step then asked. Resuming here would run the next leg without the answer, so the
+        # job is consumed and the task keeps waiting for the reply, which carries it on.
+        if (
+            task.state == TaskState.WAITING
+            and task.wait_kind is WaitKind.ON_USER
+            and isinstance(payload.trigger, Revived)
+        ):
+            _log.info("task leg skipped (stale resume; waiting on the user)", task_id=task.id)
+            return
+        # The job firing IS the trigger arriving: resume a waiting task (one resume point).
         if task.state == TaskState.WAITING:
             task = self._tasks.resume(owner, payload.task_id, now=now)
         # Finding O: the contract's deadline and leg cap, checked at the door for a leg the
@@ -1328,12 +1392,19 @@ class TaskLegHandler:
     def _park_if_bound(self, owner: str, task: Task, *, now: datetime) -> bool:
         """Park the task if a stated contract bound is reached; return whether it was (finding O).
 
-        ``legs_run`` is the head sequence plus one: the checkpoint chain is the durable count
-        of legs that landed. Goes through the continuation's bound park (the approval park's
-        shape); with no continuation wired the bare state change is the floor, as it is for
-        the over-budget checkpoint.
+        ``legs_run`` is the number of checkpoints a LEG wrote (R9-220). The head sequence is
+        not it: the chain also holds the records written between legs (an obstacle, an
+        answered approval, a saved reply), and counting those parked a task that asked for
+        approval at its cap early, for reasons unrelated to the work it did. Read only when
+        a leg cap is set, so a task with none costs no query. Goes through the
+        continuation's bound park (the approval park's shape); with no continuation wired
+        the bare state change is the floor, as it is for the over-budget checkpoint.
         """
-        legs_run = 0 if task.head_checkpoint_seq is None else task.head_checkpoint_seq + 1
+        legs_run = (
+            self._checkpoints.count_legs(owner, task.id)
+            if task.contract.bounds.max_legs is not None
+            else 0
+        )
         reason = bound_reached(task.contract.bounds, legs_run=legs_run, now=now)
         if reason is None:
             return False

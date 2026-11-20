@@ -46,6 +46,8 @@ from persona.stores.versioning import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from persona.audit import AuditLogger, StoreKind
     from persona.stores.backend import Backend
 
@@ -109,6 +111,9 @@ class TypedStore:
     STORE_KIND: ClassVar[str] = ""  # overridden by subclasses
     SUPPORTS_VERSIONING: ClassVar[bool] = True
     _POLICY: ClassVar[PolicyTable] = {}
+    #: Where the evidence a write of this store cites can be (R9-271). Empty for a store whose
+    #: memories are not built from other memories, which then cannot be written citing any.
+    _EVIDENCE_KINDS: ClassVar[tuple[str, ...]] = ()
 
     def __init__(
         self,
@@ -132,9 +137,20 @@ class TypedStore:
         reason: str | None = None,
         force: bool = False,
         retry_on_conflict: bool = True,
+        requires: Sequence[str] = (),
     ) -> None:
+        """Write ``chunks``, as new versions of their chains where this store keeps versions.
+
+        ``requires`` names the memories these chunks were built from. The write lands only if
+        every one of them is still there when it does, and otherwise raises
+        :class:`persona.errors.ForgottenEvidenceError` with nothing written (R9-271): a summary
+        built during a model call must not land after a forget of what it summarises.
+        """
         if not chunks:
             return
+        if requires and not self._EVIDENCE_KINDS:
+            msg = f"the {self.STORE_KIND} store cites no evidence, so a write cannot require any"
+            raise ValueError(msg)
 
         evaluate_write_policy(
             policy=self._POLICY,
@@ -154,6 +170,7 @@ class TypedStore:
             written_by=written_by,
             reason=reason,
             retry_on_conflict=retry_on_conflict,
+            requires=requires,
         )
         if not prepared:
             return  # what this asked for had already landed, so nothing happened to record
@@ -195,13 +212,17 @@ class TypedStore:
         written_by: str | None,
         reason: str | None,
         retry_on_conflict: bool = True,
+        requires: Sequence[str] = (),
     ) -> list[PersonaChunk]:
         """Append ``chunks``, and if another writer won the chain, append on top of what won.
 
         A chain conflict means nothing landed (R9-205). So the loser reads the chain again and
-        goes round, a bounded number of times. Returns what was written, which is empty when
-        the winner already wrote everything this asked for: appending it again would put an
-        identical version in the history for two callers who wanted the same thing.
+        goes round, a bounded number of times. A forget that deleted the chain in between is a
+        conflict too (R9-271), and the next round finds the chain empty, so the chunks land as a
+        chain that starts again rather than on top of what was forgotten. Returns what was
+        written, which is empty when the winner already wrote everything this asked for:
+        appending it again would put an identical version in the history for two callers who
+        wanted the same thing.
 
         The policy is not re-run. It decided on the chunks and the caller, and neither changed.
         A decision made from the chain itself is the caller's to re-make, which is what
@@ -217,6 +238,7 @@ class TypedStore:
                     source=source,
                     written_by=written_by,
                     reason=reason,
+                    requires=requires,
                 )
             except ChainConflictError:
                 if not retry_on_conflict or attempt == _CHAIN_APPEND_ATTEMPTS:
@@ -248,6 +270,7 @@ class TypedStore:
         source: WriteSource,
         written_by: str | None,
         reason: str | None,
+        requires: Sequence[str] = (),
     ) -> list[PersonaChunk]:
         """Commit ``chunks`` as new versions, in one transport call, and return what was written.
 
@@ -256,6 +279,7 @@ class TypedStore:
         the caller has already run the policy, and emits its own audit event. ``existing`` is
         passed in because ``rollback`` already holds its chain (Spec K13, D-K13-13: one read).
         """
+        on_disk = {c.id for c in existing}
         prepared: list[PersonaChunk] = []
         supersede_updates: list[PersonaChunk] = []
         for chunk in chunks:
@@ -279,8 +303,7 @@ class TypedStore:
             else:
                 prepared.append(chunk)
 
-        # ONE upsert, deduplicated by id, supersede links before new heads
-        # (Spec K13, D-K13-1 and D-K13-2).
+        # ONE transport call (Spec K13, D-K13-1 and D-K13-2).
         #
         # This was two backend calls, the links and then the heads, with nothing around them.
         # A process that died between them left the prior head pointing at a chunk that was
@@ -291,25 +314,35 @@ class TypedStore:
         # two calls tore 4 of 8 kills, one call tore 0 of 8 (chromadb 1.5.9). One call is one
         # transaction on Postgres, and one all or nothing operation on Chroma.
         #
-        # The dedupe is not tidiness, it is the other half of the fix. When one batch carries
-        # two updates to the SAME logical chain, the chunk that is version N+1 for the first
-        # update is the prior head of the second, so its id appears in BOTH lists: unlinked in
-        # ``prepared``, linked in ``supersede_updates``. The old order wrote the link and then
-        # overwrote it with the unlinked copy, leaving two heads and a chain that raised on
-        # read, with no crash involved (R9-206). Ordering alone cannot fix that either, because
-        # the transports disagree about duplicates: Postgres silently keeps the last row of an
-        # executemany, Chroma raises DuplicateIDError and refuses the whole call. So the
-        # duplicate never reaches a transport, and the LINKED copy is the one that survives.
+        # A prior head already on disk is not written back here: the transport is told which
+        # version it was read at and moves its link only if it still is (R9-271). Writing the
+        # whole row back put a version a forget had just deleted back on disk, text and all,
+        # and wrote a stale version number over one the forget had just renumbered.
         #
-        # Links before heads is for the partial unique index on current heads (R9-205). It is
-        # checked per statement, so a batch that wrote a new head before the old one lost its
-        # NULL would trip it against its own chain.
-        superseded_ids = {c.id for c in supersede_updates}
-        batch = [*supersede_updates, *(c for c in prepared if c.id not in superseded_ids)]
+        # A prior head that is new in this same batch is different. When one batch carries two
+        # updates to the SAME logical chain, the chunk that is version N+1 for the first update
+        # is the prior head of the second, so it is both a new row and a linked one, and the
+        # LINKED copy is the one that must land (R9-206). The transports disagree about
+        # duplicates, Postgres keeping the last row of an executemany and Chroma refusing the
+        # whole call, so the duplicate never reaches a transport.
+        linked_in_batch = {c.id: c for c in supersede_updates if c.id not in on_disk}
+        rows = [linked_in_batch.get(c.id, c) for c in prepared]
+        moved: dict[str, tuple[int, str]] = {
+            c.id: (c.provenance.version, c.provenance.superseded_by)
+            for c in supersede_updates
+            if c.id in on_disk and c.provenance is not None and c.provenance.superseded_by
+        }
+        guard: dict[str, Any] = {}
+        if moved:
+            guard["supersedes"] = moved
+        if requires:
+            guard["requires"] = list(requires)
+            guard["requires_kinds"] = list(self._EVIDENCE_KINDS)
         self._backend.upsert(
             persona_id=persona_id,
             store_kind=self.STORE_KIND,
-            chunks=batch,
+            chunks=rows,
+            **guard,
         )
         return prepared
 
@@ -626,6 +659,8 @@ class TypedStore:
             persona_id=persona_id,
         )
 
+        # The check above ran once, before a forget could land. The write itself requires the
+        # same evidence, so a retry after a lost race checks it again (R9-271, PR #39 review).
         prepared = self._append_with_retry(
             persona_id,
             [new_head],
@@ -633,6 +668,7 @@ class TypedStore:
             source=source,
             written_by=written_by,
             reason=recorded_reason,
+            requires=self._rollback_requires(target),
         )
         if not prepared:
             return  # another writer already made this text current, so nothing happened
@@ -650,6 +686,15 @@ class TypedStore:
 
     def _check_rollback_target(self, persona_id: str, target: PersonaChunk) -> None:
         """A store's own reason to refuse this rollback target. Nothing, by default."""
+
+    def _rollback_requires(self, target: PersonaChunk) -> tuple[str, ...]:
+        """What a rollback to ``target`` must still find when it lands. Nothing, by default.
+
+        A store whose memories are built from other memories names the target's evidence here,
+        and the write then lands only if all of it is still there (R9-271).
+        """
+        _ = target
+        return ()
 
     # ----- diagnose / repair (Spec K13, T3) ---------------------------------
 

@@ -255,7 +255,8 @@ class PlanScopedChatBackend:
         """The current owner's concrete backend for this tier, resolved once.
 
         One plan read: callers that need several of its attributes (the initiative judge
-        reads the chain's head and attempt ledger) hold the result instead of reading
+        reads the chain's head; the served model rides each call's own result, R9-223)
+        hold the result instead of reading
         this wrapper's properties, each of which resolves again. Raises like ``chat``
         when the plan has no such tier.
         """

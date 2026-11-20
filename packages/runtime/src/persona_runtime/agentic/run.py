@@ -18,13 +18,22 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import uuid4
 
+from persona.backends.types import BackendAttempt  # noqa: TC002 (Pydantic needs it at runtime)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from persona_runtime.agentic.step import Step  # noqa: TC001 — Pydantic needs runtime ref
 
-__all__ = ["CancelToken", "Run", "RunStatus", "StepUsage"]
+__all__ = ["CancelToken", "Run", "RunStatus", "StepUsage", "UsageCall"]
+
+#: Which of a run's model calls a :class:`StepUsage` reports (R9-299). ``step`` is the
+#: step's own call; ``compaction`` is the step-history summary the loop makes when the
+#: context nears the window; ``summary`` is the best-effort summary that ends a run at
+#: the step cap or salvages a cancelled one. All three are paid provider calls, priced
+#: and charged the same way (D-M3-1).
+UsageCall = Literal["step", "compaction", "summary"]
 
 
 class RunStatus(StrEnum):
@@ -135,6 +144,15 @@ class StepUsage(BaseModel):
         completion_tokens: Completion tokens the step's model call emitted.
         cost_usd: Response-side actual cost in USD (OpenRouter usage.cost), or
             ``None`` — the caller then prices from the token counts.
+        failed_tries: The step's failed tries that reported tokens (an empty or
+            degenerate completion before a fallback answered). The pricer charges
+            each at the model that made it (D-ORCH-11-18-s).
+        call: Which model call this is (R9-299): the step's own (``step``), or one of
+            the two calls the loop makes between or after steps, the step-history
+            ``compaction`` summary or the best-effort ``summary``. Those two belong
+            to no step of their own, so ``step`` is the index of the step they
+            follow. Callers price every kind identically; the label is for the log
+            and the tests.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -145,6 +163,8 @@ class StepUsage(BaseModel):
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     cost_usd: float | None = Field(default=None, ge=0.0)
+    failed_tries: tuple[BackendAttempt, ...] = ()
+    call: UsageCall = "step"
 
 
 class CancelToken:

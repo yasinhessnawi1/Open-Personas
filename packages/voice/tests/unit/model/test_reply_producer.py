@@ -1026,6 +1026,7 @@ class _RecordingTurnMeter:
         cost_usd: float | None,
         provider: str,
         model: str,
+        failed_tries: tuple[object, ...] = (),
     ) -> None:
         self.llm.append(
             {

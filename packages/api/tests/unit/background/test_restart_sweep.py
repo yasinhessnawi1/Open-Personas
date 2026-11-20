@@ -205,3 +205,31 @@ def test_a_parked_run_that_belongs_to_a_task_survives_the_sweep(engine: Engine) 
     # its loop simply died. Only the parked shape is answerable.
     assert rows["r_running_in_a_task"]["status"] == "error"
     assert counts["runs"] == 2
+
+
+def test_the_boot_sweep_lifts_the_statement_timeout_before_its_scans() -> None:
+    """R9-313: both UPDATEs can scan their whole table at boot. A cancel here would fail the
+    lifespan and crash-loop the api, so the sweep's own transaction has no statement timeout."""
+    from contextlib import contextmanager  # noqa: PLC0415
+
+    sql: list[str] = []
+
+    class _Result:
+        rowcount = 0
+
+    class _Conn:
+        dialect = type("D", (), {"name": "postgresql"})()
+
+        def execute(self, statement: object, _params: object = None) -> _Result:
+            sql.append(str(statement))
+            return _Result()
+
+    class _Engine:
+        @contextmanager
+        def begin(self):  # type: ignore[no-untyped-def]  # noqa: ANN202
+            yield _Conn()
+
+    assert reconcile_in_flight_on_startup(engine=_Engine()) == {"messages": 0, "runs": 0}  # type: ignore[arg-type]
+    assert sql[0] == "SELECT set_config('statement_timeout', '0', true)"
+    assert sql[1].startswith("UPDATE messages")
+    assert sql[2].startswith("UPDATE runs")

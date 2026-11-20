@@ -35,11 +35,12 @@ from persona.recall.core_memory import (
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.core_memory import CORE_MEMORY_KIND, CoreMemoryStore, core_logical_id
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.summarizer import StubSummarizer
 from persona.stores.versioning import ChainDefect, diagnose_chain, validate_chain
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
 _NOW = datetime(2026, 11, 6, 9, 0, tzinfo=UTC)
 _PERSONA = "p1"
@@ -62,10 +63,30 @@ class _Backend:
     def _of(self, persona_id: str, store_kind: str) -> list[PersonaChunk]:
         return [c for p, k, c in self.rows.values() if p == persona_id and k == store_kind]
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
         if store_kind == CORE_MEMORY_KIND and self.before_next_core_write is not None:
             hook, self.before_next_core_write = self.before_next_core_write, None
             hook()
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for p, k, c in self.rows.values() if p == persona_id and k == kind and c.id in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         for chunk in chunks:
             self.rows[chunk.id] = (persona_id, store_kind, chunk)
 

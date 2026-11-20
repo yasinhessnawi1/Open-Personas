@@ -40,9 +40,9 @@ from persona_api.db.engine import rls_connection
 from persona_api.db.models import jobs, jobs_archive
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine, RowMapping
+    from sqlalchemy import Connection, Engine, RowMapping
 
-__all__ = ["JobQueue", "JobRecord"]
+__all__ = ["JobQueue", "JobRecord", "enqueue_on"]
 
 
 class JobRecord(BaseModel):
@@ -179,6 +179,65 @@ def _utcnow(now: datetime | None) -> datetime:
     return now if now is not None else datetime.now(UTC)
 
 
+def _enqueue_stmt(
+    *,
+    type: str,  # noqa: A002 - mirrors the durable ``jobs.type`` column name.
+    owner_id: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+    priority: int,
+    scheduled_at: datetime | None,
+    max_attempts: int,
+) -> Any:  # noqa: ANN401 - a SQLAlchemy insert
+    """``INSERT ... ON CONFLICT (owner_id, idempotency_key) DO NOTHING RETURNING *``."""
+    values: dict[str, Any] = {
+        "type": type,
+        "owner_id": owner_id,
+        "payload": payload,
+        "idempotency_key": idempotency_key,
+        "priority": priority,
+        "max_attempts": max_attempts,
+    }
+    if scheduled_at is not None:
+        values["scheduled_at"] = scheduled_at
+    return (
+        pg_insert(jobs)
+        .values(**values)
+        .on_conflict_do_nothing(index_elements=["owner_id", "idempotency_key"])
+        .returning(jobs)
+    )
+
+
+def enqueue_on(
+    conn: Connection,
+    *,
+    type: str,  # noqa: A002 - mirrors the durable ``jobs.type`` column name.
+    owner_id: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+    priority: int = 0,
+    scheduled_at: datetime | None = None,
+    max_attempts: int = 5,
+) -> JobRecord | None:
+    """:meth:`JobQueue.enqueue` in the caller's transaction, so the job commits with its cause.
+
+    For a job that must exist exactly when another write does (R9-311: a conversation's row
+    delete and the job that forgets its memory). ``conn`` must already be in the owner's row
+    level security scope (the request's RLS engine is), so the jobs-table ``WITH CHECK`` holds.
+    """
+    stmt = _enqueue_stmt(
+        type=type,
+        owner_id=owner_id,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        priority=priority,
+        scheduled_at=scheduled_at,
+        max_attempts=max_attempts,
+    )
+    row = conn.execute(stmt).mappings().first()
+    return _record(row) if row is not None else None
+
+
 class JobQueue:
     """Durable queue operations over the ``jobs`` table.
 
@@ -208,21 +267,14 @@ class JobQueue:
         (the duplicate enqueue is silently absorbed). Runs in the owner's RLS
         scope so the jobs-table ``WITH CHECK`` holds.
         """
-        values: dict[str, Any] = {
-            "type": type,
-            "owner_id": owner_id,
-            "payload": payload,
-            "idempotency_key": idempotency_key,
-            "priority": priority,
-            "max_attempts": max_attempts,
-        }
-        if scheduled_at is not None:
-            values["scheduled_at"] = scheduled_at
-        stmt = (
-            pg_insert(jobs)
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=["owner_id", "idempotency_key"])
-            .returning(jobs)
+        stmt = _enqueue_stmt(
+            type=type,
+            owner_id=owner_id,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            priority=priority,
+            scheduled_at=scheduled_at,
+            max_attempts=max_attempts,
         )
         with rls_connection(self._engine, owner_id) as conn:
             row = conn.execute(stmt).mappings().first()
@@ -442,6 +494,50 @@ class JobQueue:
         )
         with rls_connection(self._engine, owner_id) as conn:
             return int(conn.execute(hot).scalar_one()) + int(conn.execute(cold).scalar_one())
+
+    def retire_queued(
+        self, *, owner_id: str, job_type: str, task_id: str, trigger_kind: str, reason: str
+    ) -> int:
+        """Retire this task's still-QUEUED jobs of one trigger kind; return how many (R9-239).
+
+        A retired job is ``succeeded`` without running, the state a job the claim consumes
+        ends in, so :meth:`count_spent_attempts` counts it and a later enqueue at its key is
+        suffixed past it rather than absorbed by it. ``WHERE state = 'queued'`` is the whole
+        guard: a job a worker has already claimed is left to its own handler.
+        """
+        stmt = (
+            update(jobs)
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.type == job_type,
+                jobs.c.state == JobState.QUEUED.value,
+                jobs.c.payload["task_id"].as_string() == task_id,
+                jobs.c.payload[("trigger", "kind")].as_string() == trigger_kind,
+            )
+            .values(state=JobState.SUCCEEDED.value, last_error=reason)
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            return int(conn.execute(stmt).rowcount or 0)
+
+    def count_live_attempts(self, *, owner_id: str, idempotency_key: str, trigger_kind: str) -> int:
+        """Claimed or running jobs of one trigger kind at ``idempotency_key`` or its successors.
+
+        The companion of :meth:`retire_queued` for the job a worker claimed a moment ago: it
+        cannot be retired, and an enqueue at its key would be absorbed by it.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(jobs)
+            .where(
+                jobs.c.owner_id == owner_id,
+                jobs.c.state.in_((JobState.CLAIMED.value, JobState.RUNNING.value)),
+                (jobs.c.idempotency_key == idempotency_key)
+                | jobs.c.idempotency_key.like(f"{idempotency_key}:retry:%"),
+                jobs.c.payload[("trigger", "kind")].as_string() == trigger_kind,
+            )
+        )
+        with rls_connection(self._engine, owner_id) as conn:
+            return int(conn.execute(stmt).scalar_one())
 
     def latest(
         self, *, owner_id: str, job_type: str, idempotency_key_prefix: str

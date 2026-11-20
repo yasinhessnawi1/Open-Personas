@@ -71,6 +71,7 @@ __all__ = [
     "credit_transactions",
     "credits",
     "day_spend",
+    "forgotten_conversations",
     "free_model_daily_usage",
     "graph_consolidation_markers",
     "graph_edges",
@@ -98,6 +99,7 @@ __all__ = [
     "turn_logs",
     "user_mcp_servers",
     "users",
+    "wellbeing_disclosures",
 ]
 
 # bge-small-en-v1.5 (architecture §4.3). The column is hard-coded to this dim;
@@ -1635,6 +1637,60 @@ synthesis_markers = Table(
 )
 
 
+# R9-253: the durable per-interaction disclosure fact the initiative wellbeing gate reads. The
+# gate once derived "this interaction carried a disclosure" from the tagged nodes that exist
+# now, so forgetting the tagged node un-gated the untagged nodes learned beside it. A row is
+# written whenever synthesis or a direct write sees a wellbeing disclosure, and it is never
+# cleared by a node or conversation deletion (the nodes learned from a conversation outlive
+# it). It holds ids and a time only, never the text or the category (D-ORCH-11-18-m). It goes
+# with its persona (the persona erasure's row step cascades) or its account. Created with its
+# RLS ENTIRELY in its own migration (065, the 015 template); deliberately NOT in
+# ``db/rls._POLICIES``. Cloud and managed community only, like ``synthesis_markers``.
+wellbeing_disclosures = Table(
+    "wellbeing_disclosures",
+    metadata,
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    # A conversation, run or task id: the gate is kind-agnostic, so the kind is not kept.
+    Column("interaction_id", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # D-ORCH-11-18-u (migration 066): the user's "fine to bring this up" release. Every
+    # recorded disclosure bumps ``disclosure_seq``; a release covers the disclosures recorded
+    # so far (``released_seq``), so a later one holds the conversation back again. A counter,
+    # not a clock, decides "later": the record and the release lock this same row.
+    Column("disclosure_seq", BigInteger, nullable=False, server_default=text("1")),
+    Column("released_seq", BigInteger, nullable=True),
+    Column("released_at", DateTime(timezone=True), nullable=True),
+    PrimaryKeyConstraint("owner_id", "interaction_id", name="pk_wellbeing_disclosures"),
+    Index("idx_wellbeing_disclosures_persona", "persona_id"),
+    CheckConstraint(
+        "released_seq IS NULL OR released_seq <= disclosure_seq",
+        name="ck_wellbeing_disclosures_release_seq",
+    ),
+    CheckConstraint(
+        "(released_seq IS NULL) = (released_at IS NULL)",
+        name="ck_wellbeing_disclosures_release_pair",
+    ),
+)
+
+
+# R9-311 (migration 068): a conversation whose memory was forgotten. Written in the
+# transaction that deletes the conversation's row with ``forget_memory``; read by the memory
+# owner guard, which refuses a memory row stamped with a forgotten conversation, so a write that
+# was still in flight cannot bring the memory back after the forget. Ids and a time only. It
+# goes with its persona (FK cascade at the persona erasure's row step) or its account.
+forgotten_conversations = Table(
+    "forgotten_conversations",
+    metadata,
+    Column("conversation_id", Text, primary_key=True),
+    Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("persona_id", Text, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False),
+    Column("forgotten_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("idx_forgotten_conversations_owner", "owner_id"),
+    Index("idx_forgotten_conversations_persona", "persona_id"),
+)
+
+
 # Spec V9 (V9-D-5) — the durable call-record envelope (migration 021). A voice
 # call's lifecycle metadata — persisted NOWHERE server-side before V9 (it lived
 # only in the in-memory ``SessionStateMachine`` + client storage). The voice
@@ -1768,7 +1824,8 @@ task_checkpoints = Table(
     Column("owner_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("checkpoint_seq", Integer, nullable=False),
     # The frozen TaskCheckpoint (conclusions/decisions/lessons/plan/next_step/open
-    # questions/pointers/cursor) — read whole at reconstruction, never sub-field-queried.
+    # questions/pointers/cursor), read whole at reconstruction. The one sub-field query
+    # is ``leg_id``, counted by ``CheckpointStore.count_legs`` for the leg cap (R9-220).
     Column("checkpoint_json", _json(), nullable=False),
     Column("content_hash", Text, nullable=False),
     Column("schema_version", Text, nullable=False, server_default=text("'1.0'")),

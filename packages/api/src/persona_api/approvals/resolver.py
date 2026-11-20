@@ -48,11 +48,14 @@ from persona.approvals import (
 )
 from persona.logging import get_logger
 from persona.tasks import (
+    CheckpointKind,
     TaskCheckpoint,
     UserReply,
+    checkpoint_id,
     merge_artifact_pointers,
     pointers_from_artifacts,
 )
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -65,6 +68,7 @@ if TYPE_CHECKING:
 
     from persona_api.approvals.store import ApprovalStore
     from persona_api.tasks.continuation import TaskContinuation
+    from persona_api.tasks.hold import TaskHold
     from persona_api.tasks.store import CheckpointStore, TaskStore
 
 __all__ = [
@@ -184,7 +188,9 @@ class ApprovalResolver:
         interpreter: ReplyInterpreter,
         executor: ActionExecutor,
         notifier: ApprovalNotifier,
+        hold: TaskHold | None = None,
     ) -> None:
+        self._hold = hold
         self._approvals = approvals
         self._tasks = tasks
         self._checkpoints = checkpoints
@@ -367,8 +373,15 @@ class ApprovalResolver:
             _log.info("execute skipped (lost approve CAS)", proposal_id=proposal.proposal_id)
             return ResolutionOutcome(outcome=DecisionType.APPROVE, executed=False, note="race_lost")
 
-        # Verbatim replay — the EXACT recorded payload, never re-derived by the model.
-        result = await self._executor.execute(proposal.tool_name, exec_arguments)
+        # Verbatim replay, the EXACT recorded payload, never re-derived by the model.
+        # R9-253: every proposal is one task leg's, and the replay runs off that leg with
+        # nothing bound, so it is bound to the task here: an approved direct write then names
+        # the task and records its disclosure fact, as it would have inside the leg.
+        interaction_token = bind_interaction("task", proposal.task_id)
+        try:
+            result = await self._executor.execute(proposal.tool_name, exec_arguments)
+        finally:
+            reset_interaction(interaction_token)
         headline = "Approved with your edits" if carries_edit else "Approved"
         self._write_resolution_checkpoint(
             owner_id,
@@ -387,17 +400,19 @@ class ApprovalResolver:
             new=ProposalStatus.CONSUMED,
             now=now,
         )
-        self._continuation.resume(owner_id, proposal.task_id, UserReply(reply=reply), now=now)
+        resumed, note = self._resume_or_hold(owner_id, proposal.task_id, reply, now)
         _log.info(
-            "approved action executed + resumed",
+            "approved action executed",
             proposal_id=proposal.proposal_id,
             task_id=proposal.task_id,
+            resumed=resumed,
         )
         return ResolutionOutcome(
             outcome=DecisionType.APPROVE,
             executed=True,
             executed_arguments=dict(exec_arguments),
-            resumed=True,
+            resumed=resumed,
+            note=note,
         )
 
     def _deny_and_resume(
@@ -419,8 +434,44 @@ class ApprovalResolver:
             conclusion=f"User denied: {proposal.description}. Adapt the plan or report.",
             now=now,
         )
-        self._continuation.resume(owner_id, proposal.task_id, UserReply(reply=reply), now=now)
-        return ResolutionOutcome(outcome=DecisionType.DENY, resumed=True)
+        resumed, note = self._resume_or_hold(owner_id, proposal.task_id, reply, now)
+        return ResolutionOutcome(outcome=DecisionType.DENY, resumed=resumed, note=note)
+
+    def _resume_or_hold(
+        self, owner_id: str, task_id: str, reply: str, now: datetime
+    ) -> tuple[bool, str]:
+        """Queue the next leg, or hold it when the task cannot run (R9-239 part 1).
+
+        The decision has been carried out and folded into the head by now. A paused task's
+        leg would be consumed at the claim, and a task that parked on this approval and was
+        paused afterwards would stay WAITING with nothing left to move it; at the cap the leg
+        would run at zero budget. So the task is held ACTIVE under its pause instead, where
+        Resume or Raise cap carries it on from this decision (D-ORCH-11-18-d (2)). Returns
+        whether a leg was queued and the note (a code the web renders) the user is shown.
+
+        The hold decides again after it moves the task (PR 34 review): a Resume or Raise cap
+        that landed after the read below leaves the task carried on, which is answered as an
+        ordinary resumed approval. The action has already run, so a hold that fails is logged
+        and answered with ``hold_failed`` rather than raised: the inbox must not show an
+        error for a decision that was carried out.
+        """
+        if self._hold is not None:
+            from persona_api.tasks.hold import APPROVAL_HOLD_FAILED, HoldOutcome, held_approval_note
+
+            reason = self._hold.reason(owner_id, self._tasks.get(owner_id, task_id))
+            if reason is not None:
+                try:
+                    where = self._hold.hold(owner_id, task_id, reason, now=now)
+                except Exception:  # noqa: BLE001 - the decision ran; answer, never a 500
+                    _log.exception("approval carried out but the hold failed", task_id=task_id)
+                    return False, APPROVAL_HOLD_FAILED
+                if where is HoldOutcome.CARRIED_ON:
+                    return True, ""
+                if where is HoldOutcome.FINISHED:
+                    return False, ""
+                return False, held_approval_note(reason)
+        self._continuation.resume(owner_id, task_id, UserReply(reply=reply), now=now)
+        return True, ""
 
     def _write_resolution_checkpoint(
         self,
@@ -437,7 +488,7 @@ class ApprovalResolver:
         seq = task.next_checkpoint_seq
         checkpoint = TaskCheckpoint(
             task_id=task_id,
-            leg_id=f"{task_id}:approval:{seq}",
+            leg_id=checkpoint_id(task_id, CheckpointKind.APPROVAL, seq),
             checkpoint_seq=seq,
             progress_conclusions=(
                 *(prior.progress_conclusions if prior is not None else ()),

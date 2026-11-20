@@ -231,3 +231,60 @@ def test_an_openai_avatar_is_priced_from_its_vendor_row_too() -> None:
     assert charge.cost_cents == pytest.approx(4.2), "the avatar was not priced from the registry"
     assert charge.cost_basis == "estimate_static"
     assert ledger.deducts[-1]["amount"] == 5, "a 4.2 cent avatar still billed the floor"
+
+
+# --- R9-198: the avatar charge also follows the images returned, not a fixed one ----------
+
+
+def _bill(result: GenerationResult) -> tuple[Any, _Ledger]:
+    from persona_api.services.avatar_billing import bill_avatar_owner
+
+    ledger = _Ledger()
+    charge = bill_avatar_owner(
+        credits_policy=ledger,  # type: ignore[arg-type]
+        rls_engine=object(),  # type: ignore[arg-type]
+        cost_source=None,
+        image_credit_floor=1,
+        owner_id="u1",
+        persona_id="p1",
+        result=result,
+        billing_key="avatar:p1:count",
+    )
+    return charge, ledger
+
+
+def _openai_avatar(*, images: int) -> GenerationResult:
+    base = _generation(cost_usd=None).model_copy(
+        update={"provider": "openai", "model": "gpt-image-1", "prompt_tokens": 0}
+    )
+    return base.model_copy(update={"images": [base.images[0]] * images, "completion_tokens": 0})
+
+
+def test_an_avatar_is_charged_one_image_today() -> None:
+    """The avatar path asks for exactly one image, so the fix leaves its price unchanged."""
+    assert imagegen_service._AVATAR_OPTIONS.count == 1  # noqa: SLF001 (the invariant itself)
+    charge, ledger = _bill(_openai_avatar(images=1))
+    assert charge is not None
+    assert charge.cost_cents == pytest.approx(4.2)
+    assert ledger.deducts[-1]["amount"] == 5
+
+
+def test_an_avatar_call_that_returned_two_images_costs_twice_one() -> None:
+    """Should a backend ever send two, the provider billed us for two: the charge follows
+    what came back, the same rule as the request path, so the two seams cannot drift."""
+    one, _ = _bill(_openai_avatar(images=1))
+    two, ledger = _bill(_openai_avatar(images=2))
+    assert one is not None
+    assert two is not None
+    assert two.cost_cents == pytest.approx(2 * one.cost_cents), "two avatar images billed as one"
+    assert ledger.deducts[-1]["amount"] == 9
+
+
+def test_an_avatar_actual_for_the_whole_call_is_not_multiplied() -> None:
+    """OpenRouter's ``usage.cost`` is the whole request's bill; it is never scaled by count."""
+    single = _generation(cost_usd=0.02)
+    two = single.model_copy(update={"images": [single.images[0]] * 2})
+    charge, _ = _bill(two)
+    assert charge is not None
+    assert charge.cost_basis == "actual_openrouter"
+    assert charge.cost_cents == pytest.approx(2.0), "a whole-call actual was multiplied"

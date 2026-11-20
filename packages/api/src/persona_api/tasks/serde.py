@@ -98,7 +98,7 @@ def row_to_task(row: RowMapping) -> Task:
 
 
 def checkpoint_values(checkpoint: TaskCheckpoint, owner_id: str) -> dict[str, Any]:
-    """The ``task_checkpoints`` column map for an INSERT (``id`` is server-defaulted)."""
+    """The ``task_checkpoints`` column map for an INSERT (the caller supplies ``id``)."""
     return {
         "task_id": checkpoint.task_id,
         "owner_id": owner_id,

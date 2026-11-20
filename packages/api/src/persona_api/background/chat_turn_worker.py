@@ -30,14 +30,20 @@ to ``interrupted`` by the startup sweep (D-P1-restart-sweep).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 import time
 from typing import TYPE_CHECKING, Protocol
 
 from persona.billing import BillingConfig, credits_charged
 from persona.logging import get_logger
+from persona_runtime.interaction_scope import (
+    InteractionRef,
+    bind_interaction,
+    reset_interaction,
+)
 
+from persona_api.background.shutdown import cancel_and_wait
+from persona_api.config import DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
 from persona_api.errors import (
     CreditsExhaustedError,
     DailySpendCapExceededError,
@@ -53,6 +59,7 @@ from persona_api.services.user_facing_errors import owner_on_free_plan, user_fac
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from contextvars import Token
     from typing import Any
 
     from persona.backends import StreamChunk
@@ -179,8 +186,19 @@ class ChatTurnRegistry:
         task_steering_service: TaskSteeringService | None = None,
         task_reschedule_service: TaskRescheduleService | None = None,
         initiative_verb_service: InitiativeVerbService | None = None,
+        delivers_images: bool = True,
+        shutdown_timeout_s: float = DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
+        if shutdown_timeout_s <= 0:
+            msg = "shutdown_timeout_s must be positive"
+            raise ValueError(msg)
         self._sink = sink
+        # R9-313: how long ``aclose`` waits for the cancelled turns, all together.
+        self._shutdown_timeout_s = shutdown_timeout_s
+        # R9-308: whether this registry's surface can show a generated image. Bound onto
+        # each turn's request context, where the chat image charge reads it; the connector
+        # registry passes False, so a persona's image on Telegram is made and not charged.
+        self._delivers_images = delivers_images
         self._engine = rls_engine
         self._credits_policy = credits_policy
         # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
@@ -224,6 +242,11 @@ class ChatTurnRegistry:
         # confirm/decline). None → the events are ignored (the pre-activation posture).
         self._initiative_verb_service = initiative_verb_service
         self._handles: dict[str, ChatTurnHandle] = {}
+
+    @property
+    def delivers_images(self) -> bool:
+        """Whether turns run here can show a generated image (R9-308)."""
+        return self._delivers_images
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
         return self._handles.get(conversation_id)
@@ -294,8 +317,13 @@ class ChatTurnRegistry:
         """
         token = current_user_id.set(handle.owner_id)
         sandbox_token = set_sandbox_request_context(
-            SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.conversation_id)
+            SandboxRequestContext(
+                owner_id=handle.owner_id,
+                conversation_id=handle.conversation_id,
+                delivers_images=self._delivers_images,
+            )
         )
+        interaction_token: Token[InteractionRef | None] | None = None
         handle._last_flush = time.monotonic()
         # R9-020: snapshot the PRE-turn message count now — the loop appends this
         # turn's user+assistant pair to ``conversation.messages`` while it runs, so
@@ -365,6 +393,9 @@ class ChatTurnRegistry:
 
         status = "complete"
         try:
+            # R9-253: a direct write here names its interaction (initiative's gate). Bound
+            # inside the try, so a raise cannot skip the cleanup in its finally.
+            interaction_token = bind_interaction("conversation", handle.conversation_id)
             try:
                 # ``turn_kwargs`` (turn_has_image / images / documents /
                 # document_context) is built + validated by ``start_chat_turn`` and
@@ -473,6 +504,8 @@ class ChatTurnRegistry:
                     )
                 )
         finally:
+            if interaction_token is not None:
+                reset_interaction(interaction_token)
             reset_sandbox_request_context(sandbox_token)
             # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
             # (clean / cancel / error / shutdown) so the per-user cap doesn't ratchet
@@ -961,9 +994,21 @@ class ChatTurnRegistry:
         Shutdown cancellation is NOT a user cancel — the tasks end without a
         terminal finalize; the startup sweep (D-P1-restart-sweep) reconciles the
         ``running`` rows to ``interrupted`` on next boot.
+
+        R9-313: the wait is bounded, once for all turns together. A cancel lands only at an
+        ``await``, and some undo paths deliberately wait out a database write in a thread
+        without forwarding the cancel (the R9-308 image hold), so a write that hangs would
+        otherwise hold up the whole shutdown. A turn still running at the bound is given up
+        on and logged; its database work is bounded by the engines' ``statement_timeout``.
+        ``asyncio.wait`` rather than ``wait_for``: on timeout ``wait_for`` cancels the task
+        again and waits for that cancel to land, which is exactly what cannot happen here.
         """
-        for handle in list(self._handles.values()):
-            if handle.task is not None and not handle.task.done():
-                handle.task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await handle.task
+        live = {
+            handle.task: (
+                f"conversation={handle.conversation_id} owner={handle.owner_id} "
+                f"message={handle.assistant_message_id}"
+            )
+            for handle in list(self._handles.values())
+            if handle.task is not None and not handle.task.done()
+        }
+        await cancel_and_wait(live, timeout=self._shutdown_timeout_s, what="chat turn")

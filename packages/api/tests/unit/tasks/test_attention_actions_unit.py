@@ -148,6 +148,13 @@ class _RecordingQueue:
     def count_spent_attempts(self, *, owner_id: str, idempotency_key: str) -> int:  # noqa: ARG002
         return self._dead
 
+    def retire_queued(self, **_: object) -> int:
+        """R9-239: a reply retires a stale queued Revived; this fake holds none."""
+        return 0
+
+    def count_live_attempts(self, **_: object) -> int:
+        return 0
+
     def enqueue(self, **kwargs: object) -> None:
         self.enqueued.append(kwargs)
 

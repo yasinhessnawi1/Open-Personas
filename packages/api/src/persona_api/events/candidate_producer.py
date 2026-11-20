@@ -46,7 +46,10 @@ from persona.schema.conversation import ConversationMessage
 from persona.tools.categories import ActionCategory
 from pydantic import ValidationError
 
-from persona_api.initiative.wellbeing_gate import ConversationWellbeingGate
+from persona_api.initiative.wellbeing_gate import (
+    ConversationWellbeingGate,
+    DisclosureReader,
+)
 
 if TYPE_CHECKING:
     from persona.backends.protocol import ChatBackend
@@ -111,14 +114,24 @@ class ApiEventWellbeingCheck:
     the real residual (why option B — a parallel gate — was rejected).
     """
 
-    def __init__(self, store: GraphStore, engine: Engine | None = None) -> None:
+    def __init__(
+        self,
+        store: GraphStore,
+        engine: Engine | None = None,
+        *,
+        disclosures: DisclosureReader | None = None,
+    ) -> None:
         # R9-249: the rule lives in the shared ConversationWellbeingGate (the scan's
         # reader and the pipeline's subject rule use the same one). The event door keeps
         # its disclosed-only posture: an event fires as its message arrives, before
         # synthesis could run, so the freshness half is not applied here. ``engine``
         # serves the task-origin read (a task-grounded event); without it a task ref is
-        # judged by its id alone.
-        self._gate = ConversationWellbeingGate(store, engine)
+        # judged by its id alone. R9-253: the gate also reads the durable disclosure fact (over
+        # ``engine``, or ``disclosures`` in tests), so a forgotten tagged node still gates.
+        # D-ORCH-11-18-u: the door never honours a release. A conversation grounding hands the
+        # producer the raw transcript, which holds the disclosure, and a task's goal text is
+        # never checked against tags.
+        self._gate = ConversationWellbeingGate(store, engine, disclosures=disclosures)
         self._engine = engine
 
     def is_gated_subject(self, owner_id: str, grounding_kind: str, grounding_ref: str) -> bool:

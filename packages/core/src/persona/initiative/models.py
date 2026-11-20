@@ -222,7 +222,7 @@ class InitiativeCandidate(BaseModel):
             prompt version) the grounding judge admitted this candidate on (set by
             the pipeline at claim time; ``None`` before).
         grounding_served_model: The chain member that gave that admission, as
-            ``"provider/model"``, read from the chain's attempt ledger (set with the
+            ``"provider/model"``, read from the judge call's own served trace (set with the
             fingerprint; ``None`` when unclear). At the flush the admitted verdict
             stands, and only the mechanical checks re-run, when the fingerprint
             still matches, this is the head of the judge's chain, and the message

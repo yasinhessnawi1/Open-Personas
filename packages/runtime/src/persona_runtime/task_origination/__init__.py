@@ -108,8 +108,11 @@ from persona_runtime.task_origination.schedule import (
 from persona_runtime.task_origination.steering import (
     SteeringIntent,
     SteeringInterpreter,
+    SteeringOutcome,
     SteeringVerb,
+    TaskSteeringPort,
     detect_steering_cue,
+    steering_reply,
 )
 from persona_runtime.task_origination.steering_model import (
     STEERING_PROMPT_VERSION,
@@ -157,7 +160,9 @@ __all__ = [
     "StandingVerdict",
     "SteeringIntent",
     "SteeringInterpreter",
+    "SteeringOutcome",
     "SteeringVerb",
+    "TaskSteeringPort",
     "amend_criteria",
     "amend_deadline",
     "amend_goal",
@@ -176,6 +181,7 @@ __all__ = [
     "detect_event_cue",
     "detect_standing_cue",
     "detect_steering_cue",
+    "steering_reply",
     "draft_content_hash",
     "is_affirmative_confirmation",
     "parse_one_time",

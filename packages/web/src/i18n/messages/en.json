@@ -293,7 +293,20 @@
     "endOfList": "End of conversations.",
     "shownOf": "Showing {shown} of {total}",
     "newMessage": "New message",
-    "forgetMemoryCheckbox": "Also forget what {name} learned here"
+    "forgetMemoryCheckbox": "Also forget what {name} learned here",
+    "forgetMemoryFacts": "{count, plural, =0 {No facts in Memory were learned only here.} one {This also removes # fact from Memory that was learned only here.} other {This also removes # facts from Memory that were learned only here.}}",
+    "forgetMemoryFactsKept": "{count, plural, one {# fact also learned elsewhere stays.} other {# facts also learned elsewhere stay.}}",
+    "deleteFailed": "Couldn't delete {name}. Try again in a moment.",
+    "releaseItem": "Let {name} bring this up again",
+    "holdItem": "Keep this out of {name}'s suggestions",
+    "releaseTitle": "Let {name} bring this conversation up?",
+    "releaseBody": "You shared something sensitive here, so {name} keeps this conversation out of anything it starts on its own. If you allow it, {name} may draw on the rest of what it learned here when it reaches out to you. It still never brings up what it marked as sensitive, and it never quotes these messages. If you share something sensitive here again, it is held back again. You can undo this from this menu at any time.",
+    "releaseConfirm": "Allow",
+    "released": "{name} may bring this conversation up again.",
+    "heldAgain": "{name} will keep this conversation out of its suggestions again.",
+    "holdChanged": "Something new was shared in this conversation, so it is still held back. Open the menu to look at it again.",
+    "holdFailed": "That did not save. Try again.",
+    "stillHeld": "This conversation is still held back. Open the menu to look at it again."
   },
   "personaPicker": {
     "choosePersona": "Choose a persona",
@@ -539,6 +552,11 @@
       "alreadyHandled": "Already handled.",
       "resolvedGeneric": "Done.",
       "expiredReflection": "This expired before it was answered."
+    },
+    "held": {
+      "heldWhilePaused": "The task is paused, so it carries on from here when you resume it.",
+      "heldAtTheCap": "The task has used its budget, so it carries on from here when you raise the cap with Raise cap on the task page.",
+      "holdFailed": "The task could not be set to carry on by itself. Pick it up from the task page when you want it to continue."
     },
     "valueNone": "Not set"
   },

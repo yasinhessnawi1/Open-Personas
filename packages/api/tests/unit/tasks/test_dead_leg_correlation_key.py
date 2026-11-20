@@ -16,11 +16,11 @@ Postgres in the way. The full chain (enqueue, dead-letter, park, append, sweep) 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from persona.tasks import ScheduledFire
+from persona.tasks import TRANSIENT_RETRY_AFTER, Contract, ScheduledFire, Task
 from persona_api.approvals.kill_switch import KillSwitchStore
 from persona_api.db.community import (
     create_community_schema,
@@ -28,13 +28,16 @@ from persona_api.db.community import (
     make_community_engine,
 )
 from persona_api.db.models import jobs as jobs_t
+from persona_api.db.models import personas as personas_t
+from persona_api.db.models import tasks as tasks_t
 from persona_api.jobs.queue import JobQueue
 from persona_api.tasks import TaskLegPayload, TaskStore
 from persona_api.tasks.continuation import TaskContinuation
+from persona_api.tasks.dead_leg_sweep import DeadLegSweeper
 from persona_api.tasks.handler import TASK_LEG_JOB_TYPE, task_leg_idempotency_key
 from persona_api.tasks.revival_sweep import RevivalSweeper
 from persona_api.tasks.store import CheckpointStore
-from sqlalchemy import insert
+from sqlalchemy import insert, update
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
 _NOW = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 _OWNER = "user_correlation"
 _TASK = "t_correlation"
+_PERSONA = "persona_correlation"
 _CAUSE = "rate limit exceeded on every provider"
 
 
@@ -142,3 +146,95 @@ def test_a_moved_head_loses_the_dead_leg_that_was_keyed_at_the_old_one(engine: E
     _dead_leg(engine, _key(None))
 
     assert _sweeper(engine)._dead_cause_at_head(_TASK, 0) is None
+
+
+# --- R9-219: a leg that appended its checkpoint and THEN kept failing ------------------
+
+
+@pytest.fixture
+def enqueued(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The legs a revival queues, by key (A0's enqueue is Postgres-only)."""
+    keys: list[str] = []
+
+    def _enqueue(self: JobQueue, **kwargs: object) -> None:  # noqa: ARG001
+        keys.append(str(kwargs["idempotency_key"]))
+
+    monkeypatch.setattr(JobQueue, "enqueue", _enqueue)
+    return keys
+
+
+def _persona(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(insert(personas_t).values(id=_PERSONA, owner_id=_OWNER, yaml="name: x"))
+
+
+def _active_task_at_head(engine: Engine, head: int | None) -> None:
+    store = TaskStore(engine)
+    store.create(
+        Task(
+            id=_TASK,
+            owner_id=_OWNER,
+            persona_id=_PERSONA,
+            contract=Contract(goal="brief hacker news"),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    store.start(_OWNER, _TASK, now=_NOW)
+    _set(engine, head_checkpoint_seq=head)
+
+
+def _set(engine: Engine, **values: object) -> None:
+    with engine.begin() as conn:
+        conn.execute(update(tasks_t).where(tasks_t.c.id == _TASK).values(**values))
+
+
+def _dead_leg_sweeper(engine: Engine) -> DeadLegSweeper:
+    store = TaskStore(engine)
+    return DeadLegSweeper(
+        continuation=TaskContinuation(task_store=store, queue=JobQueue(engine)),
+        dead_letter_queue=JobQueue(engine),
+        leader=_AlwaysLeader(),  # type: ignore[arg-type]
+        rls_engine=engine,
+        task_store=store,
+    )
+
+
+async def _park_then_age_then_sweep(engine: Engine) -> int:
+    """The dead-leg sweep parks the task, time passes, the revival sweep runs."""
+    assert await _dead_leg_sweeper(engine).run_once(now=_NOW) == 1
+    _set(engine, updated_at=_NOW - TRANSIENT_RETRY_AFTER - timedelta(minutes=1))
+    return await _sweeper(engine).run_once(now=_NOW)
+
+
+@pytest.mark.asyncio
+async def test_a_leg_that_died_after_its_own_append_is_still_revived(
+    engine: Engine, enqueued: list[str]
+) -> None:
+    """The leg was enqueued at ``init``, appended checkpoint 0, and then failed after the
+    append on every attempt (metering, the budget gate, the continuation's enqueue). It died
+    keyed ``after:init`` while the head says ``0``, so the key match finds nothing. The park
+    records which dead job it parked on, at the head it parked at, and the sweep reads that."""
+    _persona(engine)
+    _active_task_at_head(engine, 0)
+    _dead_leg(engine, _key(None))
+
+    assert await _park_then_age_then_sweep(engine) == 1
+    assert enqueued == [f"task:{_TASK}:after:0"]
+
+
+@pytest.mark.asyncio
+async def test_a_head_that_moved_after_the_park_still_loses_the_dead_leg(
+    engine: Engine, enqueued: list[str]
+) -> None:
+    """R9-173's rule is unchanged: the park records the head it parked at, so a checkpoint
+    appended AFTER the park (the shape the rule forbids) still leaves nothing to match."""
+    _persona(engine)
+    _active_task_at_head(engine, None)
+    _dead_leg(engine, _key(None))
+    assert await _dead_leg_sweeper(engine).run_once(now=_NOW) == 1
+    _set(engine, head_checkpoint_seq=0)
+    _set(engine, updated_at=_NOW - TRANSIENT_RETRY_AFTER - timedelta(minutes=1))
+
+    assert await _sweeper(engine).run_once(now=_NOW) == 0
+    assert enqueued == []

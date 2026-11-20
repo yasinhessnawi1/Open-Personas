@@ -28,6 +28,7 @@ The decisions that shape this file:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -63,7 +64,7 @@ from persona.tools import format_tool_result
 from persona_runtime.activity import dispatch_with_activity
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.ambiguity import DetectionContext, detect_ambiguity, should_ask
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, compute_turn_cost, price_rounds
 from persona_runtime.emotional import ConvertMode, FeelingTagConverter, convert_text
 from persona_runtime.errors import ScheduleParseError
 from persona_runtime.graph_window import set_recent_window_from_messages
@@ -94,7 +95,7 @@ from persona_runtime.routing import (
     classifiers,
     first_token_sample_model,
     reorder_primary,
-    resolve_served_model,
+    served_identity,
     tier_for,
 )
 from persona_runtime.safety_intercept import InterceptAction, classify_user_message
@@ -118,14 +119,16 @@ from persona_runtime.task_origination import (
     is_affirmative_confirmation,
     render_clause,
     render_echo,
+    steering_reply,
 )
 from persona_runtime.task_origination.reschedule_flow import assemble_reschedule_echo
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from persona.audit import AuditLogger
     from persona.backends import ChatBackend, StreamChunk, TokenUsage
+    from persona.backends.types import ServedCall
     from persona.history import ConversationHistoryManager
     from persona.sandbox.result import SandboxFile
     from persona.schedules import QuietHours
@@ -156,7 +159,9 @@ if TYPE_CHECKING:
         AmendmentInterpreter,
         RescheduleInterpreter,
         StandingIntentRecognizer,
+        SteeringIntent,
         SteeringInterpreter,
+        TaskSteeringPort,
     )
     from persona_runtime.tier import TierRegistry
     from persona_runtime.unified_recall import UnifiedProjection
@@ -341,6 +346,8 @@ _INITIATIVE_DIAL_TEXT = {
 _STEER_PAUSED_TEXT = "Paused. Just say the word when you want it going again."
 _STEER_RESUMED_TEXT = "Done. It's running again."
 _STEER_CANCELLED_TEXT = "Cancelled. I've stopped that task."
+#: R9-241: what a pause or resume says when applying it raised (the task is unchanged).
+_STEER_FAILED_TEXT = "I couldn't change that task just now. Try again from its task page."
 
 #: Reschedule acknowledgements (Spec A8, T6). The actual retime/rerule happens api-side off the
 #: emitted event, through the CAS-guarded door; this is the immediate honest ack.
@@ -518,6 +525,9 @@ class _RoundOutcome:
     calls: list[ToolCall] = field(default_factory=list)
     usage: TokenUsage | None = None
     reasoning_text: str = ""
+    #: The backend that served this round (R9-223), from the round's own chunks;
+    #: ``None`` from a bare backend, which is its own served identity.
+    served: ServedCall | None = None
 
 
 @dataclass(frozen=True)
@@ -591,6 +601,7 @@ class ConversationLoop:
         amendment_interpreter: AmendmentInterpreter | None = None,
         steering_interpreter: SteeringInterpreter | None = None,
         task_reader_provider: Callable[[], TaskStateReader | None] | None = None,
+        task_steering_port_provider: Callable[[], TaskSteeringPort | None] | None = None,
         reschedule_interpreter: RescheduleInterpreter | None = None,
         timezone_provider: Callable[[], str] | None = None,
         quiet_hours_provider: Callable[[], QuietHours | None] | None = None,
@@ -618,6 +629,10 @@ class ConversationLoop:
         # immediately, cancel asks a consequence-aware confirmation first.
         self._steering_interpreter = steering_interpreter
         self._task_reader_provider = task_reader_provider
+        # R9-241: with a port wired, pause and resume are APPLIED during the turn and the
+        # reply says what happened (the control's own note on a no-op, D-ORCH-11-18-d (4)).
+        # ``None`` → the verb is emitted for the host to apply after the turn, as before.
+        self._task_steering_port_provider = task_steering_port_provider
         # Spec A8 (T6): the conversational reschedule verb — retime/rerule a live task ("move it to
         # 9", "make it weekly", "skip tomorrow's"). ``None`` → inert. When present it joins the
         # steering seam as a propose→confirm flow: resolve the target (honest — ambiguous lists +
@@ -929,7 +944,18 @@ class ConversationLoop:
         # command, one batched UPDATE, sync on the request's owner-scoped
         # engine; fail-soft inside (a failed reinforcement never breaks a turn).
         reinforce_recalled(self._stores, persona_id, context)
-        history, compacted = await self._manage_history(conversation)
+        # R9-299: the compaction summary is a paid model call, so its usage is kept and
+        # priced with the turn's own rounds at write-back (one charge, one TurnLog row).
+        history, compacted, compaction_rounds = await self._manage_history(conversation)
+        if compaction_rounds:
+            # A gate below can end the turn before any answer round, with no TurnLog.
+            # The summary is already paid for, so the turn carries its cost from here:
+            # the chat worker charges ``last_turn_cost_cents`` proportionally, where a
+            # turn with no recorded cost gets the flat floor. A turn that reaches
+            # write-back replaces this with the full figure, compaction included.
+            self._last_turn_cost_cents, self._last_turn_cost_basis = price_rounds(
+                compaction_rounds, source=self._cost_source, surface="chat"
+            )
 
         # Spec A4 (T9b, criterion 8): steer a LIVE task by saying so. Runs first — "cancel that" /
         # "pause it" is about an existing task, not a new one. Pause/resume apply immediately; a
@@ -987,17 +1013,7 @@ class ConversationLoop:
                         yield _final_chunk(None)
                         return
                     if intent is not None:  # pause / resume — apply immediately, no confirm
-                        if on_event is not None:
-                            await on_event(
-                                RunEvent.task_steering(
-                                    verb=intent.verb.value, task_id=intent.task_id
-                                )
-                            )
-                        ack = (
-                            _STEER_PAUSED_TEXT
-                            if intent.verb is SteeringVerb.PAUSE
-                            else _STEER_RESUMED_TEXT
-                        )
+                        ack = await self._steer_now(intent, on_event)
                         yield _text_chunk(ack)
                         now_st = datetime.now(UTC)
                         conversation.messages.append(
@@ -1409,6 +1425,14 @@ class ConversationLoop:
         # last-writer-wins (see that function for the summing + mixed-round
         # actual honesty rule).
         round_usages: list[TokenUsage] = []
+        # R9-246: the same rounds, each with the model that served it, so each is
+        # priced at its own model (``price_rounds``). Appended exactly where
+        # ``round_usages`` is, so the priced rounds are the rounds the tokens count.
+        priced_rounds: list[PricedRound] = []
+        # R9-223: the served identity of the last round that ran, from that round's own
+        # chunks. It names the turn and fills the TurnLog fallback fields (D5: the
+        # last round, as before; only where it is read from changed).
+        last_served: ServedCall | None = None
         assistant_text = ""
         # Turn-resilience buffer: every text delta yielded to the client this
         # turn is appended here, across ALL rounds. ``assistant_text`` holds only
@@ -1478,6 +1502,7 @@ class ConversationLoop:
                 if safe:
                     yield _text_chunk(safe)
             round_text, round_calls, round_usage = outcome.text, outcome.calls, outcome.usage
+            last_served = outcome.served
             assistant_text = round_text
             reasoning_buffer += outcome.reasoning_text
             # M2 review (I2): accumulate THIS round's usage unconditionally —
@@ -1487,6 +1512,7 @@ class ConversationLoop:
             # few lines down is accumulated separately where IT streams).
             if round_usage is not None:
                 round_usages.append(round_usage)
+                priced_rounds.append(_priced_round(backend, round_usage, outcome.served))
 
             at_cap = rounds >= self._max_tool_rounds
             if round_calls and not at_cap:
@@ -1602,6 +1628,7 @@ class ConversationLoop:
                     if safe:
                         yield _text_chunk(safe)
                 assistant_text = final_outcome.text
+                last_served = final_outcome.served
                 reasoning_buffer += final_outcome.reasoning_text
                 # M2 review (I2): the cap-forced final generation is its OWN
                 # separately-billed round — accumulate it too (pre-fix this
@@ -1609,6 +1636,9 @@ class ConversationLoop:
                 # so the capped round's own tokens/cost vanished entirely).
                 if final_outcome.usage is not None:
                     round_usages.append(final_outcome.usage)
+                    priced_rounds.append(
+                        _priced_round(backend, final_outcome.usage, final_outcome.served)
+                    )
 
             # Normal completion (or post-cap final text) — the text already
             # streamed delta-by-delta above. The single is_final=True chunk is
@@ -1666,10 +1696,14 @@ class ConversationLoop:
                         yield _text_chunk(safe)
                 if retry_outcome.text:
                     assistant_text = retry_outcome.text
+                last_served = retry_outcome.served
                 # M2 review (I2): the refusal-retry is ALSO a separately
                 # billed round — accumulate rather than overwrite.
                 if retry_outcome.usage is not None:
                     round_usages.append(retry_outcome.usage)
+                    priced_rounds.append(
+                        _priced_round(backend, retry_outcome.usage, retry_outcome.served)
+                    )
                 reasoning_buffer += retry_outcome.reasoning_text
                 _logger.info(
                     "refusal-retry engaged: corrected a tool refusal tools={tools} tier={tier}",
@@ -1690,10 +1724,9 @@ class ConversationLoop:
             _logger.warning(
                 "multi-round turn had a mixed cost_usd report across rounds "
                 "(some rounds served OpenRouter with a real actual, at least "
-                "one round did not) — dropping the partial actual and "
-                "pricing the turn on its summed tokens instead (an "
-                "incomplete actual is never claimed as the whole turn's "
-                "actual) conversation={conv}",
+                "one round did not); the turn-level usage reports no actual, "
+                "and each round is priced on its own (R9-246), the turn "
+                "labelled by its least certain round conversation={conv}",
                 conv=conversation.conversation_id,
             )
 
@@ -1796,6 +1829,9 @@ class ConversationLoop:
             conversation=conversation,
             tier=tier,
             backend=backend,
+            served=last_served,
+            priced_rounds=priced_rounds,
+            compaction_rounds=compaction_rounds,
             usage=usage,
             latency_ms=latency_ms,
             tool_calls=tool_call_count,
@@ -1887,6 +1923,39 @@ class ConversationLoop:
         yield _final_chunk(usage)
 
     # ----- internals -------------------------------------------------------
+
+    async def _steer_now(
+        self,
+        intent: SteeringIntent,
+        on_event: Callable[[RunEvent], Awaitable[None]] | None,
+    ) -> str:
+        """Pause or resume a live task, and return the reply that says what happened.
+
+        R9-241 (D-ORCH-11-18-d (4)): with the host's port wired the verb is applied here,
+        during the turn, so the reply can carry the control's own note on a no-op (the budget
+        refusal that points to Raise cap, ``Already paused.``, ``Not paused.``). The port is
+        synchronous database work, so it runs off the event loop; the copied context carries
+        the request's owner scope with it. Without a port the verb is emitted for the host to
+        apply after the turn and the reply is the plain acknowledgement, as before.
+        """
+        ack = _STEER_PAUSED_TEXT if intent.verb is SteeringVerb.PAUSE else _STEER_RESUMED_TEXT
+        port = (
+            self._task_steering_port_provider()
+            if self._task_steering_port_provider is not None
+            else None
+        )
+        if port is None:
+            if on_event is not None:
+                await on_event(
+                    RunEvent.task_steering(verb=intent.verb.value, task_id=intent.task_id)
+                )
+            return ack
+        try:
+            outcome = await asyncio.to_thread(port.steer, intent.verb, intent.task_id)
+        except Exception as exc:  # noqa: BLE001 - a steering miss must not fail the turn
+            _logger.warning("task steering failed in the turn: {err}", err=str(exc))
+            return _STEER_FAILED_TEXT
+        return steering_reply(outcome, ack)
 
     def _require_persona_id(self) -> str:
         pid = self._persona.persona_id
@@ -2113,24 +2182,29 @@ class ConversationLoop:
 
     async def _manage_history(
         self, conversation: Conversation
-    ) -> tuple[list[ConversationMessage], bool]:
+    ) -> tuple[list[ConversationMessage], bool, tuple[PricedRound, ...]]:
         """Run history management with the pre-computed-summary bridge (D-05-X).
 
-        Returns the prompt-ready history and whether compaction fired this turn.
+        Returns the prompt-ready history, whether compaction fired this turn, and the
+        summary call's usage as a priced round (empty when nothing was summarised).
+        The turn prices that round with its own (R9-299): the summary is a provider
+        call made because this turn ran, so the owner of the turn pays for it.
         """
         compacted = self._will_compact(conversation)
         precomputed: str | None = None
+        compaction_rounds: tuple[PricedRound, ...] = ()
         if compacted:
             boundary = conversation.turn_count - self._history.keep_recent
             new_range = list(conversation.messages[conversation.compacted_up_to : boundary])
-            precomputed = await self._summarise(new_range)
+            precomputed, compaction_round = await self._summarise(new_range)
+            compaction_rounds = (compaction_round,)
 
         def _assembler(_messages: list[ConversationMessage]) -> str:
             # manage() only calls this when compacting; precomputed is set then.
             return precomputed or ""
 
         history = self._history.manage(conversation, summariser=_assembler)
-        return history, compacted
+        return history, compacted, compaction_rounds
 
     def _will_compact(self, conversation: Conversation) -> bool:
         """Replica of manage()'s 'will I summarise this turn?' decision (D-05-X).
@@ -2143,11 +2217,14 @@ class ConversationLoop:
         boundary = turn_count - self._history.keep_recent
         return boundary > conversation.compacted_up_to
 
-    async def _summarise(self, messages: list[ConversationMessage]) -> str:
+    async def _summarise(self, messages: list[ConversationMessage]) -> tuple[str, PricedRound]:
         """Summarise an excerpt on the background tier (the one async summary call).
 
         Spec P9: an unread, narrow, high-volume job — the background surface
         (small), now stated via the policy instead of an incidental literal.
+
+        Returns the summary text and the call's usage under the model that served it
+        (R9-299), for the turn to price with its own rounds.
         """
         backend = self._tiers.get(tier_for("background"))
         rendered = "\n".join(f"{m.role}: {m.content}" for m in messages)
@@ -2158,7 +2235,7 @@ class ConversationLoop:
             ConversationMessage(role="user", content=rendered, created_at=datetime.now(UTC)),
         ]
         response = await backend.chat(prompt)
-        return response.content.strip()
+        return response.content.strip(), _priced_round(backend, response.usage, response.served)
 
     def _decide_routing(
         self,
@@ -2432,12 +2509,11 @@ class ConversationLoop:
         :class:`FirstTokenLatencyTracker` is wired into the loop, the FIRST
         non-empty ``chunk.delta`` records ``(perf_counter() - t_start) * 1000``
         as the first-token latency of the model that answered (R9-226,
-        :func:`first_token_sample_model`). A round a FALLBACK served records
-        nothing, since its time includes the failed backends. A same-backend RETRY
-        that succeeded is still recorded, including the failed attempt and the
-        retry wait, because the chain leaves no ledger entry for it (registered
-        alongside R9-223). V5 reads the registry field; :class:`UnifiedRouter`
-        reads it for Layer 2 latency scoring.
+        :func:`first_token_sample_model`). A round answered after any failed try
+        records nothing: a FALLBACK's time includes the failed backends, and a
+        same-backend RETRY's includes the failed try and the retry wait (R9-229).
+        V5 reads the registry field; :class:`UnifiedRouter` reads it for Layer 2
+        latency scoring.
         """
         names: dict[str, str] = {}
         args_json: dict[str, str] = {}
@@ -2445,14 +2521,14 @@ class ConversationLoop:
         t_start = time.perf_counter()
         first_token_recorded = False
         async for chunk in backend.chat_stream(prompt_messages, tools=self._toolbox.get_specs()):
+            if outcome.served is None and chunk.served is not None:
+                outcome.served = chunk.served
             if chunk.delta:
                 if not first_token_recorded and self._latency_tracker is not None:
                     first_token_ms = (time.perf_counter() - t_start) * 1000.0
-                    # A chain releases no chunk before it commits to a backend, so by
-                    # the first delta its ledger lists every backend that failed this
-                    # round. It does not list a same-backend retry, and it is shared
-                    # across conversations (R9-223).
-                    sample_model = first_token_sample_model(backend)
+                    # The chunk carries this call's own served identity and attempt
+                    # history (R9-223, R9-229): no sample unless it answered first time.
+                    sample_model = first_token_sample_model(backend, chunk.served)
                     if sample_model is not None:
                         self._latency_tracker.record(sample_model, first_token_ms)
                     first_token_recorded = True
@@ -2622,6 +2698,9 @@ class ConversationLoop:
         tool_consent_granted: list[str] | None = None,
         mcp_invocations: list[str] | None = None,
         mcp_unavailable_requested: list[str] | None = None,
+        served: ServedCall | None = None,
+        priced_rounds: Sequence[PricedRound] = (),
+        compaction_rounds: Sequence[PricedRound] = (),
     ) -> None:
         # M2 review (I2): ``usage`` arrives ALREADY summed across every round
         # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
@@ -2629,21 +2708,30 @@ class ConversationLoop:
         # the SUM of all 5 rounds, never just the last one. Attribution
         # (WHICH model/provider names the turn, just below) is a SEPARATE
         # axis and stays last-round-served: on a multi-round turn the served
-        # pair reflects only the FINAL round's resolution (the wrapper's
-        # ``last_attempts`` ledger resets on every ``chat_stream`` call —
-        # see ``MultiModelChatBackend.last_attempts``); earlier rounds may
+        # pair is the FINAL round's ``served`` (R9-223: read from that round's
+        # own chunks, never from state on the shared chain); earlier rounds may
         # have served/fallen-back differently and that detail is not
-        # attributed per-round (out of scope — one TurnLog row per turn,
-        # not one per round).
+        # attributed per-round (one TurnLog row per turn, not one per round).
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         completion_tokens = usage.completion_tokens if usage is not None else 0
-        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields.
-        # The wrapper's per-call attempt ledger lives on ``last_attempts``;
-        # single-backend (non-wrapper) callers safely return an empty list
-        # via ``getattr(..., None) or []``, yielding the zero-fallback
-        # default shape (backward compat). Computed FIRST (Spec M2, D-M2-2):
-        # the served-model identity below derives from this projection.
-        fallback_kwargs = _compute_fallback_fields(backend)
+        # D-ORCH-11-18-s: a failed try that reported tokens is charged, so its tokens
+        # join the row's sums. The TurnLog row is the billing record, and this keeps
+        # its tokens equal to the tokens the turn was priced on (M2 I2), with no new
+        # column. The SSE final chunk's ``usage`` stays the answer's own.
+        failed_prompt, failed_completion = _failed_try_tokens(priced_rounds)
+        prompt_tokens += failed_prompt
+        completion_tokens += failed_completion
+        # R9-299: the history compaction's summary call is charged with the turn, so
+        # its tokens (and its own failed tries') join the row's sums the same way. The
+        # SSE final chunk's ``usage`` stays the answer's own.
+        compaction_prompt, compaction_completion = _round_tokens(compaction_rounds)
+        prompt_tokens += compaction_prompt
+        completion_tokens += compaction_completion
+        # Spec 20 T19 (D-20-9): populate the multi-model fallback fields from
+        # the last round's own served trace (R9-223); a bare backend (no trace)
+        # yields the zero-fallback default shape. Computed FIRST (Spec M2,
+        # D-M2-2): the served-model identity below derives from this projection.
+        fallback_kwargs = _compute_fallback_fields(backend, served)
         # Spec M2 (D-M2-2): the turn is priced and NAMED as the model that
         # ACTUALLY served it. On a fallback-engaged turn the wrapper's own
         # ``provider_name`` / ``model_name`` report the PRIMARY by design
@@ -2664,14 +2752,28 @@ class ConversationLoop:
         # ACTUAL we paid, D-M2-3) takes precedence — basis
         # "actual_openrouter"; otherwise the chain estimates — basis
         # "estimate_static" / "estimate_catalog" / "unpriced".
-        cost, cost_basis = compute_turn_cost(
-            provider=served_provider,
-            model=served_model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            actual_cost_usd=usage.cost_usd if usage is not None else None,
-            source=self._cost_source,
-        )
+        #
+        # R9-246: each round is priced at the model that served THAT round and the
+        # rounds are summed (``price_rounds``, the function voice prices with), not
+        # the summed tokens at the last round's model. A one-round turn prices
+        # exactly as before. A turn with no usage-carrying round keeps the old
+        # zero-token call at the served pair, so its basis is unchanged too.
+        #
+        # R9-299: the compaction summary is priced as one more round, at the model that
+        # served it, inside the same single rounding and the worker's single ceil. A
+        # turn that did not compact prices exactly as before.
+        rounds = [*priced_rounds, *compaction_rounds]
+        if rounds:
+            cost, cost_basis = price_rounds(rounds, source=self._cost_source, surface="chat")
+        else:
+            cost, cost_basis = compute_turn_cost(
+                provider=served_provider,
+                model=served_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                actual_cost_usd=usage.cost_usd if usage is not None else None,
+                source=self._cost_source,
+            )
         # Spec 23 T11 (D-23-7): accumulate this turn's cost into the loop-owned
         # per-session tally that feeds the soft per-session budget ramp on the
         # NEXT turn. Loop-owned, never on the stateless router/backend.
@@ -2809,35 +2911,72 @@ class _FallbackFields(TypedDict):
     fallback_engaged: bool
 
 
-def _compute_fallback_fields(backend: ChatBackend) -> _FallbackFields:
-    """Project ``MultiModelChatBackend.last_attempts`` into TurnLog T19 fields.
+def _failed_try_tokens(rounds: Sequence[PricedRound]) -> tuple[int, int]:
+    """The prompt and completion tokens the turn's failed tries reported (D-ORCH-11-18-s)."""
+    prompt = completion = 0
+    for priced_round in rounds:
+        for attempt in priced_round.failed_tries:
+            if attempt.usage is not None:
+                prompt += attempt.usage.prompt_tokens
+                completion += attempt.usage.completion_tokens
+    return prompt, completion
+
+
+def _round_tokens(rounds: Sequence[PricedRound]) -> tuple[int, int]:
+    """The prompt and completion tokens of ``rounds``, their failed tries included."""
+    failed_prompt, failed_completion = _failed_try_tokens(rounds)
+    prompt = sum(r.prompt_tokens for r in rounds) + failed_prompt
+    completion = sum(r.completion_tokens for r in rounds) + failed_completion
+    return prompt, completion
+
+
+def _priced_round(
+    backend: ChatBackend, usage: TokenUsage, served: ServedCall | None
+) -> PricedRound:
+    """One round's usage under the model that served that round (R9-246).
+
+    ``served`` is the round's own trace; ``None`` means a bare backend, its own
+    identity. The round's failed tries that reported usage ride along and are charged,
+    each at the model that made it (D-ORCH-11-18-s).
+    """
+    provider, model = served_identity(backend, served)
+    failed_tries = served.charged_failed_tries() if served is not None else ()
+    return PricedRound(
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        cost_usd=usage.cost_usd,
+        provider=provider,
+        model=model,
+        failed_tries=failed_tries,
+    )
+
+
+def _compute_fallback_fields(backend: ChatBackend, served: ServedCall | None) -> _FallbackFields:
+    """Project the last round's :class:`ServedCall` into TurnLog T19 fields.
 
     Per D-20-9 privacy: only class names reach the log (NEVER error
     messages or context dict values). Per D-20-7 the operator-dashboard
     fallback-rate trigger consumes ``tier_fallback_count`` /
     ``fallback_engaged`` directly.
 
-    Single-backend (non-wrapper) callers — backends that do not expose a
-    ``last_attempts`` accessor — get the zero-fallback default shape
-    (``tier_model_chosen`` + ``tier_provider_used`` carry the actually-used
-    primary backend; counts are zero; lists are empty). This is the
-    backward-compat path for legacy callers and the degenerate length-1
-    chain that ``TierRegistry`` short-circuits past the wrapper entirely
-    (D-20-17 case (a)).
+    A bare backend (``served`` is ``None``: no chain stamped the round) gets
+    the zero-fallback default shape: ``tier_model_chosen`` and
+    ``tier_provider_used`` carry the backend's own identity, counts are zero,
+    lists are empty. This is also the degenerate length-1 chain that
+    ``TierRegistry`` short-circuits past the wrapper entirely (D-20-17 case (a)).
 
-    For :class:`MultiModelChatBackend` callers, the served identity comes
-    from :func:`~persona_runtime.routing.resolve_served_model`, the one
-    resolution this loop shares with the voice turn log (R9-214): the
-    wrapper's own ``provider_name`` / ``model_name`` report the PRIMARY,
-    so the winner is read from ``backends[len(last_attempts)]``, and an
-    over-length ledger (the exhaustion case, which never reaches here)
-    falls back to the wrapper's reported identity.
+    For a multi-model chain, ``served`` is the round's own
+    :class:`~persona.backends.types.ServedCall` (R9-223): the served identity and
+    one record per backend that fell through (``fell_through()``, the old
+    ledger's shape: a same-backend retry is not a fallback, R9-229). It is read
+    from the round's chunks, never from state on the chain, which every
+    conversation on the tier shares.
     """
-    attempts = getattr(backend, "last_attempts", None) or []
-    fallback_reasons: list[str] = [a.last_error_class for a in attempts]
-    fallback_providers: list[str] = [a.provider for a in attempts]
+    fell = served.fell_through() if served is not None else ()
+    fallback_reasons = [a.error_class or "" for a in fell]
+    fallback_providers = [a.provider for a in fell]
     count = len(fallback_reasons)
-    chosen_provider, chosen_model = resolve_served_model(backend)
+    chosen_provider, chosen_model = served_identity(backend, served)
     return _FallbackFields(
         tier_model_chosen=chosen_model,
         tier_provider_used=chosen_provider,

@@ -65,7 +65,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from persona.billing import BillingConfig, credits_charged
-from persona.billing.image_pricing import image_cents
 from persona.imagegen import (
     ContentRejectedError,
     GeneratedImage,
@@ -80,12 +79,12 @@ from persona.imagegen import (
 from persona.imagegen._merge import merge_visual_style
 from persona.logging import get_logger
 from persona.tools.audit import ToolAuditEvent
-from persona_runtime.cost import compute_turn_cost
 
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.errors import ConcurrencyCappedError
 from persona_api.imagegen.concurrency import acquire_user_concurrency
 from persona_api.services.artifact_storage import artifact_key
+from persona_api.services.image_cost import generation_cost_cents
 from persona_api.workspace_paths import persona_prefix
 
 if TYPE_CHECKING:
@@ -413,6 +412,7 @@ def _true_up_image_charge(
     Prices the generation like a chat turn (``compute_turn_cost`` over the served
     model's token usage; the OpenRouter ``usage.cost`` actual takes precedence,
     basis ``actual_openrouter``; else the resolver-chain estimate; else the
+    registry's per-image price times the images RETURNED, R9-198; else the
     floor), then reconciles against the ``ceiling`` already pre-deducted:
 
     * ``real > ceiling`` (a misconfigured-too-low ceiling) — capture the extra,
@@ -424,22 +424,13 @@ def _true_up_image_charge(
     (D-M3-12). Basis-agnostic: works whether the price is an actual or an
     estimate (D-M3-R4).
     """
-    cost_cents, basis = compute_turn_cost(
-        provider=result.provider,
-        model=result.model,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        actual_cost_usd=result.cost_usd,
-        source=cost_source,
-    )
-    if basis == "unpriced":
-        # Only the OpenRouter backend reports its own cost; openai, fal, nvidia and cloudflare
-        # leave the result's defaults, and ``compute_turn_cost`` prices per TOKEN, so zero
-        # tokens priced every one of their images at nothing and the charge fell to the floor.
-        # A ~4 cent image was recovered as 1 cent. The registry knows what an image costs, so
-        # ask it before giving up. A provider actual still wins: this runs only when there
-        # wasn't one.
-        cost_cents, basis = image_cents(result.provider, model=result.model)
+    # Only the OpenRouter backend reports its own cost; openai, fal, nvidia and cloudflare
+    # leave the result's defaults, and per-token pricing over zero tokens floored every one of
+    # their images. ``generation_cost_cents`` falls back to the registry's per-image price for
+    # those, multiplied by the images actually returned (R9-198: a two-image call used to pay
+    # for one). A provider actual or a token estimate is for the whole call and is never
+    # multiplied.
+    cost_cents, basis = generation_cost_cents(result, cost_source=cost_source)
     if basis == "unpriced":
         # Still nothing: we genuinely do not know what this image cost. Keep the floor rather
         # than invent a price (a guess overcharges a person; the floor undercharges us), but

@@ -50,7 +50,13 @@ if TYPE_CHECKING:
 
     from persona.tools._sandbox import SandboxRootProvider
 
-__all__ = ["build"]
+__all__ = ["CHILD_ENV", "build"]
+
+#: Env names this server takes from the api env beyond the shared base (R9-258).
+#: None. Its one setting, PERSONA_FILESYSTEM_SCOPE_ROOT, is deliberately NOT here:
+#: the launcher sets it per spawn as an override, so a stray value in the api env
+#: can never reach an unscoped child (P4-D-4).
+CHILD_ENV: frozenset[str] = frozenset()
 
 #: Dedicated env channel carrying the supervisor-computed, pre-resolved scoped
 #: root for THIS spawn (Spec P4-D-2). Distinct from ``PERSONA_TOOLS_SANDBOX_ROOT``

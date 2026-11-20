@@ -71,7 +71,10 @@ _LOG = get_logger("api.db.community")
 # the Spec K0 graph tables carry pgvector ``Vector`` + ``tsvector`` columns
 # (Postgres-only) and the graph is a cloud feature, so they are excluded too. Spec
 # K2's ``synthesis_markers`` is the graph-synthesis idempotency surface — useless
-# without the graph, so it is cloud-only as well.
+# without the graph, so it is cloud-only as well. R9-253's ``wellbeing_disclosures``
+# is written only when the graph tags a disclosure and read only by initiative's
+# graph gate, so it is cloud-only for the same reason. R9-311's ``forgotten_conversations`` is
+# read only by ``memory_chunks``' owner guard, so it goes where ``memory_chunks`` goes.
 _CLOUD_ONLY_TABLES = frozenset(
     {
         "memory_chunks",
@@ -82,6 +85,8 @@ _CLOUD_ONLY_TABLES = frozenset(
         "graph_node_versions",
         "graph_consolidation_markers",
         "synthesis_markers",
+        "wellbeing_disclosures",
+        "forgotten_conversations",
     }
 )
 

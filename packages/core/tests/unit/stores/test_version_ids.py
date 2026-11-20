@@ -22,13 +22,16 @@ The fake here is keyed the way the table is, by ``id`` alone. The usual test fak
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime, timedelta
 
 from persona.audit import MemoryAuditLogger
 from persona.autonomy import AUTONOMY_LOGICAL_ID, record_autonomy_update
 from persona.schema.chunks import ChunkProvenance, PersonaChunk, WriteSource
 from persona.stores.core_memory import CoreMemoryStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.self_facts import SelfFactsStore
+from persona.stores.versioning import ChainDefect, diagnose_chain
 
 _NOW = datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
 
@@ -48,10 +51,30 @@ class _TableKeyedBackend:
         self.rows: dict[str, tuple[str, str, PersonaChunk]] = {}
         self.before_next_upsert: object = None
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
         hook, self.before_next_upsert = self.before_next_upsert, None
         if callable(hook):
             hook()
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for p, k, c in self.rows.values() if p == persona_id and k == kind and c.id in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         for chunk in chunks:
             self.rows[chunk.id] = (persona_id, store_kind, chunk)
 
@@ -178,7 +201,11 @@ def _autonomy(store: SelfFactsStore, level: str, *, now: datetime, session: str)
 
 
 def test_a_racing_autonomy_update_is_not_overwritten_in_place() -> None:
-    """Both updates must survive as rows. Which one wins is the index's job (R9-205)."""
+    """Both updates must survive as rows, and the loser lands on top of the winner.
+
+    The loser's write names the version it read, and that version has been superseded by the
+    time it lands, so it is refused and autonomy goes back through its gate (R9-205, R9-271).
+    """
     backend = _TableKeyedBackend()
     store = _store(backend)
     # Seeded rather than written: the store stamps ``written_at`` from the wall clock, so a real
@@ -203,8 +230,10 @@ def test_a_racing_autonomy_update_is_not_overwritten_in_place() -> None:
         "Autonomy preference set to balanced.",
     }, "the second writer overwrote the first in place, and nothing would ever have said so"
     heads = _heads(backend)
-    assert [c.provenance.version for c in heads if c.provenance] == [2, 2]
-    assert backend.rows[seeded.id][2].provenance.superseded_by in {c.id for c in heads}  # type: ignore[union-attr]
+    assert [c.provenance.version for c in heads if c.provenance] == [3]
+    assert heads[0].text == "Autonomy preference set to balanced."
+    chain = [c for _, _, c in backend.rows.values() if c.provenance is not None]
+    assert diagnose_chain(chain).defect is ChainDefect.NONE
 
 
 def test_two_racing_first_autonomy_updates_are_both_kept() -> None:
@@ -225,11 +254,11 @@ def test_two_racing_first_autonomy_updates_are_both_kept() -> None:
     }
 
 
-def test_two_racing_rollbacks_show_as_two_heads_on_a_transport_with_no_index() -> None:
+def test_two_racing_rollbacks_both_land_in_order_on_a_transport_with_no_index() -> None:
     """The ids rollback mints used to collapse this silently, so one rollback just vanished.
 
-    Pins the state this leaves where nothing enforces one head. It is visible now, not resolved:
-    resolving it is the head index on Postgres, and on Chroma it stays a documented difference.
+    A rollback names the version it supersedes, so the loser is refused, reads again and lands
+    on top (R9-271). That holds with no head index, which is the Chroma shape.
     """
     backend = _TableKeyedBackend()
     store = _store(backend)
@@ -241,5 +270,6 @@ def test_two_racing_rollbacks_show_as_two_heads_on_a_transport_with_no_index() -
     store.rollback("p1", "L", to_version=1, source=WriteSource.USER)
 
     heads = _heads(backend)
-    assert [c.provenance.version for c in heads if c.provenance] == [3, 3]
-    assert {c.text for c in heads} == {"p1 v1", "p1 v2"}
+    assert [c.provenance.version for c in heads if c.provenance] == [4]
+    history = store.history("p1", "L")
+    assert [c.text for c in history[2:]] == ["p1 v2", "p1 v1"]

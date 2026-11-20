@@ -36,6 +36,7 @@ from persona.schema.chunks import (
 from persona.schema.persona import Persona
 from persona.stores.core_memory import CoreMemoryStore
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.identity import IdentityStore
 from persona.stores.postgres import CHAIN_HEAD_INDEX, EMBEDDING_DIM, PostgresBackend
 from persona.stores.self_facts import SelfFactsStore
@@ -44,6 +45,8 @@ from persona.stores.worldview import WorldviewStore
 from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from persona.stores.base import TypedStore
 
 _NOW = datetime(2026, 11, 5, 9, 0, tzinfo=UTC)
@@ -71,11 +74,31 @@ class _IndexedBackend:
     def _of(self, persona_id: str, store_kind: str) -> list[PersonaChunk]:
         return [c for p, k, c in self.rows.values() if p == persona_id and k == store_kind]
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
         self.upserts += 1
         hook, self.before_next_upsert = self.before_next_upsert, None
         if callable(hook):
             hook()
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for p, k, c in self.rows.values() if p == persona_id and k == kind and c.id in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         if self.always_conflict:
             raise ChainConflictError("another writer got there first")
         after = {**self.rows, **{c.id: (persona_id, store_kind, c) for c in chunks}}

@@ -531,6 +531,10 @@ def build_reply_runner(
         task_steering_service=task_steering_service,
         task_reschedule_service=task_reschedule_service,
         initiative_verb_service=initiative_verb_service,
+        # R9-308: a connector sends only the reply text (``_collect_reply``), so an image
+        # a persona makes here reaches nobody. The owner ruled it is not charged; the
+        # house pays until a channel can deliver images. Stated here, not inferred.
+        delivers_images=False,
     )
     locks = _ConversationLocks()
 

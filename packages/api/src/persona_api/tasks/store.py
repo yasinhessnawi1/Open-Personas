@@ -33,17 +33,19 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import TaskNotFoundError
+from persona.errors import TaskNotFoundError, TaskStateError
 from persona.logging import get_logger
 from persona.tasks import (
     DEFAULT_CHECKPOINT_TOKEN_BUDGET,
     TERMINAL_STATES,
     AcceptanceStatus,
+    CheckpointKind,
     Task,
+    checkpoint_id_prefix,
     enforce_checkpoint_budget,
 )
 from persona.tasks import settle_criteria as gate_criteria
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from persona_api.db.engine import rls_connection
@@ -72,9 +74,19 @@ if TYPE_CHECKING:
     )
     from sqlalchemy import Connection, Engine
 
-__all__ = ["CheckpointStore", "TaskStore"]
+__all__ = ["STUCK_AUDIT_ACTION", "CheckpointStore", "TaskStore"]
 
 _log = get_logger("api.tasks.store")
+
+#: The audit action a stuck park writes (R9-219): which dead job it parked on, at which head.
+#: The revival sweep reads it when the dead job's own key no longer matches the head, which
+#: is what a leg leaves behind when it appended its checkpoint and then kept failing.
+STUCK_AUDIT_ACTION = "task.stuck"
+
+#: How many times a transition decides again after losing a race (R9-247). A race is a
+#: window of milliseconds between two controls, so a second read almost always settles it;
+#: the bound only stops a pathological flapping row from looping forever.
+_TRANSITION_ATTEMPTS = 3
 
 
 def _as_id_list(value: object) -> list[str]:
@@ -235,6 +247,31 @@ class TaskStore:
         )
         return True
 
+    def record_stuck(self, owner_id: str, task_id: str, *, head: str, job_id: str) -> None:
+        """Record that a stuck park parked on dead job ``job_id`` at head ``head`` (R9-219).
+
+        Written on the owner's scope explicitly: the dead-leg sweep runs with no ambient
+        tenant, so the audit service's ambient-scope write would be refused by RLS and
+        swallowed, and the revival sweep would then find nothing. Best-effort all the same:
+        the park is the durable outcome; a missing record only costs the automatic retry,
+        which the user can still take with Pick up.
+        """
+        try:
+            with rls_connection(self._engine, owner_id) as conn:
+                conn.execute(
+                    insert(audit_log_t).values(
+                        id=f"audit_{uuid.uuid4().hex}",
+                        user_id=owner_id,
+                        action=STUCK_AUDIT_ACTION,
+                        target=task_id,
+                        metadata={"head": head, "job_id": job_id},
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - the park stands either way
+            _log.warning(
+                "could not record the stuck park task_id={tid}: {err}", tid=task_id, err=str(exc)
+            )
+
     def record_run(self, owner_id: str, task_id: str, run_id: str) -> None:
         """Link a leg's agentic run to the task by appending to ``run_ids``.
 
@@ -343,19 +380,43 @@ class TaskStore:
     def _transition(
         self, owner_id: str, task_id: str, action: str, apply: Callable[[Task], Task]
     ) -> Task:
-        """Fetch → apply the entity transition (may raise) → persist state → audit."""
-        current = self.get(owner_id, task_id)
-        updated = apply(current)
-        self._persist_state(owner_id, task_id, updated)
-        self._audit(owner_id, action, updated)
-        return updated
+        """Fetch → apply the entity transition (may raise) → compare-and-set → audit.
 
-    def _persist_state(self, owner_id: str, task_id: str, task: Task) -> None:
-        """RLS-scoped UPDATE of the transition columns; raise NotFound if no row matched."""
+        R9-247: the write lands only over the state it was decided from. A writer that
+        committed in between (the leg's ``complete`` under a Pause, the user's Pause under the
+        leg's ``begin_wait``) makes the compare miss; the transition then re-reads and decides
+        again, so the entity's own guards judge the fresh row (a Pause on a task that has just
+        completed raises, a completion on a task that has just been paused still completes).
+        """
+        for _ in range(_TRANSITION_ATTEMPTS):
+            current = self.get(owner_id, task_id)
+            updated = apply(current)
+            if self._persist_state(owner_id, task_id, updated, read=current):
+                self._audit(owner_id, action, updated)
+                return updated
+            _log.info("task transition lost a race; deciding again", task_id=task_id, action=action)
+        raise TaskStateError(
+            "the task kept changing while this transition was decided",
+            context={"task_id": task_id, "action": action},
+        )
+
+    def _persist_state(self, owner_id: str, task_id: str, task: Task, *, read: Task) -> bool:
+        """RLS-scoped compare-and-set of the transition columns over the state ``read`` held.
+
+        Returns whether the write landed. A miss on a row that still exists is a lost race
+        (the caller re-decides); a miss on a row that is gone raises NotFound.
+        """
         with rls_connection(self._engine, owner_id) as conn:
             result = conn.execute(
                 update(tasks_t)
-                .where(tasks_t.c.id == task_id)
+                .where(
+                    tasks_t.c.id == task_id,
+                    tasks_t.c.state == read.state.value,
+                    tasks_t.c.paused.is_(read.paused),
+                    tasks_t.c.wait_kind.is_not_distinct_from(
+                        read.wait_kind.value if read.wait_kind is not None else None
+                    ),
+                )
                 .values(
                     state=task.state.value,
                     paused=task.paused,
@@ -363,8 +424,12 @@ class TaskStore:
                     updated_at=task.updated_at,
                 )
             )
-            if result.rowcount != 1:
-                raise TaskNotFoundError("task not found", context={"task_id": task_id})
+            if result.rowcount == 1:
+                return True
+            exists = conn.execute(select(tasks_t.c.id).where(tasks_t.c.id == task_id)).first()
+        if exists is None:
+            raise TaskNotFoundError("task not found", context={"task_id": task_id})
+        return False
 
     def _audit(self, owner_id: str, action: str, task: Task) -> None:
         audit_service.record(
@@ -417,6 +482,29 @@ class CheckpointStore:
             )
         return [row_to_checkpoint(r) for r in rows]
 
+    def count_legs(self, owner_id: str, task_id: str) -> int:
+        """How many legs ran on this task: checkpoints a leg wrote, not every checkpoint (R9-220).
+
+        The head sequence also counts the records written between legs (an obstacle, an
+        answered approval, a saved reply), so a task that asked for approval twice reached its
+        leg cap four checkpoints early. The kind is read from the ``leg_id`` inside the
+        checkpoint (the one field this table's JSON is filtered on), minted by
+        :func:`persona.tasks.checkpoint_id`.
+        """
+        prefix = checkpoint_id_prefix(task_id, CheckpointKind.LEG)
+        with rls_connection(self._engine, owner_id) as conn:
+            count = conn.execute(
+                select(func.count())
+                .select_from(checkpoints_t)
+                .where(
+                    checkpoints_t.c.task_id == task_id,
+                    checkpoints_t.c.checkpoint_json["leg_id"]
+                    .as_string()
+                    .startswith(prefix, autoescape=True),
+                )
+            ).scalar_one()
+        return int(count)
+
     # --- the atomic CAS append (mutation) -----------------------------------
 
     def append(
@@ -450,6 +538,21 @@ class CheckpointStore:
         Raises:
             CheckpointTooLargeError: If the checkpoint's accumulating core exceeds the budget.
         """
+        return self.append_applied(task, checkpoint, spend=spend, now=now)[0]
+
+    def append_applied(
+        self,
+        task: Task,
+        checkpoint: TaskCheckpoint,
+        *,
+        spend: Mapping[SpendKind, int] | None = None,
+        now: datetime,
+    ) -> tuple[Task, bool]:
+        """:meth:`append`, and whether the compare-and-set applied (PR 34 review, E).
+
+        A caller that must not claim it wrote something it did not (a saved reply on a
+        double submit) reads the flag; a leg's re-delivery is content with :meth:`append`.
+        """
         enforce_checkpoint_budget(checkpoint, token_budget=self._budget)
         seq = checkpoint.checkpoint_seq
         predecessor = seq - 1 if seq > 0 else None
@@ -460,7 +563,10 @@ class CheckpointStore:
         with rls_connection(self._engine, task.owner_id) as conn:
             conn.execute(
                 pg_insert(checkpoints_t)
-                .values(**checkpoint_values(checkpoint, task.owner_id))
+                # The row id is minted here rather than by Postgres's server default, in the
+                # same text form, so the community engine (which has no such default) can
+                # write a checkpoint too.
+                .values(id=str(uuid.uuid4()), **checkpoint_values(checkpoint, task.owner_id))
                 .on_conflict_do_nothing(constraint="uq_task_checkpoints_task_seq")
             )
             result = conn.execute(
@@ -485,14 +591,14 @@ class CheckpointStore:
             for kind, micros in (spend or {}).items():
                 advanced = advanced.record_spend(kind, micros, now=now)
             self._audit_append(task.owner_id, advanced, checkpoint)
-            return advanced
+            return advanced, True
         # Re-delivery: the head already advanced past seq-1 → a clean no-op (the CAS truth).
         _log.info(
             "checkpoint append no-op (re-delivery)",
             task_id=task.id,
             checkpoint_seq=seq,
         )
-        return self._read_task(task.owner_id, task.id)
+        return self._read_task(task.owner_id, task.id), False
 
     # --- internals ----------------------------------------------------------
 

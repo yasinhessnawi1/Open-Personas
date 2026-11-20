@@ -19,21 +19,30 @@ oversight (``recent`` and ``band_histogram`` are noted on their methods):
 - **One current version per chain** (R9-205). Postgres enforces it with the partial unique
   index ``uq_memory_chain_head``: when two writers race on one chain, the second ``upsert``
   raises ``ChainConflictError`` and the typed store re-reads and appends on top. Chroma has no
-  index and no retry, so two concurrent writers to one chain both land at the same version and
-  the chain refuses every later write until an operator runs ``persona repair
-  --resolve-raced``, the only remedy there. That covers every versioned writer: a persona save
-  through ``PersonaRegistry``, the core block refresh, autonomy and tool consent. Two identical
-  persona saves still collapse into one version on both, because the id the store mints for an
-  update is deterministic on what is being saved.
+  index. Two UPDATES racing in one process are still caught there, because an update names the
+  version it supersedes and Chroma checks that under its folder lock (R9-271, below), so the
+  loser re-reads and appends on top as on Postgres. Two FIRST writes to a new chain name
+  nothing, so on Chroma both land at version 1 and the chain refuses every later write until an
+  operator runs ``persona repair --resolve-raced``; so do two processes on one folder. Two
+  identical persona saves still collapse into one version on both, because the id the store
+  mints for an update is deterministic on what is being saved.
 - **Forgetting a version of a chain** (``excise_versions``, R9-209) is one transaction on
   Postgres and two calls on Chroma, delete first, so the forgotten text goes on both. The
   rewrite is planned from a read, and another writer can land in between. Postgres locks the
   chain and compares it with that read inside the transaction, so a stale plan never lands:
-  the forget reads again and plans again. Chroma makes the same comparison just before it
-  acts, which catches a writer that landed after the read but not one landing inside the
-  excise itself. A stale plan that lands there leaves a chain with a version missing, which
-  ``persona repair`` refuses and will not settle, so that memory's history raises until a
-  person looks at it. Its current version still reads.
+  the forget reads again and plans again. Chroma makes the same comparison under the folder's
+  lock, which every write in the process also takes (R9-271), so within one process no writer
+  lands inside the excise. A writer in another process on the same folder still can, and a
+  stale plan that lands then leaves a chain with a version missing, which ``persona repair``
+  refuses and will not settle, so that memory's history raises until a person looks at it.
+  Its current version still reads.
+- **A write that must still find what it read** (``upsert`` with ``supersedes`` and
+  ``requires``, R9-271). Postgres locks the evidence ``FOR KEY SHARE`` and the superseded
+  versions ``FOR UPDATE``, each in id order, compares, and writes, in one transaction, so a
+  forget either waits for the write and then removes what it wrote, or commits first and the
+  write is refused. Chroma has no transaction and keeps the same order with a lock per folder
+  and persona, which every write and delete in the process takes: exact within one process, and
+  not across two processes on one folder, which Chroma does not support anyway.
 """
 
 from __future__ import annotations
@@ -41,6 +50,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from persona.schema.chunks import PersonaChunk
 
 __all__ = ["Backend"]
@@ -62,6 +73,9 @@ class Backend(Protocol):
         persona_id: str,
         store_kind: str,
         chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
     ) -> None:
         """Insert or replace ``chunks`` for ``(persona_id, store_kind)``.
 
@@ -72,6 +86,23 @@ class Backend(Protocol):
         refuses the whole call with :class:`persona.errors.ChunkIntegrityError` before
         anything is embedded or stored (R9-210). The check belongs here because every writer
         passes through this method, and a bad row that lands only fails on some later read.
+
+        ``supersedes`` and ``requires`` are what a write read before it decided, and the call
+        lands only if they still hold (R9-271). Everything or nothing, on every transport:
+
+        - ``supersedes`` maps the id of each version on disk this write replaces to the version
+          number it was read at and the id of the chunk that replaces it. Each must still be
+          there, still current and still at that number, or this raises
+          :class:`persona.errors.ChainConflictError`; otherwise its ``superseded_by`` moves to the
+          new id, and nothing else about it changes. A forget that deleted or renumbered it in
+          between is how it stops holding, and without this check the write put the deleted
+          version back.
+        - ``requires`` names the ids this write was built from, to be found in one of
+          ``requires_kinds`` for the persona, or this raises
+          :class:`persona.errors.ForgottenEvidenceError`. A derived memory (a core block, a gist)
+          is built during a model call, and a forget of its evidence can land in that call.
+
+        Required of every transport. A transport that ignores them puts forgotten memories back.
         """
         ...
 

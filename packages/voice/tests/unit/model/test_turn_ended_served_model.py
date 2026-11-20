@@ -512,6 +512,7 @@ class _MeterFeed:
         cost_usd: float | None,
         provider: str,
         model: str,
+        failed_tries: tuple[object, ...] = (),
     ) -> None:
         self.llm.append((provider, model))
 
@@ -659,3 +660,252 @@ async def test_a_reporter_that_raises_is_logged_unattributed_and_the_turn_still_
     assert notified[-1] is SessionLifecycleEvent.AGENT_STOPPED_SPEAKING
     assert [reply.text for reply in heard.replies] == ["Hi"]
     assert len(rows.rows) == 1
+
+
+class _GatedBackend(_Backend):
+    """Speaks only once ``gate`` is set: holds a call between commit points."""
+
+    def __init__(
+        self, provider: str, model: str, behaviours: list[str], gate: asyncio.Event
+    ) -> None:
+        super().__init__(provider, model, behaviours)
+        self._gate = gate
+
+    async def chat_stream(self, messages: list[Any], **_kwargs: Any) -> AsyncIterator[StreamChunk]:
+        await self._gate.wait()
+        async for chunk in super().chat_stream(messages):
+            yield chunk
+
+
+class _EmptyThenRateLimited(_Backend):
+    """An empty completion that still reports usage (a billed try), on every call."""
+
+    async def chat_stream(self, messages: list[Any], **_kwargs: Any) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        yield StreamChunk(
+            delta="",
+            is_final=True,
+            usage=TokenUsage(prompt_tokens=700, completion_tokens=0, total_tokens=700),
+        )
+
+
+class _UnrecoveredFeed(_MeterFeed):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed_tries: list[tuple[object, ...]] = []
+
+    def note_llm_usage(self, *, failed_tries: tuple[object, ...] = (), **kw: Any) -> None:
+        super().note_llm_usage(**kw)
+        self.failed_tries.append(failed_tries)
+
+
+async def test_a_concurrent_call_on_the_shared_chain_does_not_rename_the_billed_round(
+    ended: _EndedLines,
+) -> None:
+    """R9-223: call B runs start to end on the primary while call A's fallback is held.
+
+    The chain is one object shared by every call on the tier. B's call used to reset the
+    ledger A was then read from at its first reply chunk, so A was billed at the primary.
+    """
+    gate = asyncio.Event()
+    primary = _Backend("nvidia", "primary-model", [_RATE_LIMIT, _SPEAK])
+    fallback = _GatedBackend("anthropic", "fallback-model", [_SPEAK], gate)
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer_a, producer_b = _producer(chain), _producer(chain)
+    meter_a, meter_b = _MeterFeed(), _MeterFeed()
+    producer_a.set_turn_meter(meter_a)  # type: ignore[arg-type]
+    producer_b.set_turn_meter(meter_b)  # type: ignore[arg-type]
+
+    turn_a = asyncio.create_task(_loop(producer_a, _TTS()).invoke_model_for_turn(_turn()))
+    while primary.stream_calls < 1:  # A's primary has failed; A waits on the fallback
+        await asyncio.sleep(0)
+    await _loop(producer_b, _TTS()).invoke_model_for_turn(_turn("and B?"))
+    gate.set()
+    await turn_a
+
+    assert meter_a.llm == [("anthropic", "fallback-model")]
+    assert meter_b.llm == [("nvidia", "primary-model")]
+    assert ended.lines[-1].endswith("provider=anthropic model=fallback-model")
+
+
+async def test_a_cut_turn_read_after_the_next_turn_started_names_its_own_model() -> None:
+    """R9-223 (second race): the next turn's start no longer clears the previous turn's model.
+
+    A cut turn whose unwinding outlives the 2 s watchdog has its ``finally`` read the
+    served model after the next turn's ``__call__``. The model now rides the turn's own
+    stream object, so that read names the cut turn's model.
+    """
+    primary = _Backend("nvidia", "primary-model", [_RATE_LIMIT, _SPEAK])
+    fallback = _Backend("anthropic", "fallback-model", [_HANG])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain)
+
+    turn_1 = await producer(_turn())
+    assert await anext(turn_1) == "Hi from fallback-model. "
+    turn_2 = await producer(_turn("and then?"))  # the next turn starts; turn 1 still unwinding
+
+    assert turn_1.served_model() == ("anthropic", "fallback-model")  # type: ignore[attr-defined]
+    assert turn_2.served_model() is None  # type: ignore[attr-defined]
+    await turn_1.aclose()  # type: ignore[attr-defined]
+    await turn_2.aclose()  # type: ignore[attr-defined]
+
+
+async def test_the_turn_ended_line_reads_the_turns_own_stream_first(ended: _EndedLines) -> None:
+    """The loop prefers the stream object's own served model over the producer's field."""
+
+    class _Stream:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self) -> _Stream:
+            return self
+
+        async def __anext__(self) -> str:
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return "Hi"
+
+        def served_model(self) -> tuple[str, str] | None:
+            return ("anthropic", "this-turn")
+
+    class _Producer:
+        async def __call__(self, _t: Transcript) -> _Stream:
+            return _Stream()
+
+        def served_model(self) -> tuple[str, str] | None:
+            return ("nvidia", "the-next-turn")
+
+    await _loop(_Producer(), _TTS()).invoke_model_for_turn(_turn())
+
+    assert _ended(ended) == ("completed", "anthropic", "this-turn")
+
+
+async def test_a_failed_try_that_cost_tokens_reaches_the_meter(
+    ended: _EndedLines,
+) -> None:
+    """The empty completion's tokens are carried to the meter, to be charged (D-ORCH-11-18-s)."""
+    primary = _EmptyThenRateLimited("nvidia", "primary-model", [])
+    fallback = _Backend("anthropic", "fallback-model", [_SPEAK])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain)
+    meter = _UnrecoveredFeed()
+    producer.set_turn_meter(meter)  # type: ignore[arg-type]
+
+    await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
+
+    assert meter.llm == [("anthropic", "fallback-model")]
+    (wasted,) = meter.failed_tries[0]
+    assert (wasted.model, wasted.error_class, wasted.usage.prompt_tokens) == (  # type: ignore[attr-defined]
+        "primary-model",
+        "EmptyCompletionError",
+        700,
+    )
+
+
+class _UsageFirstBackend(_Backend):
+    """Sends its usage before its reply, so the chain holds it back until commit."""
+
+    async def chat_stream(self, messages: list[Any], **_kwargs: Any) -> AsyncIterator[StreamChunk]:
+        self.stream_calls += 1
+        yield StreamChunk(
+            delta="", usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        )
+        yield StreamChunk(delta=f"Hi from {self.model_name}. ", is_final=True)
+
+
+async def test_a_held_back_usage_chunk_is_billed_at_the_fallback_that_released_it(
+    ended: _EndedLines,
+) -> None:
+    """The usage chunk reaches the producer BEFORE the payload that committed the chain.
+
+    It is the chunk the meter prices from, so it must carry the fallback's identity even
+    though the chain held it back and released it at commit; unstamped, the round would be
+    billed at the chain's own (primary) names.
+    """
+    primary = _Backend("nvidia", "primary-model", [_RATE_LIMIT])
+    fallback = _UsageFirstBackend("anthropic", "fallback-model", [])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain)
+    meter = _MeterFeed()
+    producer.set_turn_meter(meter)  # type: ignore[arg-type]
+
+    await _loop(producer, _TTS()).invoke_model_for_turn(_turn())
+
+    assert meter.llm == [("anthropic", "fallback-model")]
+    assert _ended(ended) == ("completed", "anthropic", "fallback-model")
+
+
+class _CaptureLedger:
+    """A ``LedgerPort`` double recording every idempotent per-turn capture."""
+
+    def __init__(self) -> None:
+        self.captures: list[dict[str, object]] = []
+
+    def capture_up_to_idempotent(self, **kw: object) -> tuple[int, int]:
+        self.captures.append(kw)
+        amount = kw["amount"]
+        assert isinstance(amount, int)
+        return amount, 10_000
+
+
+class _Disposable:
+    def dispose(self) -> None: ...
+
+
+async def test_a_turn_whose_follow_up_fails_bills_its_first_round_and_leaks_nothing(
+    ended: _EndedLines,
+) -> None:
+    """A tool turn's round 2 raises AllModelsFailedError: the turn never answers.
+
+    The streaming loop's ``finally`` still hands the heard reply to the recorder, which
+    commits and bills the turn, so round 1's usage is billed on THAT turn (key ``:1``)
+    and the next turn is billed only its own round (key ``:2``), never the failed
+    turn's leftovers. Sonnet's static rate: 10 in, 5 out = 0.0105 cents a round.
+    """
+    from persona.billing import BillingConfig
+    from persona_voice.billing import VoiceTurnBillingMeter
+    from persona_voice.model.memory import VoiceTurnRecorder
+    from persona_voice.turn_taking.bridge import HeardWordsBridge
+
+    primary = _Backend("anthropic", "claude-sonnet-4-6", ["web_search", _RATE_LIMIT, _SPEAK])
+    fallback = _Backend("anthropic", "claude-haiku-4-5", [_RATE_LIMIT])
+    chain = MultiModelChatBackend(
+        [primary, fallback], tier_name="frontier", max_retries_per_backend=0
+    )
+    producer = _producer(chain, toolbox=Toolbox([_web_search], allow_list=None))  # type: ignore[list-item]
+    ledger = _CaptureLedger()
+    meter = VoiceTurnBillingMeter(
+        ledger=ledger,  # type: ignore[arg-type]
+        billing_config=BillingConfig(),
+        engine_factory=_Disposable,  # type: ignore[arg-type]
+        user_id="owner-1",
+        call_id="call1",
+        stt_provider="no-priced-stt",
+        stt_model="none",
+        tts_provider="no-priced-tts",
+        tts_model="none",
+        streamed_seconds_reader=lambda: 0.0,
+    )
+    producer.set_turn_meter(meter)
+    recorder = VoiceTurnRecorder(producer._ctx, billing_meter=meter)  # noqa: SLF001
+    producer._turn_recorder = recorder  # noqa: SLF001
+    loop = _loop(producer, _TTS(), reply_listener=HeardWordsBridge(recorder))
+
+    await loop.invoke_model_for_turn(_turn())
+    assert _ended(ended)[0] == "provider_error"
+    await loop.invoke_model_for_turn(_turn("and now?"))
+
+    assert [c["billing_key"] for c in ledger.captures] == ["voice:call1:1", "voice:call1:2"]
+    assert [c["cost_cents"] for c in ledger.captures] == [
+        pytest.approx(0.0105),
+        pytest.approx(0.0105),
+    ]

@@ -19,6 +19,7 @@ from persona.audit import jsonl_file_lock
 from persona.tools._sandbox import require_path_segment
 from sqlalchemy import select, update
 
+from persona_api.db.connection_bounds import lift_statement_timeout
 from persona_api.db.models import store_audit_events as store_audit_t
 from persona_api.services.erasure_audit import FREE_TEXT_FIELDS
 from persona_api.services.erasure_service import AUDIT_CONTENT_KEYS
@@ -35,6 +36,10 @@ _FILE_ATTEMPTS = 3
 
 def rekey_store_audit_rows(conn: Connection, *, owner_id: str, erasure_id: str) -> int:
     """The owner's store-audit rows, under the erasure id, without free text or content keys."""
+    # R9-313: the ``written_by`` UPDATE below has no index to use and the table is never
+    # pruned, so it scans every tenant's events, and a statement timeout would fail the erasure
+    # on every retry. Lifted for the caller's transaction only. (An index is a follow-up.)
+    lift_statement_timeout(conn)
     audit = store_audit_t.c
     for audit_id, meta in conn.execute(
         select(audit.id, audit.metadata).where(audit.persona_id == owner_id)

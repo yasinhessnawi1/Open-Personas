@@ -73,6 +73,7 @@ from persona_api.approvals.action_executor import ToolboxActionExecutor
 from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.editions import MeteredCreditsPolicy
+from persona_api.imagegen.chat_charge import ChatImageChargeHook
 from persona_api.mcp import BuiltinMCPSupervisor
 from persona_api.mcp.adoption_policy import vetted_catalog_for_search
 from persona_api.sandbox import make_pool_code_execution_tool
@@ -117,6 +118,7 @@ if TYPE_CHECKING:
         RescheduleInterpreter,
         StandingIntentRecognizer,
         SteeringInterpreter,
+        TaskSteeringPort,
     )
     from persona_runtime.tier import TierRegistry
     from persona_runtime.unified_recall import UnifiedProjection
@@ -699,6 +701,27 @@ class RuntimeFactory:
         """
         return self._openrouter_resolver
 
+    def _chat_image_charge_hook(self) -> ChatImageChargeHook:
+        """The chat ``generate_image`` tool's charge hook (R9-308), over this factory's policy.
+
+        The floor is the image floor every other image surface uses
+        (``APIConfig.image_credit_floor``); without an api config (CLI / tests) it is the
+        hook's own default of one credit. The cost source is the same resolver every loop
+        prices with.
+        """
+        if self._api_config is None:
+            return ChatImageChargeHook(
+                credits_policy=self._credits_policy,
+                rls_engine=self._engine,
+                cost_source=self._metadata_resolver,
+            )
+        return ChatImageChargeHook(
+            credits_policy=self._credits_policy,
+            rls_engine=self._engine,
+            cost_source=self._metadata_resolver,
+            floor=self._api_config.image_credit_floor,
+        )
+
     @property
     def metadata_resolver(self) -> ChainedModelMetadataResolver:
         """The shared cost-pricing chain (static + optional OpenRouter catalog).
@@ -966,6 +989,11 @@ class RuntimeFactory:
         # ``code_execution`` graceful-absence shape: no backend → no tool;
         # the model surfaces a structured error if it tries to invoke one
         # that isn't registered.
+        #
+        # R9-308: the tool now charges the owner for what it makes. It used to call the
+        # backend with no credits policy at all, so every chat image was free. The hook
+        # checks the balance before the provider and records one keyed ledger entry per
+        # call after it, priced like every other image (``image_cost``).
         if self._image_backend is not None:
             extra.append(
                 make_generate_image_tool(
@@ -973,6 +1001,7 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                     persona_visual_style=persona.identity.visual_style,
                     persister=workspace_persister,
+                    charge_hook=self._chat_image_charge_hook(),
                 )
             )
         # Spec 28 B3 — render_diagram is runtime-wired (needs the persister to
@@ -1033,7 +1062,9 @@ class RuntimeFactory:
         # is rejected, never stored (D-K2-7).
         if self._graph_store is not None and self._record_user_fact_enabled:
             from persona_runtime.extraction.direct_write import make_record_user_fact_tool
+            from persona_runtime.interaction_scope import current_interaction
 
+            from persona_api.initiative.disclosures import PgDisclosureStore
             from persona_api.middleware.rls_context import current_user_id
 
             extra.append(
@@ -1043,6 +1074,11 @@ class RuntimeFactory:
                     persona_id=persona.persona_id,
                     # R9-284: an erased persona's late turn must not grow the graph again.
                     persona_exists=self._persona_exists,
+                    # R9-253: the write names the turn's interaction (bound per chat turn,
+                    # delegated turn, run and task leg), and a disclosure records the durable
+                    # fact first, so initiative's gate holds it after the node is forgotten.
+                    interaction_provider=current_interaction,
+                    disclosures=PgDisclosureStore(self._engine),
                 )
             )
         # Spec A4 (A4-D-5) — the read-only ``task_introspect`` tool: the persona's only window
@@ -1746,6 +1782,22 @@ class RuntimeFactory:
 
         return _provider
 
+    def _build_task_steering_port_provider(self) -> Callable[[], TaskSteeringPort | None]:
+        """The chat steering port provider (R9-241): owner-scoped per turn, closed off-request.
+
+        Mirrors :meth:`_build_task_reader_provider`: no request owner means no port, and the
+        loop then falls back to emitting the verb for the worker to apply.
+        """
+        from persona_api.middleware.rls_context import current_user_id
+        from persona_api.services.task_steering_service import ControlSteeringPort
+
+        port = ControlSteeringPort(self._engine)
+
+        def _provider() -> TaskSteeringPort | None:
+            return port if current_user_id.get() else None
+
+        return _provider
+
     def _build_task_pickup_provider(
         self, persona_id: str | None
     ) -> Callable[[], TaskPickupPort | None]:
@@ -2137,6 +2189,9 @@ class RuntimeFactory:
             amendment_interpreter=amendment_interpreter,
             steering_interpreter=steering_interpreter,
             task_reader_provider=self._build_task_reader_provider(),
+            # R9-241: pause and resume are applied during the turn through the shared
+            # controls, so the reply says what happened (D-ORCH-11-18-d (4)).
+            task_steering_port_provider=self._build_task_steering_port_provider(),
             # Spec A8 (T6): the conversational reschedule verb. The interpreter resolves the target
             # + new cadence; the tz/quiet-hours providers resolve the user's frame per turn (the K6
             # seam). Fail-soft: None → the reschedule gate stays inert. Lands with the worker-side

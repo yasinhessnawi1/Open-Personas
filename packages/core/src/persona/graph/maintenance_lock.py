@@ -7,7 +7,10 @@ connection of its own, and reads its candidates only once it holds it; the erasu
 (and the sweep's, which is the same function) takes it in its own transaction, before any row
 lock, so it is released at commit or rollback. A user's forget or delete of a node is the third
 taker (R9-287, D-R9-287-forget-canonical): the node delete takes it the same way, first in its
-transaction, waiting at most its lock timeout.
+transaction, waiting at most its lock timeout. A conversation delete that forgets its memory is
+the fourth (R9-304): first in the row delete's transaction, then the conversation row ``FOR
+UPDATE``, which waits for writers holding that row ``FOR KEY SHARE`` (the write guard). Those
+writers never wait for this lock, so that wait closes no cycle either.
 
 The key is the two-``int4`` form, ``(GRAPH_MAINTENANCE_CLASS, hashtext('graph-maint:' || owner))``.
 Postgres keeps that key space apart from the single ``bigint`` keys the other advisory locks in
@@ -55,6 +58,11 @@ _log = get_logger("graph.maintenance_lock")
 GRAPH_MAINTENANCE_CLASS = 2_840_284
 _KEY = f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)"
 _SESSION_LOCK = text(f"SELECT pg_advisory_lock({_KEY})")
+#: R9-313: the api's engines cancel a statement after a few minutes, and the holders this wait
+#: can meet have no such bound (another run, an erasure's graph step, an account cascade). So
+#: the waiting transaction lifts it. ``true``: this transaction only, which the commit right
+#: after the lock ends. Inline, because core cannot import the api's helper.
+_LIFT_STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', '0', true)")
 _SESSION_UNLOCK = text(f"SELECT pg_advisory_unlock({_KEY})")
 _XACT_LOCK = text(f"SELECT pg_advisory_xact_lock({_KEY})")
 _XACT_TRY = text(f"SELECT pg_try_advisory_xact_lock({_KEY})")
@@ -87,15 +95,17 @@ def graph_maintenance_held(engine: Engine, owner_id: str) -> Iterator[None]:
     """Hold the owner's lock on a session connection of its own for the ``with`` body.
 
     Consolidation's run. The connection is committed after the lock is taken, so it does not sit
-    idle in a transaction while it holds the lock. The lock is released in a ``finally``; if the
-    release itself fails, the connection is invalidated instead of going back to the pool, and
-    closing its session releases the lock.
+    idle in a transaction while it holds the lock. The wait for the lock has no statement
+    timeout (R9-313); the commit puts the session's own bound back for the run. The lock is
+    released in a ``finally``; if the release itself fails, the connection is invalidated
+    instead of going back to the pool, and closing its session releases the lock.
     """
     if engine.dialect.name != "postgresql":
         yield
         return
     conn = engine.connect()
     try:
+        conn.execute(_LIFT_STATEMENT_TIMEOUT)
         conn.execute(_SESSION_LOCK, {"owner": owner_id})
     except BaseException:
         conn.close()  # not taken: nothing to release

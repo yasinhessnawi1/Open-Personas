@@ -22,7 +22,9 @@ permissions:
 jobs:
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # The suite takes 40 to 57 minutes on a hosted runner; 60 cancelled it under load
+    # (PRs #43, #44, #45 and main on 2026-11-18). 90 leaves headroom without hiding a hang.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3

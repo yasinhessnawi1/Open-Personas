@@ -29,10 +29,40 @@ from persona_runtime.legs.semantic_distiller import DEFAULT_DISTILL_TIMEOUT_S
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from persona_api.db.connection_bounds import (
+    DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_KEEPALIVES_COUNT,
+    DEFAULT_KEEPALIVES_IDLE_S,
+    DEFAULT_KEEPALIVES_INTERVAL_S,
+    DEFAULT_POOL_TIMEOUT_S,
+    DEFAULT_STATEMENT_TIMEOUT_MS,
+    DbConnectionBounds,
+)
+
 if TYPE_CHECKING:
     from persona.skills.sources.github import GithubRepoSpec
 
-__all__ = ["APIConfig", "Edition"]
+__all__ = [
+    "DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S",
+    "DEFAULT_RUN_SHUTDOWN_TIMEOUT_S",
+    "DEFAULT_SHUTDOWN_BUDGET_S",
+    "DEFAULT_WORKER_DRAIN_SECONDS",
+    "APIConfig",
+    "Edition",
+]
+
+# R9-313: shutdown fits inside the api container's 30 s stop grace (the server kit's
+# docker-compose.yml; Fly's kill_timeout was 30 s too). Uvicorn takes up to 5 s
+# (--timeout-graceful-shutdown), then the whole lifespan teardown gets one 20 s budget, which
+# leaves 5 s for the process to exit. persona_api.background.shutdown has the reasoning.
+#: The lifespan teardown's one budget.
+DEFAULT_SHUTDOWN_BUDGET_S = 20.0
+#: How long the worker lets in-flight jobs finish before cancelling them (lease reclaim).
+DEFAULT_WORKER_DRAIN_SECONDS = 12.0
+#: How long shutdown waits for cancelled chat turns before giving up on them.
+DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S = 10.0
+#: How long shutdown waits for cancelled agentic runs before giving up on them.
+DEFAULT_RUN_SHUTDOWN_TIMEOUT_S = 10.0
 
 
 class Edition(StrEnum):
@@ -187,9 +217,12 @@ class APIConfig(BaseSettings):
     )
     # Spec A0 worker runtime knobs (all config-driven — D-A0-3 concurrency, D-A0-5
     # drain). Poll uses a jittered interval so N workers don't thunder the claim
-    # query in lockstep. ``worker_drain_seconds`` must be < Fly's ``kill_timeout``
-    # (300s); default 270 leaves a ~30s safety margin (D-A0-5). The claim lease is
-    # a bootstrap; per-job-type heartbeat (D-A0-1) extends it during execution.
+    # query in lockstep. ``worker_drain_seconds`` must fit inside the shutdown budget
+    # (R9-313: 12 s, inside the closers' share of the 20 s budget, itself inside the
+    # container's 30 s stop grace). It was 270, sized for a 300 s Fly kill_timeout that no
+    # deploy has had since, so SIGKILL always cut it short. A job the drain cancels is
+    # requeued when its lease lapses. The claim lease is a bootstrap; per-job-type heartbeat
+    # (D-A0-1) extends it during execution.
     worker_concurrency: int = Field(default=4, ge=1, validation_alias="WORKER_CONCURRENCY")
     worker_poll_interval_seconds: float = Field(
         default=1.0, gt=0, validation_alias="WORKER_POLL_INTERVAL_SECONDS"
@@ -201,7 +234,7 @@ class APIConfig(BaseSettings):
         default=90, gt=0, validation_alias="WORKER_CLAIM_LEASE_SECONDS"
     )
     worker_drain_seconds: float = Field(
-        default=270.0, gt=0, validation_alias="WORKER_DRAIN_SECONDS"
+        default=DEFAULT_WORKER_DRAIN_SECONDS, gt=0, validation_alias="WORKER_DRAIN_SECONDS"
     )
     # Claim-time fairness caps (D-A0-6). ``per_user`` (default 3) stops one user's
     # flood from starving others — a user already at the cap has their queued jobs
@@ -586,6 +619,26 @@ class APIConfig(BaseSettings):
 
     # Connection pool (research §5 — roomy pool removes store/CRUD contention).
     db_pool_size: int = 5
+
+    # R9-313: bounds on every api Postgres connection (persona_api.db.connection_bounds has
+    # the reasoning and the sizing). Zero switches the statement, connect and keepalive bounds
+    # off. The statement timeout sits well above the longest lock wait any statement takes
+    # (the erasure backstop's 60 s); a value set in the DSN itself wins over these.
+    db_statement_timeout_ms: int = Field(default=DEFAULT_STATEMENT_TIMEOUT_MS, ge=0)
+    db_pool_timeout_seconds: float = Field(default=DEFAULT_POOL_TIMEOUT_S, gt=0)
+    db_connect_timeout_seconds: int = Field(default=DEFAULT_CONNECT_TIMEOUT_S, ge=0)
+    db_keepalives_idle_seconds: int = Field(default=DEFAULT_KEEPALIVES_IDLE_S, ge=0)
+    db_keepalives_interval_seconds: int = Field(default=DEFAULT_KEEPALIVES_INTERVAL_S, ge=0)
+    db_keepalives_count: int = Field(default=DEFAULT_KEEPALIVES_COUNT, ge=0)
+    # R9-313: the lifespan teardown's one budget (see the constants at the top), and inside
+    # it how long the cancelled chat turns and agentic runs are waited for before each one
+    # still running is given up on and logged. The restart sweep reconciles them next boot.
+    # All three must be positive: 0 would mean "give up at once", not "off".
+    shutdown_budget_seconds: float = Field(default=DEFAULT_SHUTDOWN_BUDGET_S, gt=0)
+    chat_turn_shutdown_timeout_seconds: float = Field(
+        default=DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S, gt=0
+    )
+    run_shutdown_timeout_seconds: float = Field(default=DEFAULT_RUN_SHUTDOWN_TIMEOUT_S, gt=0)
 
     # External file storage (R5-D-4). "local" (default → the workspace volume,
     # byte-unchanged) or "s3" (generic S3 — Tigris / R2 / MinIO / AWS via boto3).
@@ -984,6 +1037,18 @@ class APIConfig(BaseSettings):
         """
         url = self.app_database_url or self.database_url
         return url.replace("+asyncpg", "+psycopg")
+
+    @property
+    def db_connection_bounds(self) -> DbConnectionBounds:
+        """The statement, pool, connect and keepalive bounds every api engine applies (R9-313)."""
+        return DbConnectionBounds(
+            statement_timeout_ms=self.db_statement_timeout_ms,
+            pool_timeout_s=self.db_pool_timeout_seconds,
+            connect_timeout_s=self.db_connect_timeout_seconds,
+            keepalives_idle_s=self.db_keepalives_idle_seconds,
+            keepalives_interval_s=self.db_keepalives_interval_seconds,
+            keepalives_count=self.db_keepalives_count,
+        )
 
     @property
     def jwt_algorithms_list(self) -> list[str]:

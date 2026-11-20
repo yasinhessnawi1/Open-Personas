@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from persona.imagegen import (
+    MAX_IMAGES_PER_CALL,
     ContentRejectedError,
     ImageGenOptions,
     ImageGenUnavailableError,
@@ -125,7 +126,8 @@ class ImageGenRequest(BaseModel):
 
     prompt: str = Field(min_length=1)
     size: ImageSize = "1024x1024"
-    count: int = Field(default=1, ge=1, le=2)
+    # The same cap the chat ``generate_image`` tool enforces (R9-308), from one constant.
+    count: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_CALL)
     quality: ImageQuality = "standard"
 
 

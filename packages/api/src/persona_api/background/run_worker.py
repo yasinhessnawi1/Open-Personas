@@ -23,16 +23,22 @@ available if the blocking callback proves fragile — not the v0.1 default.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from persona.billing import BillingConfig, credits_charged
 from persona.errors import DailySpendCapExceededError
 from persona.logging import get_logger
 from persona_runtime.agentic.run import CancelToken, RunStatus
-from persona_runtime.cost import compute_turn_cost
+from persona_runtime.cost import PricedRound, price_rounds
+from persona_runtime.interaction_scope import (
+    InteractionRef,
+    bind_interaction,
+    reset_interaction,
+)
 from sqlalchemy import text
 
+from persona_api.background.shutdown import cancel_and_wait
+from persona_api.config import DEFAULT_RUN_SHUTDOWN_TIMEOUT_S
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.sandbox import (
     SandboxRequestContext,
@@ -72,6 +78,8 @@ _RUN_TERMINAL_COPY: dict[str, tuple[str, str]] = {
 
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.agentic.loop import AgenticLoop
     from persona_runtime.agentic.run import Run, StepUsage
@@ -125,6 +133,13 @@ class _RunBillingWatcher:
     loop stops at the NEXT step boundary — the in-flight step finishes cleanly, and a
     runaway loop cannot consume unbounded uncharged cost. The DB write is offloaded
     off the event loop so the per-step billing never stalls other background tasks.
+
+    R9-299: the loop also reports its two summary calls. The best-effort ``summary`` is
+    the run's deliverable and is charged like a step. A ``compaction`` is not a step,
+    and the floor is the per-step infra charge (D-M3-4 amendment), so it pays no floor
+    of its own: it is held and priced with the NEXT usage, in one ``price_rounds`` call
+    with one ceil and one floor. :meth:`flush` charges whatever is still held when the
+    run ends, so a run that stops straight after a compaction still pays for it once.
     """
 
     def __init__(
@@ -150,15 +165,46 @@ class _RunBillingWatcher:
         # CROSSES below $2. None → community/flag-off (no auto-top-up).
         self._gateway = gateway
         self._topup_tasks: set[asyncio.Task[None]] = set()
+        #: Compactions reported since the last charge, waiting for the next usage to
+        #: share its floor (R9-299). Replaced, never mutated in place.
+        self._held: tuple[PricedRound, ...] = ()
 
     async def on_step_usage(self, usage: StepUsage) -> None:
-        cost_cents, basis = compute_turn_cost(
-            provider=usage.provider,
-            model=usage.model,
+        # Each round is priced at its own served model, so the step's failed tries that
+        # cost tokens are charged at their own model too (D-ORCH-11-18-s).
+        priced = PricedRound(
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
-            actual_cost_usd=usage.cost_usd,
+            cost_usd=usage.cost_usd,
+            provider=usage.provider,
+            model=usage.model,
+            failed_tries=usage.failed_tries,
+        )
+        if usage.call == "compaction":
+            self._held = (*self._held, priced)
+            return
+        rounds = (*self._held, priced)
+        self._held = ()
+        await self._charge(rounds)
+
+    async def flush(self) -> None:
+        """Charge the compactions still held when the run ends (R9-299).
+
+        Called from the worker's terminal ``finally``. Nothing held charges nothing, so
+        a second call is a no-op.
+        """
+        if not self._held:
+            return
+        rounds = self._held
+        self._held = ()
+        await self._charge(rounds)
+
+    async def _charge(self, rounds: tuple[PricedRound, ...]) -> None:
+        """Price ``rounds`` together and capture them: one ceil, one floor."""
+        cost_cents, basis = price_rounds(
+            rounds,
             source=self._cost_source,
+            surface="agentic_run",
         )
         charge = credits_charged(
             provider_cents=cost_cents,
@@ -256,7 +302,13 @@ class RunRegistry:
         cost_source: CostSource | None = None,
         billing_config: BillingConfig | None = None,
         agentic_floor: int = 1,
+        shutdown_timeout_s: float = DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
+        if shutdown_timeout_s <= 0:
+            msg = "shutdown_timeout_s must be positive"
+            raise ValueError(msg)
+        # R9-313: how long ``aclose`` waits for the cancelled runs, all together.
+        self._shutdown_timeout_s = shutdown_timeout_s
         self._engine = rls_engine
         self._handles: dict[str, RunHandle] = {}
         # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
@@ -332,6 +384,7 @@ class RunRegistry:
         sandbox_token = set_sandbox_request_context(
             SandboxRequestContext(owner_id=handle.owner_id, conversation_id=handle.run_id)
         )
+        interaction_token: Token[InteractionRef | None] | None = None
         # Accumulate the per-step event log so a restart mid-run leaves the run
         # VIEWABLE (S08-2: progress visible, not resumable). The final Run (with
         # the authoritative Step objects) overwrites this on completion.
@@ -375,6 +428,9 @@ class RunRegistry:
             else None
         )
         try:
+            # R9-253: a direct write here names its interaction (initiative's gate). Bound
+            # inside the try, so a raise cannot skip the cleanup in its finally.
+            interaction_token = bind_interaction("agentic_run", handle.run_id)
             if billing_watcher is not None:
                 run = await loop.run(
                     task_text,
@@ -430,13 +486,32 @@ class RunRegistry:
                 or str(exc),
             )
         finally:
-            reset_sandbox_request_context(sandbox_token)
-            # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
-            # (clean / cancel / error / shutdown). Best-effort — teardown must never
-            # crash (the TTL staleness sweep in ``admit_long_op`` is the crash backstop).
-            self._release_op_slot(handle)
-            current_user_id.reset(token)
-            await handle.events.put(None)  # end-of-stream sentinel for SSE
+            try:
+                # R9-299: a compaction the run never got past is still owed. First, while
+                # the owner's scope is still bound; billing here must never break the
+                # teardown. Its own ``finally`` holds the teardown, because the capture
+                # is an ``await``: a second cancellation landing there is not an
+                # ``Exception`` and would otherwise skip every line below.
+                if billing_watcher is not None:
+                    try:
+                        await billing_watcher.flush()
+                    except Exception as exc:  # noqa: BLE001 - teardown must never crash
+                        _log.warning(
+                            "agentic run could not charge its held compaction rid={rid}: {err}",
+                            rid=handle.run_id,
+                            err=str(exc),
+                        )
+            finally:
+                if interaction_token is not None:
+                    reset_interaction(interaction_token)
+                reset_sandbox_request_context(sandbox_token)
+                # Spec R7 (R7-D-4): free the durable long-op slot on EVERY terminal path
+                # (clean / cancel / error / shutdown). Best-effort: teardown must never
+                # crash (the TTL staleness sweep in ``admit_long_op`` is the crash
+                # backstop).
+                self._release_op_slot(handle)
+                current_user_id.reset(token)
+                await handle.events.put(None)  # end-of-stream sentinel for SSE
 
     def _release_op_slot(self, handle: RunHandle) -> None:
         if handle.op_token is None:
@@ -559,13 +634,19 @@ class RunRegistry:
             )
 
     async def aclose(self) -> None:
-        """Cancel all in-flight run tasks on shutdown (S08-2: lost, but viewable)."""
-        for handle in self._handles.values():
+        """Cancel all in-flight run tasks on shutdown (S08-2: lost, but viewable).
+
+        R9-313: bounded like the chat turns. Every run is told to stop (its cancel token, for
+        the loop's next step boundary) and cancelled, then they are waited for together, at
+        most ``shutdown_timeout_s``. A run still going at the bound is logged and left; the
+        restart sweep marks its row on the next boot.
+        """
+        live: dict[asyncio.Future[Any], str] = {}
+        for handle in list(self._handles.values()):
             if handle.task is not None and not handle.task.done():
                 handle.cancel_token.cancel()
-                handle.task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await handle.task
+                live[handle.task] = f"run={handle.run_id} owner={handle.owner_id}"
+        await cancel_and_wait(live, timeout=self._shutdown_timeout_s, what="agentic run")
 
 
 # Re-export the callback aliases for the service's type hints.

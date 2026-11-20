@@ -46,6 +46,7 @@ from persona.jobs import (
 )
 from persona.logging import get_logger
 from persona.schema.conversation import Conversation, ConversationMessage
+from persona_runtime.interaction_scope import bind_interaction, reset_interaction
 from persona_runtime.task_origination import ContractDraft, build_task_originated_event
 from sqlalchemy import insert, select, text
 
@@ -138,10 +139,15 @@ class DelegatedTurnHandler:
                 data = getattr(event, "model_dump", None)
                 events.append(data(mode="json") if callable(data) else {"type": str(event)})
 
-            async for chunk in loop.turn(conversation, payload.verbatim_ask, _on_event):
-                delta = getattr(chunk, "delta", None)
-                if delta:
-                    reply.append(delta)
+            # R9-253: a direct write in this turn names its conversation (initiative's gate).
+            interaction_token = bind_interaction("conversation", conversation_id)
+            try:
+                async for chunk in loop.turn(conversation, payload.verbatim_ask, _on_event):
+                    delta = getattr(chunk, "delta", None)
+                    if delta:
+                        reply.append(delta)
+            finally:
+                reset_interaction(interaction_token)
 
             outcome, grounded = await self._resolve_outcome(
                 conversation=conversation,
@@ -191,7 +197,7 @@ class DelegatedTurnHandler:
         # that rides the SAME delegation crossing. Apply it through the unchanged steering door.
         steer = _steering_event(events)
         if steer is not None:
-            await self._steering.steer(
+            steered = await self._steering.steer(
                 {
                     **steer,
                     "owner_id": owner_id,
@@ -199,6 +205,10 @@ class DelegatedTurnHandler:
                     "persona_id": persona_id,
                 }
             )
+            # R9-241, D-ORCH-11-18-e (1): the control's note is spoken whenever it has one
+            # (a refusal, or a resume that took under a paused autonomy), never "Done" over it.
+            if steered is not None and steered.note:
+                return DelegatedTurnOutcome.SUCCEEDED, steered.note
             verb = str(steer.get("verb", "updated"))
             return DelegatedTurnOutcome.SUCCEEDED, f"Done. I've {_verb_past(verb)} that task."
         # A cancel / reschedule the frontier surfaced as a pending confirmation (destructive, so it

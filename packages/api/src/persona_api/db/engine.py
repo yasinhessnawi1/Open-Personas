@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import create_engine, text
 
+from persona_api.db.connection_bounds import DbConnectionBounds, engine_options
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
@@ -41,12 +43,14 @@ def _sync_url(url: str) -> str:
     return url.replace("+asyncpg", "+psycopg")
 
 
-def create_db_engine(url: str | None = None) -> Engine:
+def create_db_engine(url: str | None = None, *, bounds: DbConnectionBounds | None = None) -> Engine:
     """Build a synchronous SQLAlchemy engine.
 
     Args:
         url: The Postgres DSN. Falls back to the ``DATABASE_URL`` env var.
             An async (``+asyncpg``) DSN is coerced to sync (``+psycopg``).
+        bounds: The statement, pool, connect and keepalive bounds (R9-313). ``None`` applies
+            the defaults, so no caller builds an unbounded engine by leaving it out.
 
     Raises:
         RuntimeError: If no URL is given and ``DATABASE_URL`` is unset.
@@ -55,7 +59,8 @@ def create_db_engine(url: str | None = None) -> Engine:
     if not resolved:
         msg = "no database URL provided and DATABASE_URL is unset"
         raise RuntimeError(msg)
-    return create_engine(_sync_url(resolved))
+    sync_url = _sync_url(resolved)
+    return create_engine(sync_url, **engine_options(sync_url, bounds or DbConnectionBounds()))
 
 
 def set_current_user(connection: Connection, user_id: str) -> None:

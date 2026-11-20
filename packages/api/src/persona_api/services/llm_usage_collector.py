@@ -22,11 +22,19 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from persona_runtime.routing import served_identity
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
     from persona.backends.protocol import ChatBackend
-    from persona.backends.types import ChatResponse, StreamChunk, ToolSpec
+    from persona.backends.types import (
+        BackendAttempt,
+        ChatResponse,
+        ServedCall,
+        StreamChunk,
+        ToolSpec,
+    )
     from persona.schema.conversation import ConversationMessage
 
 __all__ = [
@@ -46,6 +54,10 @@ class UsageTotals:
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float | None
+    #: The op's failed tries that reported tokens, each with its own model and usage,
+    #: so the op is charged for them at that model (D-ORCH-11-18-s). Kept apart from
+    #: the served sums above, which still name one representative pair (R9-297).
+    failed_tries: tuple[BackendAttempt, ...] = ()
 
 
 @dataclass
@@ -57,6 +69,7 @@ class LLMUsageSink:
     provider: str = ""
     model: str = ""
     _costs: list[float | None] = field(default_factory=list)
+    _failed_tries: list[BackendAttempt] = field(default_factory=list)
 
     def record(
         self,
@@ -66,7 +79,9 @@ class LLMUsageSink:
         prompt_tokens: int,
         completion_tokens: int,
         cost_usd: float | None,
+        failed_tries: tuple[BackendAttempt, ...] = (),
     ) -> None:
+        self._failed_tries.extend(failed_tries)
         self.prompt_tokens += max(0, prompt_tokens)
         self.completion_tokens += max(0, completion_tokens)
         self.provider = provider  # representative (last call); same-provider legs share it
@@ -86,6 +101,7 @@ class LLMUsageSink:
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
             cost_usd=cost_usd,
+            failed_tries=tuple(self._failed_tries),
         )
 
 
@@ -101,6 +117,13 @@ def collect_llm_usage() -> Iterator[LLMUsageSink]:
         yield sink
     finally:
         _active_sink.reset(token)
+
+
+def _failed_tries(served: ServedCall | None) -> tuple[BackendAttempt, ...]:
+    """A call's failed tries that reported tokens: the op is charged for them."""
+    if served is None:
+        return ()
+    return served.charged_failed_tries()
 
 
 class UsageCollectingBackend:
@@ -136,21 +159,26 @@ class UsageCollectingBackend:
 
         Delegates to the inner backend's own ``resolve_chain`` when it has one (the plan
         wrapper), else returns the inner backend. The initiative judge reads the chain's
-        head and attempt ledger from it once per call (sixth review LOW-4).
+        head from it once per call (sixth review LOW-4); the served model rides each
+        call's own result (R9-223).
         """
         resolver = getattr(self._inner, "resolve_chain", None)
         return resolver() if callable(resolver) else self._inner
 
-    def _record(self, usage: object) -> None:
+    def _record(self, usage: object, served: ServedCall | None) -> None:
         sink = _active_sink.get()
         if sink is None or usage is None:
             return
+        # R9-296: the model that SERVED the call, from the call's own trace. The inner
+        # backend is usually a tier chain, whose own names are its PRIMARY.
+        provider, model = served_identity(self._inner, served)
         sink.record(
-            provider=self._inner.provider_name,
-            model=self._inner.model_name,
+            provider=provider,
+            model=model,
             prompt_tokens=getattr(usage, "prompt_tokens", 0),
             completion_tokens=getattr(usage, "completion_tokens", 0),
             cost_usd=getattr(usage, "cost_usd", None),
+            failed_tries=_failed_tries(served),
         )
 
     async def chat(
@@ -173,7 +201,7 @@ class UsageCollectingBackend:
             top_p=top_p,
             top_k=top_k,
         )
-        self._record(getattr(response, "usage", None))
+        self._record(getattr(response, "usage", None), getattr(response, "served", None))
         return response
 
     async def chat_stream(
@@ -197,5 +225,5 @@ class UsageCollectingBackend:
             top_k=top_k,
         ):
             if chunk.usage is not None:
-                self._record(chunk.usage)
+                self._record(chunk.usage, chunk.served)
             yield chunk

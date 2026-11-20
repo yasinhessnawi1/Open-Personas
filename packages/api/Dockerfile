@@ -92,10 +92,17 @@ ENV PERSONA_AUDIT_ROOT=/var/lib/persona/audit \
     PERSONA_TURNLOG_PATH=/var/lib/persona/turnlogs
 
 EXPOSE 8000
+# R9-258: the probe runs in this container with its whole env, as the api's uid. Exec
+# form and `env -i`: no shell, and curl gets an empty env, so a built-in MCP child
+# cannot read a secret from the probe's /proc/<pid>/environ. Same probe as compose.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
+    CMD ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "/usr/bin/curl", "-fsS", "http://127.0.0.1:8000/livez"]
 
 # Single uvicorn worker (S08-4). Set proxy headers because the VPS terminates TLS upstream.
+# R9-313: on SIGINT uvicorn waits at most 5 s for open requests (an SSE stream on a hung turn
+# would otherwise hold it until SIGKILL), then the lifespan teardown gets its own 20 s budget
+# (PERSONA_API_SHUTDOWN_BUDGET_SECONDS): both inside the compose file's 30 s stop grace.
 CMD ["uvicorn", "persona_api.app:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--proxy-headers", "--forwarded-allow-ips=*"]
+     "--workers", "1", "--proxy-headers", "--forwarded-allow-ips=*", \
+     "--timeout-graceful-shutdown", "5"]

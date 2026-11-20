@@ -96,7 +96,9 @@ class DeadLegSweeper:
             if not task_id:
                 continue
             cause = job.last_error or "leg failed after retries"
-            report = self._continuation.react_to_dead_leg(job.owner_id, task_id, cause, now=now)
+            report = self._continuation.react_to_dead_leg(
+                job.owner_id, task_id, cause, now=now, job_id=job.id
+            )
             if report is None:
                 continue  # not active (already parked / terminal) — idempotent no-op
             reacted += 1

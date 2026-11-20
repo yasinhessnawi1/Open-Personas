@@ -18,6 +18,7 @@ Proven here structurally, not asserted:
 # ruff: noqa: ARG002 — spy doubles ignore protocol args by design.
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence  # noqa: TC003 - fake signature
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -25,6 +26,7 @@ from persona.audit import AuditAction, MemoryAuditLogger
 from persona.errors import GistMembershipError
 from persona.schema.chunks import PersonaChunk, mint_chunk_id
 from persona.stores.episodic import EpisodicStore
+from persona.stores.guarded import guarded_batch
 from persona.stores.pyramid import (
     GIST_KIND,
     OLDER_MEMORY_MARKER,
@@ -43,7 +45,27 @@ class _SpyBackend:
         self.rows: dict[tuple[str, str], dict[str, PersonaChunk]] = {}
         self.touches: list[tuple[str, str]] = []
 
-    def upsert(self, *, persona_id: str, store_kind: str, chunks: list[PersonaChunk]) -> None:
+    def upsert(
+        self,
+        *,
+        persona_id: str,
+        store_kind: str,
+        chunks: list[PersonaChunk],
+        supersedes: Mapping[str, tuple[int, str]] | None = None,
+        requires: Sequence[str] = (),
+        requires_kinds: Sequence[str] = (),
+    ) -> None:
+        chunks = guarded_batch(
+            lambda kind, ids: [
+                c for i, c in self.rows.get((persona_id, kind), {}).items() if i in ids
+            ],
+            persona_id=persona_id,
+            store_kind=store_kind,
+            chunks=chunks,
+            supersedes=supersedes,
+            requires=requires,
+            requires_kinds=requires_kinds,
+        )
         self.touches.append(("upsert", store_kind))
         bucket = self.rows.setdefault((persona_id, store_kind), {})
         for c in chunks:
@@ -126,6 +148,12 @@ def _raw(cid: str | None = None, *, minutes: int = 0, band: int = 0) -> PersonaC
     )
 
 
+def _members(backend: _SpyBackend, *ids: str) -> None:
+    """Seed the raw chunks a gist covers: a gist over members that are not there is refused."""
+    for chunk_id in ids:
+        backend.write_raw("p1", _raw(chunk_id))
+
+
 def _pyramid(backend: _SpyBackend | None = None) -> tuple[EpisodicPyramid, _SpyBackend]:
     b = backend or _SpyBackend()
     return EpisodicPyramid(backend=b, audit_logger=MemoryAuditLogger()), b
@@ -185,6 +213,7 @@ def test_write_gist_rejects_empty_members_and_empty_text() -> None:
 
 def test_write_gist_regeneration_is_idempotent() -> None:
     pyramid, backend = _pyramid()
+    _members(backend, "a", "b")
     g1 = pyramid.write_gist("p1", text="summary v1", member_ids=["a", "b"], created_at=_NOW)
     g2 = pyramid.write_gist("p1", text="summary v2", member_ids=["b", "a"], created_at=_NOW)
     assert g1.id == g2.id  # same members ⇒ same identity ⇒ replace, not duplicate
@@ -195,7 +224,9 @@ def test_write_gist_regeneration_is_idempotent() -> None:
 
 def test_write_gist_is_audited_with_the_gist_store_kind() -> None:
     audit = MemoryAuditLogger()
-    pyramid = EpisodicPyramid(backend=_SpyBackend(), audit_logger=audit)
+    backend = _SpyBackend()
+    _members(backend, "a")
+    pyramid = EpisodicPyramid(backend=backend, audit_logger=audit)
     pyramid.write_gist("p1", text="s", member_ids=["a"], created_at=_NOW)
     assert [e.action for e in audit.events] == [AuditAction.WRITE]
     assert audit.events[0].store == GIST_KIND
@@ -255,6 +286,7 @@ def test_deleting_a_member_removes_the_covering_gist_and_reports_count() -> None
 def test_cascade_with_no_intersection_returns_zero_and_audits_nothing() -> None:
     audit = MemoryAuditLogger()
     backend = _SpyBackend()
+    _members(backend, "a")
     pyramid = EpisodicPyramid(backend=backend, audit_logger=audit)
     pyramid.write_gist("p1", text="s", member_ids=["a"], created_at=_NOW)
     events_before = len(audit.events)

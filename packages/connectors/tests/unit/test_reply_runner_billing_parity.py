@@ -49,10 +49,10 @@ from persona_api.jobs import JobQueue
 from persona_api.middleware.rls_context import current_user_id
 from persona_api.services.model_tiers import build_free_tier_registry
 from persona_api.services.runtime_factory import RuntimeFactory
+from persona_api.services.task_control_service import TaskControlMutator
 from persona_api.services.task_steering_service import TaskSteeringService
 from persona_api.services.turn_log_writer import PostgresTurnLogWriter
 from persona_api.services.verb_service_composition import build_conversational_verb_services
-from persona_api.tasks.store import TaskStore
 from persona_connectors.composition import build_reply_runner
 from persona_runtime.tier import TierConfig, TierRegistry
 from sqlalchemy import insert
@@ -173,7 +173,7 @@ def _build_connector_runner(config: APIConfig, engine: Engine) -> None:
         credits_policy=build_credits_policy(config),
         gateway=build_stripe_gateway(config),
         job_queue=JobQueue(engine),
-        task_steering_service=TaskSteeringService(tasks=TaskStore(engine)),
+        task_steering_service=TaskSteeringService(tasks=TaskControlMutator(engine)),
         task_reschedule_service=verb_services.reschedule,
         initiative_verb_service=verb_services.initiative,
     )

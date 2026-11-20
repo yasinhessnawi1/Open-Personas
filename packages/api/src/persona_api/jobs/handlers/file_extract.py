@@ -943,6 +943,7 @@ class FileExtractHandler:
             prompt_tokens=totals.prompt_tokens,
             completion_tokens=totals.completion_tokens,
             cost_usd=totals.cost_usd,
+            failed_tries=totals.failed_tries,
             surface="file_extract",
             billing_key=billing_key,
             cost_source=self._cost_source,

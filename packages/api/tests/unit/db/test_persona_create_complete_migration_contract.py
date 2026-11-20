@@ -1,4 +1,4 @@
-"""Migration 065 adds what the model says: personas.create_complete, true by default (R9-293)."""
+"""Migration 069 adds what the model says: personas.create_complete, true by default (R9-293)."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from types import ModuleType
 from persona_api.db.models import personas
 
 _MIGRATION = (
-    Path(__file__).resolve().parents[3] / "alembic" / "versions" / "065_persona_create_complete.py"
+    Path(__file__).resolve().parents[3] / "alembic" / "versions" / "069_persona_create_complete.py"
 )
 
 
 def _migration() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("persona_create_complete_065", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("persona_create_complete_069", _MIGRATION)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -22,10 +22,10 @@ def _migration() -> ModuleType:
     return module
 
 
-def test_065_follows_064() -> None:
+def test_069_follows_068() -> None:
     module = _migration()
-    assert module.revision == "065_persona_create_complete"
-    assert module.down_revision == "064_account_erasure"
+    assert module.revision == "069_persona_create_complete"
+    assert module.down_revision == "068_forgotten_conversations"
 
 
 def test_the_model_column_is_complete_unless_a_create_says_otherwise() -> None:

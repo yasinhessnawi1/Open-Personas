@@ -256,6 +256,7 @@ async def test_a4_flows_through_the_real_composition_root(
         assert loop._standing_recognizer is not None  # noqa: SLF001 — the activation, proven wired
         assert loop._steering_interpreter is not None  # noqa: SLF001
         assert loop._task_reader_provider is not None  # noqa: SLF001
+        assert loop._task_steering_port_provider is not None  # noqa: SLF001 (R9-241)
 
         # The REAL worker-side composition (the exact function app.py calls).
         services = compose_task_origination_services(
@@ -290,21 +291,17 @@ async def test_a4_flows_through_the_real_composition_root(
         assert again.task_id == outcome.task_id
         assert len(TaskStore(rls_engine).list_for_owner(owner)) == 1
 
-        # (2) steering: a "pause" turn resolves + the real steering service applies it.
+        # (2) steering: a "pause" turn resolves to the live task and, with the composition
+        # root's steering port wired, is applied DURING the turn through the shared controls
+        # (R9-241), so no event is left for the worker to apply a second time.
         conv2 = Conversation(conversation_id=conv_id, persona_id=persona_id, messages=[])
         steer_events = await _drive(loop, conv2, "pause the fare tracker")
-        steering = [e for e in steer_events if e.type == "task_steering"]
-        assert len(steering) == 1
-        assert steering[0].data["task_id"] == outcome.task_id  # resolved to the live task
-        await services.steering.steer(
-            {
-                **steering[0].data,
-                "owner_id": owner,
-                "conversation_id": conv_id,
-                "persona_id": persona_id,
-            }
-        )
+        assert all(e.type != "task_steering" for e in steer_events)
         assert TaskStore(rls_engine).get(owner, outcome.task_id).paused is True
+        assert str(conv2.messages[-1].content).startswith("Paused.")
+        # A second pause changes nothing, and the reply says so (the control's own note).
+        await _drive(loop, conv2, "pause the fare tracker")
+        assert conv2.messages[-1].content == "Already paused."
 
         # (3) cancel-failure visibility: the real notifier persists an un-suppressible account.
         tag = resolve_persona_tag(rls_engine, persona_id)

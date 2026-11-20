@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from persona.extraction import InteractionKind
 from persona.graph.config import GraphSettings
+from persona.graph.merge import RESTATED_REASON
 from persona.graph.models import LinkType, TypedLink, make_edge_id
 from persona.graph.retrieval import HybridRetriever
 from persona.stores.episodic import EpisodicStore
@@ -93,11 +94,13 @@ def _conversation_id(origin: NodeProvenance) -> str | None:
     for agentic-run-sourced ones (R-K5-OPEN-CONV) — routing to ``/chat/{run_id}`` would
     404. We expose the id as ``conversation_id`` ONLY when the source is a conversation.
     A legacy/absent ``interaction_kind`` is treated as a conversation (every persisted
-    memory today is conversation-sourced — the run source is not yet wired).
+    memory today is conversation-sourced; the run source is not yet wired). R9-253: a
+    direct write now names its run or its task leg too, so only a conversation (or a
+    legacy unnamed kind) is linkable; any other kind is not a chat.
     """
     if origin.interaction_id is None:
         return None
-    if origin.interaction_kind == InteractionKind.AGENTIC_RUN.value:
+    if origin.interaction_kind not in (None, InteractionKind.CONVERSATION.value):
         return None
     return origin.interaction_id
 
@@ -414,6 +417,8 @@ def node_detail(
                 superseded_content=p.superseded_content,
             )
             for p in trail
+            # R9-304 review round 2: a restatement records support and changes nothing.
+            if p.reason != RESTATED_REASON
         ],
         links=links,
     )

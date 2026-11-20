@@ -19,6 +19,7 @@
 
 import type { ChatMessageView } from "@/components/chat/message-element";
 import { reduceActivityEnd, reduceActivityStart } from "@/lib/activity";
+import { heldNoteKey } from "@/lib/approvals/held-note";
 import type { ChatEvent } from "@/lib/sse-types";
 
 /**
@@ -184,11 +185,15 @@ export function reduceChatEvent(
     // tier. NB: `done` never appears in the PERSISTED log (the worker routes tier to
     // the `tier_used` column and routing/budget ride only the live `done` payload —
     // P3-D-6 graceful degradation); this arm serves the live path only.
+    const held =
+      ev.data.kind === "approval_resolved" ? heldNoteKey(ev.data.note) : null;
     return {
       ...a,
       tier: ev.data.tier,
       routing: ev.data.routing,
       budget: ev.data.budget,
+      // An approval answered in chat whose task waits: say why (D-ORCH-11-18-d (2)).
+      ...(held ? { approvalHeld: held } : {}),
     };
   }
   return a;

@@ -420,8 +420,9 @@ def test_delegated_outcome_and_transcript_writer_do_not_corrupt_ordering(
 def test_delegated_spoken_steering_is_applied_through_the_worker(
     migrated_engine: Engine, app_engine: Engine, embedder: HashEmbedder384
 ) -> None:
-    # A9-T7: a spoken "pause" rides the SAME delegation crossing — enqueue → real worker → loop.turn
-    # → task_steering → the unchanged steering door applies it. No hand-forced end-state.
+    # A9-T7: a spoken "pause" rides the SAME delegation crossing: enqueue, real worker,
+    # loop.turn, and the composition root's steering port applies it during the turn
+    # through the shared controls (R9-241). No hand-forced end-state.
     su_url = os.environ["DATABASE_URL"]
     _seed(su_url, embedder)
     worker = _build_worker(
@@ -463,7 +464,7 @@ def test_delegated_spoken_steering_is_applied_through_the_worker(
         outcome = conn.execute(
             text(
                 "SELECT content FROM messages WHERE conversation_id = :c "
-                "AND channel->>'delegation_outcome' = 'succeeded' AND content LIKE '%paused%'"
+                "AND channel->>'delegation_outcome' = 'succeeded' AND content ILIKE '%paused%'"
             ),
             {"c": _CONVO},
         ).first()
