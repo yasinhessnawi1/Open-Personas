@@ -99,6 +99,9 @@ FIXED_VALUES = {
     "false",
     "persona",
     "https://acme-staging-v02.api.letsencrypt.org/directory",
+    # R9-313: api.env's shutdown bounds (WORKER_DRAIN_SECONDS, the shutdown budget).
+    "15",
+    "20",
     # The web's origins on Vercel (owner, 2026-11-07): api.env and voice.env CORS.
     "https://openpersonas.si,https://app.openpersonas.si,https://www.openpersonas.si",
 }
@@ -316,6 +319,49 @@ def test_the_api_cannot_be_scaled_out() -> None:
     api = _compose()["services"]["api"]
     assert api["container_name"] == "open-persona-api"
     assert api["deploy"]["replicas"] == 1
+
+
+def _seconds(value: str) -> float:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value)
+    assert match is not None, value
+    return float(match.group(1))
+
+
+def test_the_api_shutdown_fits_inside_its_stop_grace() -> None:
+    """R9-313: uvicorn's grace plus the lifespan budget end before SIGKILL, with room to exit.
+
+    Docker sends SIGKILL at ``stop_grace_period``. Uvicorn waits ``--timeout-graceful-shutdown``
+    for open requests, then the lifespan spends ``PERSONA_API_SHUTDOWN_BUDGET_SECONDS``; the
+    worker's drain and the run and chat-turn bounds all run inside that budget.
+    """
+    from persona_api.config import (  # noqa: PLC0415
+        DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
+        DEFAULT_RUN_SHUTDOWN_TIMEOUT_S,
+    )
+
+    grace = _seconds(_compose()["services"]["api"]["stop_grace_period"])
+    cmd = (ROOT / "packages" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    graceful = re.search(r'"--timeout-graceful-shutdown",\s*"(\d+)"', cmd)
+    assert graceful is not None, "uvicorn would wait for an open SSE stream until SIGKILL"
+    env = dict(_template("api"))
+    budget = float(env["PERSONA_API_SHUTDOWN_BUDGET_SECONDS"])
+    drain = float(env["WORKER_DRAIN_SECONDS"])
+
+    assert float(graceful.group(1)) + budget <= grace - 5, "no room left for the process exit"
+    assert drain < budget
+    assert budget > DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
+    assert budget > DEFAULT_RUN_SHUTDOWN_TIMEOUT_S
+
+
+def test_render_passes_the_shutdown_bounds_through_unchanged() -> None:
+    """Fixed values, never copied from .env, where a dev 270 s drain would be cut by SIGKILL."""
+    render = _load_render()
+    for name in ("WORKER_DRAIN_SECONDS", "PERSONA_API_SHUTDOWN_BUDGET_SECONDS"):
+        value = dict(_template("api"))[name]
+        dotenv = {name: "270"}
+        assert render.resolve(
+            name, value, dotenv, livekit="selfhosted", chains_from_dotenv=False
+        ) == (value, "fixed")
 
 
 def test_host_network_only_for_caddy_and_livekit() -> None:

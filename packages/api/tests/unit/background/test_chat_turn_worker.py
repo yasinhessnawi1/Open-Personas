@@ -600,9 +600,11 @@ async def test_aclose_does_not_wait_out_the_bound_when_every_turn_ends() -> None
     assert handle.task.cancelled()
 
 
-def test_a_negative_shutdown_bound_is_refused() -> None:
+@pytest.mark.parametrize("bound", [0, -1])
+def test_a_shutdown_bound_must_be_positive(bound: float) -> None:
+    """Zero would mean "give up at once", not "off" (round 2 L3)."""
     with pytest.raises(ValueError, match="shutdown_timeout_s"):
-        ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=-1)
+        ChatTurnRegistry(sink=_RecordingSink(), shutdown_timeout_s=bound)
 
 
 # --------------------------------------------------------------------------- #

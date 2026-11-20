@@ -35,6 +35,7 @@ from persona.jobs import MEDIUM_LEASE, JobRegistry
 from persona.logging import get_logger
 from sqlalchemy import text
 
+from persona_api.config import DEFAULT_WORKER_DRAIN_SECONDS
 from persona_api.db.engine import create_db_engine
 from persona_api.editions import check_cloud_config_guard
 from persona_api.jobs.executor import JobExecutor
@@ -111,7 +112,7 @@ class Worker:
         poll_interval_seconds: float = 1.0,
         poll_jitter_seconds: float = 0.5,
         claim_lease_seconds: int = MEDIUM_LEASE.lease_seconds,
-        drain_seconds: float = 270.0,
+        drain_seconds: float = DEFAULT_WORKER_DRAIN_SECONDS,
         max_jobs_per_user: int = 0,
         max_jobs_global: int = 0,
         maintenance_interval_seconds: float = 30.0,

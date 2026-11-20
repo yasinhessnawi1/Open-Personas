@@ -274,3 +274,32 @@ def test_the_names_leave_each_snapshots_alias_list_and_its_hash_follows() -> Non
     kept = {"_k7_aliases": json.dumps(["Tromso"], sort_keys=True)}
     assert params["metadata"] == kept
     assert params["content_hash"] == _compute_node_hash("k", "about k", kept)
+
+
+def test_the_backstops_cross_tenant_scan_lifts_the_statement_timeout_first() -> None:
+    """R9-313: the scan grows with every completed erasure and runs on every sweep. Bounded, it
+    would one day fail on each one and the backstop would stop finding anything."""
+    from persona_api.services.erasure_graph import erased_personas_in_graph  # noqa: PLC0415
+
+    class _Rows(_EmptyResult):
+        def __iter__(self) -> Iterator[tuple[str, str]]:
+            return iter([("u1", "persona_gone")])
+
+    class _ScanConn(_Conn):
+        def execute(self, stmt: Any, params: Any = None) -> _Rows:  # noqa: ANN401
+            self._log.append((str(stmt), params))
+            return _Rows()
+
+    class _ScanEngine(_Engine):
+        @contextmanager
+        def begin(self) -> Iterator[_Conn]:
+            yield _ScanConn(self.log)
+
+    engine = _ScanEngine()
+
+    assert erased_personas_in_graph(engine) == [("u1", "persona_gone")]  # type: ignore[arg-type]
+
+    (lift, _), (scan, params) = engine.log
+    assert lift == _LIFT
+    assert "FROM erasures e" in scan
+    assert params == {"since": None}

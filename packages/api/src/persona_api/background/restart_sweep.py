@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 from persona.logging import get_logger
 from sqlalchemy import update
 
+from persona_api.db.connection_bounds import lift_statement_timeout
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import runs as runs_t
 
@@ -75,6 +76,9 @@ def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
     """
     now = datetime.now(UTC)
     with engine.begin() as conn:
+        # R9-313: either UPDATE can scan its whole table. This runs in the lifespan, so a
+        # statement timeout here would fail every boot and crash-loop the api.
+        lift_statement_timeout(conn)
         msg_result = conn.execute(
             update(messages_t)
             .where(messages_t.c.streaming_status == "running")

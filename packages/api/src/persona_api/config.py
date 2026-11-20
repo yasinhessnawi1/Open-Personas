@@ -42,10 +42,27 @@ from persona_api.db.connection_bounds import (
 if TYPE_CHECKING:
     from persona.skills.sources.github import GithubRepoSpec
 
-__all__ = ["DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S", "APIConfig", "Edition"]
+__all__ = [
+    "DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S",
+    "DEFAULT_RUN_SHUTDOWN_TIMEOUT_S",
+    "DEFAULT_SHUTDOWN_BUDGET_S",
+    "DEFAULT_WORKER_DRAIN_SECONDS",
+    "APIConfig",
+    "Edition",
+]
 
-#: R9-313: how long shutdown waits for cancelled chat turns before giving up on them.
+# R9-313: shutdown fits inside the api container's 30 s stop grace (the server kit's
+# docker-compose.yml; Fly's kill_timeout was 30 s too). Uvicorn takes up to 5 s
+# (--timeout-graceful-shutdown), then the whole lifespan teardown gets one 20 s budget, which
+# leaves 5 s for the process to exit. persona_api.background.shutdown has the reasoning.
+#: The lifespan teardown's one budget.
+DEFAULT_SHUTDOWN_BUDGET_S = 20.0
+#: How long the worker lets in-flight jobs finish before cancelling them (lease reclaim).
+DEFAULT_WORKER_DRAIN_SECONDS = 15.0
+#: How long shutdown waits for cancelled chat turns before giving up on them.
 DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S = 10.0
+#: How long shutdown waits for cancelled agentic runs before giving up on them.
+DEFAULT_RUN_SHUTDOWN_TIMEOUT_S = 10.0
 
 
 class Edition(StrEnum):
@@ -200,8 +217,10 @@ class APIConfig(BaseSettings):
     )
     # Spec A0 worker runtime knobs (all config-driven — D-A0-3 concurrency, D-A0-5
     # drain). Poll uses a jittered interval so N workers don't thunder the claim
-    # query in lockstep. ``worker_drain_seconds`` must be < Fly's ``kill_timeout``
-    # (300s); default 270 leaves a ~30s safety margin (D-A0-5). The claim lease is
+    # query in lockstep. ``worker_drain_seconds`` must fit inside the shutdown budget
+    # (R9-313: 15 s of the 20 s, inside the container's 30 s stop grace; it was 270, sized
+    # for a 300 s Fly kill_timeout that no deploy has had since, so SIGKILL always cut it
+    # short). A job the drain cancels is requeued when its lease lapses. The claim lease is
     # a bootstrap; per-job-type heartbeat (D-A0-1) extends it during execution.
     worker_concurrency: int = Field(default=4, ge=1, validation_alias="WORKER_CONCURRENCY")
     worker_poll_interval_seconds: float = Field(
@@ -214,7 +233,7 @@ class APIConfig(BaseSettings):
         default=90, gt=0, validation_alias="WORKER_CLAIM_LEASE_SECONDS"
     )
     worker_drain_seconds: float = Field(
-        default=270.0, gt=0, validation_alias="WORKER_DRAIN_SECONDS"
+        default=DEFAULT_WORKER_DRAIN_SECONDS, gt=0, validation_alias="WORKER_DRAIN_SECONDS"
     )
     # Claim-time fairness caps (D-A0-6). ``per_user`` (default 3) stops one user's
     # flood from starving others — a user already at the cap has their queued jobs
@@ -610,12 +629,15 @@ class APIConfig(BaseSettings):
     db_keepalives_idle_seconds: int = Field(default=DEFAULT_KEEPALIVES_IDLE_S, ge=0)
     db_keepalives_interval_seconds: int = Field(default=DEFAULT_KEEPALIVES_INTERVAL_S, ge=0)
     db_keepalives_count: int = Field(default=DEFAULT_KEEPALIVES_COUNT, ge=0)
-    # R9-313: how long shutdown waits for cancelled chat turns before it gives up on them and
-    # logs each one. Inside the container's 30 s stop grace, with room for the rest of the
-    # teardown. A turn given up on is reconciled by the restart sweep on the next boot.
+    # R9-313: the lifespan teardown's one budget (see the constants at the top), and inside
+    # it how long the cancelled chat turns and agentic runs are waited for before each one
+    # still running is given up on and logged. The restart sweep reconciles them next boot.
+    # All three must be positive: 0 would mean "give up at once", not "off".
+    shutdown_budget_seconds: float = Field(default=DEFAULT_SHUTDOWN_BUDGET_S, gt=0)
     chat_turn_shutdown_timeout_seconds: float = Field(
-        default=DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S, ge=0
+        default=DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S, gt=0
     )
+    run_shutdown_timeout_seconds: float = Field(default=DEFAULT_RUN_SHUTDOWN_TIMEOUT_S, gt=0)
 
     # External file storage (R5-D-4). "local" (default → the workspace volume,
     # byte-unchanged) or "s3" (generic S3 — Tigris / R2 / MinIO / AWS via boto3).

@@ -42,6 +42,7 @@ from persona_runtime.interaction_scope import (
     reset_interaction,
 )
 
+from persona_api.background.shutdown import cancel_and_wait
 from persona_api.config import DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S
 from persona_api.errors import (
     CreditsExhaustedError,
@@ -188,8 +189,8 @@ class ChatTurnRegistry:
         delivers_images: bool = True,
         shutdown_timeout_s: float = DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
-        if shutdown_timeout_s < 0:
-            msg = "shutdown_timeout_s must be zero or positive"
+        if shutdown_timeout_s <= 0:
+            msg = "shutdown_timeout_s must be positive"
             raise ValueError(msg)
         self._sink = sink
         # R9-313: how long ``aclose`` waits for the cancelled turns, all together.
@@ -1003,29 +1004,11 @@ class ChatTurnRegistry:
         again and waits for that cancel to land, which is exactly what cannot happen here.
         """
         live = {
-            handle.task: handle
+            handle.task: (
+                f"conversation={handle.conversation_id} owner={handle.owner_id} "
+                f"message={handle.assistant_message_id}"
+            )
             for handle in list(self._handles.values())
             if handle.task is not None and not handle.task.done()
         }
-        if not live:
-            return
-        for task in live:
-            task.cancel()
-        done, pending = await asyncio.wait(live, timeout=self._shutdown_timeout_s)
-        for task in done:
-            if not task.cancelled() and task.exception() is not None:
-                _log.warning(
-                    "chat turn {cid} ended with an error during shutdown: {err}",
-                    cid=live[task].conversation_id,
-                    err=str(task.exception()),
-                )
-        for task in pending:
-            handle = live[task]
-            _log.warning(
-                "chat turn abandoned at shutdown: still running after {bound}s; "
-                "conversation={cid} owner={owner} message={mid}",
-                bound=self._shutdown_timeout_s,
-                cid=handle.conversation_id,
-                owner=handle.owner_id,
-                mid=handle.assistant_message_id,
-            )
+        await cancel_and_wait(live, timeout=self._shutdown_timeout_s, what="chat turn")

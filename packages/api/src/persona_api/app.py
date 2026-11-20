@@ -15,7 +15,6 @@ requires it.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,6 +39,7 @@ from persona_runtime.tier import tier_registry_from_env
 
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.background.run_worker import RunRegistry
+from persona_api.background.shutdown import ShutdownDeadline
 from persona_api.billing import build_event_dispatcher
 from persona_api.config import APIConfig, Edition
 from persona_api.db.audit_factory import build_audit_logger, build_tool_audit_logger
@@ -126,7 +126,7 @@ from persona_api.services.verb_service_composition import build_conversational_v
 from persona_api.storage import build_file_storage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
 
     from persona.backends.openrouter_catalog import OpenRouterSubscriptionMode
     from persona.stores.backend import Backend
@@ -459,6 +459,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             gateway=app.state.stripe_gateway,
             billing_config=BillingConfig(),
             agentic_floor=config.agentic_credit_floor,
+            # R9-313: shutdown gives up on a run that will not end.
+            shutdown_timeout_s=config.run_shutdown_timeout_seconds,
         )
         if rls_engine is not None
         else None
@@ -1152,76 +1154,70 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # R9-313: the whole teardown spends ONE budget (PERSONA_API_SHUTDOWN_BUDGET_SECONDS, 20 s),
+        # so it fits inside the container's 30 s stop grace after uvicorn's own 5 s. Every wait
+        # below gives up at the deadline and logs what it left; nothing given up on is lost
+        # (a job's lease lapses and it is requeued, a turn or run is reconciled at next boot).
+        # persona_api.background.shutdown has the reasoning, and the one thing it cannot bound.
+        deadline = ShutdownDeadline(config.shutdown_budget_seconds)
         # R9-027: stop AWAITING the crisis-encoder warm-up first. Cancelling the
         # task ends the awaiting side promptly; the load itself (if still running)
-        # continues on its daemon thread and is deliberately NEVER joined — neither
-        # here nor by the loop's executor teardown — so a stuck HF download can no
+        # continues on its daemon thread and is deliberately NEVER joined (neither
+        # here nor by the loop's executor teardown), so a stuck HF download can no
         # longer hang TestClient.__exit__ or a real SIGTERM (the 2026-07-11 CI hang).
-        crisis_warmup_task = getattr(app.state, "crisis_encoder_warmup", None)
-        if crisis_warmup_task is not None:
-            crisis_warmup_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await crisis_warmup_task
-        # Spec M2 (D-M2-6): stop the catalog-freshness poller before the
-        # engines/factory close (it only sleeps or runs a to_thread fetch;
-        # cancellation is clean at either point).
-        if catalog_refresh_task is not None:
-            catalog_refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await catalog_refresh_task
-        # Spec V14 (T5a): cancel the (likely already-finished, one-shot) voice
-        # remap reconciliation pass — cleanly, before the engines it reads/writes
-        # through close.
-        if voice_remap_task is not None:
-            voice_remap_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await voice_remap_task
-        # R9-165: the (usually long-finished) skill summary warm-up, cancelled before the
-        # registry it may still be calling through closes.
-        if skill_summary_task is not None:
-            skill_summary_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await skill_summary_task
+        # Spec M2 (D-M2-6): the catalog-freshness poller, before the engines/factory close.
+        # Spec V14 (T5a): the one-shot voice remap pass, before the engines it uses close.
+        # R9-165: the skill summary warm-up, before the registry it may still call closes.
+        await deadline.cancel(
+            {
+                "crisis encoder warm-up": getattr(app.state, "crisis_encoder_warmup", None),
+                "catalog refresh": catalog_refresh_task,
+                "voice remap": voice_remap_task,
+                "skill summary warm-up": skill_summary_task,
+            }
+        )
         # Flush + stop telemetry FIRST so a final drain lands before engines close
-        # (R5-D-3; best-effort — never blocks shutdown on a telemetry write).
+        # (R5-D-3; best-effort: it never blocks shutdown on a telemetry write).
         if app.state.telemetry_buffer is not None:
-            await app.state.telemetry_buffer.aclose()
+            await deadline.run({"telemetry flush": app.state.telemetry_buffer.aclose()})
         # R9-284: the periodic erasure sweep of a worker-less process (a finished task where a
-        # worker sweeps instead).
-        erasure_resume_task = getattr(app.state, "erasure_resume_task", None)
-        if erasure_resume_task is not None:
-            erasure_resume_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await erasure_resume_task
-        account_erasure_task = getattr(app.state, "account_erasure_task", None)
-        if account_erasure_task is not None:
-            account_erasure_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await account_erasure_task
+        # worker sweeps instead), and the account erasures.
+        await deadline.cancel(
+            {
+                "erasure resume": getattr(app.state, "erasure_resume_task", None),
+                "account erasure": getattr(app.state, "account_erasure_task", None),
+            }
+        )
         account_erase_runner = getattr(app.state, "account_erase_runner", None)
         if account_erase_runner is not None:
             account_erase_runner.close()  # an erasure cut short resumes at the next start
+        # R9-313: the four slow closers run together, so the worker's drain (15 s on the
+        # server) no longer delays the cancel of the runs and chat turns behind it.
+        # Spec I1 (D-I1-8): the connector runners still drain HERE, before the runtime
+        # factory closes and before either engine is disposed. A transport cancelled
+        # after disposal could still be mid-turn against a dead pool; this ordering is
+        # load-bearing, and the T2 lifecycle test proves it by exiting a real
+        # TestClient context rather than asserting it in a comment.
+        closers: dict[str, Awaitable[object]] = {}
         if in_process_worker is not None:
-            await in_process_worker.aclose()  # drain the synthesis/job loop (K2 T8d)
+            closers["in-process worker drain"] = in_process_worker.aclose()  # K2 T8d
         if embedded_connectors is not None:
-            # Spec I1 (D-I1-8): drain the connector runners HERE, before the runtime
-            # factory closes and before either engine is disposed. A transport cancelled
-            # after disposal could still be mid-turn against a dead pool; this ordering is
-            # load-bearing, and the T2 lifecycle test proves it by exiting a real
-            # TestClient context rather than asserting it in a comment.
-            await embedded_connectors.aclose()
+            closers["embedded connectors"] = embedded_connectors.aclose()
         if run_registry is not None:
-            await run_registry.aclose()  # cancel in-flight run tasks (S08-2)
+            closers["agentic runs"] = run_registry.aclose()  # S08-2
         if chat_turn_registry is not None:
-            await chat_turn_registry.aclose()  # cancel in-flight chat turns (D-P1-restart-sweep)
+            closers["chat turns"] = chat_turn_registry.aclose()  # D-P1-restart-sweep
+        await deadline.run(closers)
         if runtime_factory is not None:
-            await runtime_factory.aclose()  # tier_registry.aclose() + MCP disconnect (D-05-4)
+            # tier_registry.aclose() + MCP disconnect (D-05-4)
+            await deadline.run({"runtime factory": runtime_factory.aclose()})
         if sandbox_pool is not None:
             # Cancels the reaper, drains sessions, closes substrate
             # (D-12-12 Gate 4 mid-exec-kill cleanliness inherits).
-            await sandbox_pool.aclose()
+            await deadline.run({"sandbox pool": sandbox_pool.aclose()})
         if mcp_runtime is not None:
-            await mcp_runtime.aclose()  # Spec N6: cancel the cross-tenant idle-reaper
+            # Spec N6: cancel the cross-tenant idle-reaper
+            await deadline.run({"mcp runtime": mcp_runtime.aclose()})
         if admin_engine is not None:
             admin_engine.dispose()
         if rls_engine is not None:

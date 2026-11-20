@@ -24,6 +24,9 @@ from persona.graph.maintenance_lock import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+#: R9-313: consolidation lifts the statement timeout for the transaction that waits for the lock.
+_LIFT = "SELECT set_config('statement_timeout', '0', true)"
+
 
 class _Backend:
     """Records the lock and every read; ``fail`` names a read that raises."""
@@ -118,8 +121,12 @@ class _Conn:
         self._fail_commit = fail_commit
         self.dialect = type("D", (), {"name": "postgresql"})()
 
-    def execute(self, stmt: Any, params: dict[str, str]) -> None:  # noqa: ANN401
+    def execute(self, stmt: Any, params: dict[str, str] | None = None) -> None:  # noqa: ANN401
         sql = str(stmt)
+        if sql == _LIFT:
+            self._log.append("lift")
+            return
+        assert params is not None
         verb = "unlock" if "unlock" in sql else ("xact" if "xact" in sql else "lock")
         assert f"{GRAPH_MAINTENANCE_CLASS}, hashtext('graph-maint:' || :owner)" in sql
         self._log.append(f"{verb} {params['owner']}")
@@ -160,7 +167,7 @@ def test_the_session_lock_is_committed_while_held_and_released_on_error() -> Non
     with pytest.raises(ValueError, match="boom"):
         _body()
 
-    assert engine.log == ["lock u1", "commit", "body", "unlock u1", "commit", "close"]
+    assert engine.log == ["lift", "lock u1", "commit", "body", "unlock u1", "commit", "close"]
 
 
 def test_a_failed_release_never_returns_the_session_to_the_pool() -> None:
@@ -169,7 +176,7 @@ def test_a_failed_release_never_returns_the_session_to_the_pool() -> None:
     with graph_maintenance_held(engine, "u1"):  # type: ignore[arg-type]
         pass
 
-    assert engine.log == ["lock u1", "commit", "unlock u1", "invalidate", "close"]
+    assert engine.log == ["lift", "lock u1", "commit", "unlock u1", "invalidate", "close"]
 
 
 def test_the_transaction_lock_is_one_statement_and_a_no_op_off_postgres() -> None:
@@ -197,4 +204,21 @@ def test_a_failed_commit_after_the_lock_never_returns_the_session_to_the_pool() 
     with pytest.raises(RuntimeError, match="the commit failed"):
         _enter()
 
-    assert engine.log == ["lock u1", "commit", "invalidate", "close"], "and the body never ran"
+    assert engine.log == ["lift", "lock u1", "commit", "invalidate", "close"], (
+        "and the body never ran"
+    )
+
+
+def test_the_wait_for_the_session_lock_is_not_cut_off_by_a_statement_timeout() -> None:
+    """R9-313: one run can wait out another run, an erasure's graph step or an account cascade.
+
+    The api's engines cancel a statement after five minutes, and those holders have no bound,
+    so the wait lifts it first, in the transaction the commit after the lock then ends: the
+    session holds the lock with its normal bound back in place.
+    """
+    engine = _Engine()
+
+    with graph_maintenance_held(engine, "u1"):  # type: ignore[arg-type]
+        pass
+
+    assert engine.log[:3] == ["lift", "lock u1", "commit"]

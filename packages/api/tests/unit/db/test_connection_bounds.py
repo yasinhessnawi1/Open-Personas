@@ -47,6 +47,12 @@ def _connect_params(engine: Engine) -> dict[str, Any]:
     return seen
 
 
+@pytest.fixture(autouse=True)
+def _no_pgoptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PGOPTIONS in the shell running the tests must not leak into the expected strings."""
+    monkeypatch.delenv("PGOPTIONS", raising=False)
+
+
 def test_defaults_bound_every_connection() -> None:
     opts = engine_options(_URL, DbConnectionBounds())
     args = opts["connect_args"]
@@ -104,6 +110,64 @@ def test_a_libpq_setting_in_the_dsn_wins() -> None:
 
 def test_sqlite_gets_no_postgres_options() -> None:
     assert engine_options("sqlite+pysqlite:///x.db", DbConnectionBounds()) == {}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://app@db.invalid/persona",
+        "postgresql+pg8000://app@db.invalid/persona",
+    ],
+)
+def test_a_driver_that_is_not_libpq_gets_no_libpq_options(url: str) -> None:
+    assert engine_options(url, DbConnectionBounds()) == {}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://app@db.invalid/persona",  # SQLAlchemy's default, psycopg2
+        "postgresql+psycopg2://app@db.invalid/persona",
+        "postgresql+psycopg_async://app@db.invalid/persona",
+    ],
+)
+def test_every_libpq_driver_gets_the_bounds(url: str) -> None:
+    assert "options" in engine_options(url, DbConnectionBounds())["connect_args"]
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["-c%20statement_timeout%3D1000", "--statement-timeout%3D1000", "--statement_timeout%3D1000"],
+)
+def test_every_spelling_of_a_dsn_statement_timeout_wins(form: str) -> None:
+    args = engine_options(f"{_URL}?options={form}", DbConnectionBounds())["connect_args"]
+    assert "options" not in args
+
+
+def test_keepalives_switched_off_in_the_dsn_stay_off() -> None:
+    args = engine_options(f"{_URL}?keepalives=0", DbConnectionBounds())["connect_args"]
+    for key in ("keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout"):
+        assert key not in args
+    assert "keepalives" not in args  # the DSN's own 0 reaches libpq
+
+
+def test_the_operators_pgoptions_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """libpq reads PGOPTIONS only when the DSN has no options; ours would hide it."""
+    monkeypatch.setenv("PGOPTIONS", "-c search_path=public")
+    args = engine_options(_URL, DbConnectionBounds(statement_timeout_ms=5000))["connect_args"]
+    assert args["options"] == "-c search_path=public -c statement_timeout=5000"
+
+
+def test_a_statement_timeout_in_pgoptions_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=1000")
+    assert "options" not in engine_options(_URL, DbConnectionBounds())["connect_args"]
+
+
+def test_dsn_options_win_over_pgoptions_as_in_libpq(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGOPTIONS", "-c work_mem=64MB")
+    url = f"{_URL}?options=-c%20search_path%3Dpublic"
+    args = engine_options(url, DbConnectionBounds(statement_timeout_ms=5000))["connect_args"]
+    assert args["options"] == "-c search_path=public -c statement_timeout=5000"
 
 
 @pytest.mark.parametrize(
