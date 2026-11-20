@@ -41,6 +41,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import ConversationNotFoundError
+from persona_api.services import conversation_memory_forget as memory_forget
 from persona_api.services import document_service, image_service
 from persona_api.services import forget_conversation_graph as forget_graph
 from persona_api.services.message_metadata import metadata_from_channel
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
 
     from persona.backends import StreamChunk
     from persona.sandbox.result import SandboxFile
-    from persona.stores.episodic import EpisodicStore
     from persona_runtime.agentic.events import RunEvent
     from persona_runtime.images import TurnImage
     from persona_runtime.loop import ConversationLoop
@@ -63,6 +63,10 @@ if TYPE_CHECKING:
     from persona_api.schemas import ChannelContext
     from persona_api.schemas import ImageRef as ImageRefSchema
     from persona_api.services.chat_turn_sink import MessagesTurnSink
+    from persona_api.services.conversation_memory_forget import (
+        EpisodicForgetStore,
+        MemoryForgetPlan,
+    )
     from persona_api.storage import FileStorage
 
     # The runtime factory (T10) builds a ConversationLoop for a persona under the
@@ -237,10 +241,11 @@ def delete_conversation(
     conversation_id: str,
     forget_memory: bool = False,
     persona_id: str | None = None,
-    episodic_store: EpisodicStore | None = None,
+    episodic_store: EpisodicForgetStore | None = None,
     match_texts: Callable[[str, list[str], float], list[str]] | None = None,
     match_floor: float = 0.80,
     graph_forget: Callable[[Connection], dict[str, int]] | None = None,
+    memory_plan: MemoryForgetPlan | None = None,
 ) -> dict[str, int]:
     """Delete a conversation (cascades to its messages + turn_logs via FK).
 
@@ -250,28 +255,20 @@ def delete_conversation(
     ``forget_memory`` (Spec K11, T3, D-K11-9): when ``True``, ALSO forgets the
     episodic memory this conversation produced — opt-in, default ``False`` (a
     plain delete leaves the persona's memory intact, matching prior behaviour
-    byte-for-byte). The cascade unions two matches, both scoped to
-    ``persona_id``'s episodic store:
-
-    - **Exact** — every raw chunk whose ``metadata["conversation_id"]`` equals
-      this conversation's id (stamped at write time by
-      ``ConversationLoop._write_episodic`` / the voice recorder / the
-      origination recorder — every live writer, T3).
-    - **Content-match** — ``match_texts(persona_id, texts, match_floor)`` run
-      over this conversation's own message texts, the fallback for LEGACY
-      chunks written before the stamp existed (the caller wires this to
-      :func:`persona_api.services.memory_service.match_episodic_by_text`,
-      Spec K11 T1's matcher factored out for reuse). ``match_texts`` matches
-      persona-wide, so its result is filtered here to LEGACY chunks only
-      (no ``conversation_id`` key at all) before joining the union — a
-      STAMPED chunk belonging to a *different* conversation must never be
-      swept in just because its text happens to be similar; a stamped chunk
-      for THIS conversation is already covered by the exact-match set above.
+    byte-for-byte). The chunks are those stamped with this conversation's id plus
+    LEGACY (unstamped) ones its message texts content-match through ``match_texts``
+    (:func:`persona_api.services.conversation_memory_forget.episodic_ids`).
 
     ``persona_id``/``episodic_store``/``match_texts`` are only needed when
     ``forget_memory=True``; a missing collaborator (community/no-memory-backend
     edition) makes the cascade a no-op rather than an error — the conversation
     delete itself always proceeds.
+
+    The episodic forget is never left stranded by a failure (R9-311,
+    :mod:`persona_api.services.conversation_memory_forget`). With ``memory_plan.durable`` it is
+    recorded as a job inside the row delete's transaction and run once the row is gone; a
+    failure then is the job's to retry. Without it, it runs before the row delete, so a failure
+    raises with the conversation still in place and the delete can be retried.
 
     ``graph_forget`` (R9-304): with ``forget_memory``, the step that takes the facts learned
     from this conversation out of the knowledge graph
@@ -280,45 +277,73 @@ def delete_conversation(
     failure leaves the conversation in place for a retry, and a lost lock wait is raised as
     :class:`GraphNodeBusyError` (the route's 409). Returns its counts (``{}`` without it).
     """
-    message_texts: list[str] = []
-    if forget_memory:
-        message_texts = _conversation_message_texts(rls_engine, conversation_id)
-
-    graph_counts = _delete_row(rls_engine, conversation_id, graph_forget if forget_memory else None)
-
-    if forget_memory and persona_id is not None and episodic_store is not None:
-        all_chunks = episodic_store.get_all(persona_id)
-        exact_ids = {
-            chunk.id
-            for chunk in all_chunks
-            if chunk.metadata.get("conversation_id") == conversation_id
-        }
-        content_ids: set[str] = set()
-        if message_texts and match_texts is not None:
-            # Legacy-only: a chunk carrying ANY conversation_id stamp — this
-            # conversation's (already in exact_ids) or another's — is excluded,
-            # so content-match can only ever catch pre-T3, unstamped chunks.
-            stamped_ids = {chunk.id for chunk in all_chunks if "conversation_id" in chunk.metadata}
-            content_ids = {
-                chunk_id
-                for chunk_id in match_texts(persona_id, message_texts, match_floor)
-                if chunk_id not in stamped_ids
-            }
-        forgotten = exact_ids | content_ids
-        if forgotten:
-            episodic_store.remove_documents(persona_id, list(forgotten))
+    if not forget_memory:
+        return _delete_row(rls_engine, conversation_id, None, None)[0]
+    message_texts = _conversation_message_texts(rls_engine, conversation_id)
+    if persona_id is None or episodic_store is None:
+        return _delete_row(rls_engine, conversation_id, graph_forget, None)[0]
+    durable = memory_plan is not None and memory_plan.durable
+    ids = memory_forget.episodic_ids(
+        episodic_store,
+        persona_id=persona_id,
+        conversation_id=conversation_id,
+        message_texts=message_texts,
+        match_texts=match_texts,
+        match_floor=match_floor,
+    )
+    if not durable:
+        # Before the row: a failure leaves the conversation in place, and asking again finishes.
+        memory_forget.remove(episodic_store, persona_id, ids)
+    record = _bind_record(memory_plan, ids) if memory_plan is not None else None
+    graph_counts, captured = _delete_row(rls_engine, conversation_id, graph_forget, record)
+    # Durable: everything, at once, with the job as the retry. Otherwise: what was written
+    # between the forget above and the row lock.
+    remaining = sorted({*ids, *captured}) if durable else sorted(set(captured) - set(ids))
+    _forget_after_commit(episodic_store, persona_id, conversation_id, remaining, durable=durable)
     return graph_counts
+
+
+def _bind_record(plan: MemoryForgetPlan, ids: list[str]) -> Callable[[Connection], list[str]]:
+    """The plan's in-transaction step, with the ids found before the transaction."""
+    return lambda conn: plan.record(conn, ids)
+
+
+def _forget_after_commit(
+    store: EpisodicForgetStore,
+    persona_id: str,
+    conversation_id: str,
+    ids: list[str],
+    *,
+    durable: bool,
+) -> None:
+    """Forget ``ids`` now the row is gone. A failure is logged: the row cannot come back."""
+    try:
+        memory_forget.remove(store, persona_id, ids)
+    except Exception as exc:  # noqa: BLE001 - logged; the durable job retries it
+        _log.warning(
+            "conversation memory forget failed after the delete; {fate} "
+            "conversation={cid} chunks={n} error={err}",
+            fate="the job retries it" if durable else "these chunks stay",
+            cid=conversation_id,
+            n=len(ids),
+            err=type(exc).__name__,
+        )
 
 
 def _delete_row(
     rls_engine: Engine,
     conversation_id: str,
     graph_forget: Callable[[Connection], dict[str, int]] | None,
-) -> dict[str, int]:
-    """The conversation's row, and its graph facts first when asked, in one transaction (R9-304)."""
+    record: Callable[[Connection], list[str]] | None,
+) -> tuple[dict[str, int], list[str]]:
+    """The row, after its graph facts and its memory's record, in one transaction (R9-304).
+
+    Returns the graph step's counts and the chunk ids ``record`` captured under the row lock.
+    """
     try:
         with rls_engine.begin() as conn:
             counts = graph_forget(conn) if graph_forget is not None else {}
+            captured = record(conn) if record is not None else []
             result = conn.execute(
                 delete(conversations_t)
                 .where(conversations_t.c.id == conversation_id)
@@ -334,7 +359,7 @@ def _delete_row(
         raise GraphNodeBusyError(
             "the graph is being reorganised", context={"conversation_id": conversation_id}
         ) from exc
-    return counts
+    return counts, captured
 
 
 def conversation_exists(engine: Engine, conversation_id: str) -> bool:

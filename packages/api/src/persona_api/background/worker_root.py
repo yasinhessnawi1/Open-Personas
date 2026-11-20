@@ -112,6 +112,9 @@ from persona_api.jobs.handlers.consolidation import (
     enqueue_graph_consolidation,
     register_graph_consolidation_handler,
 )
+from persona_api.jobs.handlers.conversation_memory_forget import (
+    register_conversation_memory_forget_handler,
+)
 from persona_api.jobs.handlers.episodic_consolidation import (
     build_core_block_refresher,
     register_episodic_consolidation_handler,
@@ -489,6 +492,16 @@ def build_worker_registry(
                 runtime_factory.metadata_resolver if runtime_factory is not None else None
             ),
             floor=config.agentic_credit_floor,
+        )
+    # R9-311: a conversation deleted with forget_memory commits this job with its row delete,
+    # so its episodic memory is forgotten even when the request's own forget failed. On the
+    # owner-scoped memory transport, like the engine above. Registered whenever there is a
+    # memory backend; the route enqueues only when this worker carries the type.
+    if memory_backend is not None:
+        register_conversation_memory_forget_handler(
+            registry,
+            backend=memory_backend,
+            audit_logger=build_audit_logger(config, rls_engine),
         )
     # Event triggers (Spec A7, T6) — env-gated at the composition root
     # (PERSONA_EVENT_TRIGGERS_ENABLED, default OFF — the A5 criterion-9 posture; OFF ⇒ the leg

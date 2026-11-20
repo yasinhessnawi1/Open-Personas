@@ -552,6 +552,8 @@ PERSONA_TABLES: dict[str, str] = {
     "tasks": "cascade",
     # R9-253: the disclosure fact outlives its node and its conversation, never its persona.
     "wellbeing_disclosures": "cascade",
+    # R9-311: the forgotten-conversation mark, read by the memory owner guard.
+    "forgotten_conversations": "cascade",
 }
 
 JSON_COLUMNS: dict[str, str] = {
