@@ -12,6 +12,8 @@ off + raised floor + small node budget) is distinct; the chat profile is intact.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -94,6 +96,43 @@ class TestOverlapOrSkip:
         ctx = take_graph_if_ready(task)
         assert ctx == GraphContext()  # dropped for this turn, not awaited
         await asyncio.gather(task, return_exceptions=True)  # drain the abandoned read
+
+    @pytest.mark.asyncio
+    async def test_query_starts_at_call_time_not_at_the_callers_first_await(self) -> None:
+        # R9-319: the voice producer runs its routing and selection work synchronously
+        # after the kick-off, so the query must already be in its worker thread before
+        # the caller yields. Otherwise that work is not overlapped at all. The loop is
+        # held here (no await) while the worker is asked to start; the timeout only
+        # bounds a failure, a passing run returns at once.
+        started = threading.Event()
+        release = threading.Event()
+
+        def gated(query: str) -> GraphContext:
+            started.set()
+            release.wait(timeout=10)
+            return _sleeper(0)(query)
+
+        future = start_graph_retrieval(gated, "q")
+        try:
+            assert started.wait(timeout=5), "the query did not start until the caller yielded"
+        finally:
+            release.set()
+        assert (await future).items
+
+    @pytest.mark.asyncio
+    async def test_query_sees_the_callers_context_at_kick_off(self) -> None:
+        # The owner scope and the K4 recent window are ContextVars set before the
+        # kick-off; the worker thread must see them, as asyncio.to_thread would.
+        marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="unset")
+        marker.set("turn-7")
+        seen: list[str] = []
+
+        def reads_marker(query: str) -> GraphContext:
+            seen.append(marker.get())
+            return _sleeper(0)(query)
+
+        await start_graph_retrieval(reads_marker, "q")
+        assert seen == ["turn-7"]
 
     @pytest.mark.asyncio
     async def test_errored_query_degrades_to_graph_off(self) -> None:

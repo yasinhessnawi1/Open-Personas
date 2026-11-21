@@ -22,6 +22,8 @@ gets the tighter slice):
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 from typing import TYPE_CHECKING
 
 from persona_runtime.prompt import GraphContext
@@ -68,19 +70,28 @@ def voice_graph_settings(base: GraphSettings) -> GraphSettings:
 
 def start_graph_retrieval(
     graph_retrieval: Callable[[str], GraphContext], query: str
-) -> asyncio.Task[GraphContext]:
+) -> asyncio.Future[GraphContext]:
     """Kick off the (sync) graph query in a worker thread, concurrently.
 
-    Returns a task running ``graph_retrieval(query)`` off the event-loop thread
-    (via :func:`asyncio.to_thread`) so it overlaps the rest of the pre-model
-    work. The caller takes the result with :func:`take_graph_if_ready` — it is
-    never awaited on the critical path. Call at turn onset (as soon as the
-    transcribed message is known).
+    Returns a future for ``graph_retrieval(query)`` running off the event-loop
+    thread, so it overlaps the rest of the pre-model work. The caller takes the
+    result with :func:`take_graph_if_ready`; it is never awaited on the critical
+    path. Call at turn onset (as soon as the transcribed message is known).
+
+    The query is handed to the executor HERE, before this returns (R9-319). The
+    earlier ``create_task(to_thread(...))`` only reached the executor at the
+    caller's first ``await``, so the synchronous routing and selection work right
+    after the kick-off was never overlapped, and the query's window shrank to the
+    store retrieval alone. The caller's context is copied now, exactly as
+    :func:`asyncio.to_thread` copies it, so the owner scope and the K4 recent
+    window still cross into the worker thread.
     """
-    return asyncio.create_task(asyncio.to_thread(graph_retrieval, query))
+    loop = asyncio.get_running_loop()
+    call = functools.partial(contextvars.copy_context().run, graph_retrieval, query)
+    return loop.run_in_executor(None, call)
 
 
-def take_graph_if_ready(task: asyncio.Task[GraphContext]) -> GraphContext:
+def take_graph_if_ready(task: asyncio.Future[GraphContext]) -> GraphContext:
     """The overlapped graph result if it already finished, else graph-off.
 
     Non-blocking by construction: if the query has not completed by the time the
@@ -101,7 +112,7 @@ def take_graph_if_ready(task: asyncio.Task[GraphContext]) -> GraphContext:
     return GraphContext()
 
 
-def _discard_result(task: asyncio.Task[GraphContext]) -> None:
+def _discard_result(task: asyncio.Future[GraphContext]) -> None:
     """Consume an abandoned task's outcome so asyncio doesn't warn."""
     if not task.cancelled():
         task.exception()

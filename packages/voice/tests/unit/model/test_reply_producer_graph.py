@@ -13,9 +13,10 @@ turn's prompt.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
-import time
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ from persona.history import ConversationHistoryManager
 from persona.schema.chunks import PersonaChunk
 from persona.schema.conversation import Conversation, ConversationMessage
 from persona.schema.persona import Persona, PersonaIdentity, RoutingConfig
+from persona_runtime.graph_voice import start_graph_retrieval
 from persona_runtime.prompt import (
     GraphContext,
     GraphKnowledgeItem,
@@ -36,6 +38,7 @@ from persona_runtime.router import Router
 from persona_runtime.tier import TierConfig, TierRegistry
 from persona_voice.loop.streaming import Transcript
 from persona_voice.model import VoiceModelReplyProducer, VoiceTurnContext
+from persona_voice.model import reply_producer as reply_producer_module
 from persona_voice.model.prompt_assembler import VoicePromptAssembler
 
 
@@ -58,9 +61,19 @@ def _known_graph() -> GraphContext:
     )
 
 
+#: Bounds a FAILURE only: a passing run waits just until the graph query settles.
+_GATE_TIMEOUT_S = 10.0
+
+
 class _FakeStore:
-    def __init__(self, *, all_chunks: list[PersonaChunk] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        all_chunks: list[PersonaChunk] | None = None,
+        read_gate: threading.Event | None = None,
+    ) -> None:
         self._all = all_chunks or []
+        self._read_gate = read_gate
 
     def write(self, persona_id: str, chunks: list[PersonaChunk], **kwargs: Any) -> None: ...
 
@@ -68,10 +81,12 @@ class _FakeStore:
         return []
 
     def get_all(self, persona_id: str, *, include_superseded: bool = False) -> list[PersonaChunk]:
-        # A small real cost so the threaded persona-retrieval gives the
-        # concurrent graph query a genuine window to finish in (mirrors prod,
-        # where the graph rides alongside the store I/O — D-K3-6).
-        time.sleep(0.03)
+        # R9-319: when gated, this off-loop persona read finishes only after the
+        # overlapped graph query has settled on the loop. That is the "ready by
+        # assembly" case on purpose, signalled by the query's own future, instead
+        # of a sleep that a loaded CI runner could outlast.
+        if self._read_gate is not None:
+            assert self._read_gate.wait(_GATE_TIMEOUT_S), "the overlapped graph query never settled"
         return list(self._all)
 
     def recent(self, persona_id: str, limit: int) -> list[PersonaChunk]:
@@ -112,16 +127,21 @@ def _persona() -> Persona:
     )
 
 
-def _stores() -> dict[str, _FakeStore]:
+def _stores(read_gate: threading.Event | None = None) -> dict[str, _FakeStore]:
     return {
-        "identity": _FakeStore(all_chunks=[_chunk("I am Astrid.")]),
+        "identity": _FakeStore(all_chunks=[_chunk("I am Astrid.")], read_gate=read_gate),
         "self_facts": _FakeStore(),
         "worldview": _FakeStore(),
         "episodic": _FakeStore(),
     }
 
 
-def _context(backend: object, *, graph_retrieval: object | None = None) -> VoiceTurnContext:
+def _context(
+    backend: object,
+    *,
+    graph_retrieval: object | None = None,
+    read_gate: threading.Event | None = None,
+) -> VoiceTurnContext:
     from persona.backends import BackendConfig
 
     cfg = BackendConfig(provider="anthropic", model="test-model", api_key=None)  # type: ignore[arg-type]
@@ -129,7 +149,7 @@ def _context(backend: object, *, graph_retrieval: object | None = None) -> Voice
     registry._cache = {"frontier": backend}  # type: ignore[assignment,dict-item]  # noqa: SLF001
     return VoiceTurnContext(
         persona=_persona(),
-        stores=_stores(),  # type: ignore[arg-type]
+        stores=_stores(read_gate),  # type: ignore[arg-type]
         conversation=Conversation(conversation_id="c1", persona_id="astrid", messages=[]),
         prompt_builder=PromptBuilder(),
         router=Router(),
@@ -137,6 +157,28 @@ def _context(backend: object, *, graph_retrieval: object | None = None) -> Voice
         history_manager=ConversationHistoryManager(compact_every=10, keep_recent=5),
         graph_retrieval=graph_retrieval,  # type: ignore[arg-type]
     )
+
+
+@pytest.fixture
+def graph_settled(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """An event set once the producer's overlapped graph query has settled.
+
+    Wraps the REAL :func:`start_graph_retrieval` the producer calls, so the real
+    overlap and the real ``take_graph_if_ready`` still run; it only observes the
+    returned future. The done callback runs on the loop after the future is done,
+    so a store read gated on this event cannot finish before the graph is ready.
+    """
+    settled = threading.Event()
+
+    def observed(
+        graph_retrieval: Callable[[str], GraphContext], query: str
+    ) -> asyncio.Future[GraphContext]:
+        future = start_graph_retrieval(graph_retrieval, query)
+        future.add_done_callback(lambda _f: settled.set())
+        return future
+
+    monkeypatch.setattr(reply_producer_module, "start_graph_retrieval", observed)
+    return settled
 
 
 class TestAssemblerInjectsGraph:
@@ -174,9 +216,11 @@ def _final() -> StreamChunk:
 
 class TestProducerUsesOverlappedGraph:
     @pytest.mark.asyncio
-    async def test_producer_uses_the_overlapped_graph_when_ready(self) -> None:
-        # A near-instant graph query: by assembly time the overlapped task has
-        # finished, so the node lands in the prompt the voice model receives.
+    async def test_producer_uses_the_overlapped_graph_when_ready(
+        self, graph_settled: threading.Event
+    ) -> None:
+        # The graph query has settled by assembly time (the persona read waits on
+        # its future), so the node lands in the prompt the voice model receives.
         seen_query: list[str] = []
 
         def fast_graph(query: str) -> GraphContext:
@@ -184,7 +228,9 @@ class TestProducerUsesOverlappedGraph:
             return _known_graph()
 
         backend = _ScriptedBackend([StreamChunk(delta="ok"), _final()])
-        producer = VoiceModelReplyProducer(_context(backend, graph_retrieval=fast_graph))
+        producer = VoiceModelReplyProducer(
+            _context(backend, graph_retrieval=fast_graph, read_gate=graph_settled)
+        )
 
         stream = await producer(Transcript(is_final=True, text="help me study", confidence=1.0))
         _ = [tok async for tok in stream]
@@ -222,7 +268,9 @@ class TestK4WindowReachesTheGate:
     """
 
     @pytest.mark.asyncio
-    async def test_real_voice_turn_publishes_the_window_to_the_gate(self) -> None:
+    async def test_real_voice_turn_publishes_the_window_to_the_gate(
+        self, graph_settled: threading.Event
+    ) -> None:
         from persona.graph.config import GraphSettings
         from persona.graph.fusion import HybridResult
         from persona_runtime.graph_selection import GatingContext, make_graph_retrieval
@@ -250,7 +298,9 @@ class TestK4WindowReachesTheGate:
             recent_window_provider=get_recent_window,
         )
         backend = _ScriptedBackend([StreamChunk(delta="ok"), _final()])
-        ctx = _context(backend, graph_retrieval=graph_retrieval)
+        # The gate runs inside the off-thread query; gating the persona read on its
+        # future means it has run by the time the turn ends (R9-319).
+        ctx = _context(backend, graph_retrieval=graph_retrieval, read_gate=graph_settled)
         # A prior turn opened the topic; the new transcript is a bland follow-up that does
         # NOT re-name it (the uncanny-re-closing scenario, mid-call).
         ctx = dataclasses.replace(

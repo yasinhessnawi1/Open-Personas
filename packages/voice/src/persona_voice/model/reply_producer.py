@@ -399,11 +399,12 @@ class VoiceModelReplyProducer:
         # K4 (K4-D-2): publish this turn's recent-conversation window BEFORE the graph
         # query is kicked off, so the gate reads the conversation (not the bare query) and
         # never evades a topic the caller just raised mid-call — the worst failure on a
-        # live call. ``asyncio.to_thread`` (and ``create_task``) copy this contextvar into
-        # the worker thread, the same propagation the owner scope already relies on.
+        # live call. ``start_graph_retrieval`` copies this contextvar into the worker
+        # thread at kick-off, the same propagation the owner scope already relies on.
         set_recent_window_from_messages(ctx.conversation.messages)
         # K3 (D-K3-6): kick the owner-scoped graph query off NOW, so it runs
-        # CONCURRENTLY with the routing/selection pre-model work below. It is
+        # CONCURRENTLY with the routing/selection pre-model work below (it is in
+        # its worker thread before this line returns, R9-319). It is
         # taken just before assembly and only if already ready — never awaited on
         # the critical path, so it adds zero serial wall-clock to TTFT. ``None``
         # graph_retrieval ⇒ the turn runs graph-off (additive).
