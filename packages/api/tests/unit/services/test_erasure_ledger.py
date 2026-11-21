@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from persona_api.db.community import create_community_schema, make_community_engine
+from _erase_seed import SeedTemplates
 from persona_api.db.models import erasures as erasures_t
 from persona_api.errors import ErasureRecordError
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -31,9 +31,8 @@ _CAPTURED = {"conversations": ["c1", "c2"], "tasks": ["t1"]}
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Iterator[Engine]:
-    eng = make_community_engine(tmp_path / "community.db")
-    create_community_schema(eng)
+def engine(tmp_path: Path, erase_templates: SeedTemplates) -> Iterator[Engine]:
+    eng = erase_templates.community_engine(tmp_path)
     yield eng
     eng.dispose()
 
