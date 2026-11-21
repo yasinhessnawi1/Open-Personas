@@ -94,6 +94,29 @@ function renderDetail() {
   );
 }
 
+/**
+ * R9-321: render and let the mocked load settle INSIDE act, for the poll tests. React 19
+ * runs a commit's passive effects (where the poll's setInterval is armed) in a later
+ * Scheduler task than the commit that paints the detail. `findByText` resolves on the
+ * paint, so whether the poll was armed before the test moved the fake clock was down to
+ * event-loop timing, and a stall on a loaded runner lost the race. Async act drains the
+ * Scheduler work it captured, effects included, before it resolves, so the poll is armed
+ * (or not) by the time this returns.
+ */
+async function renderSettled() {
+  await act(async () => {
+    renderDetail();
+  });
+  expect(screen.getByText("Book the dentist")).toBeInTheDocument();
+}
+
+/** Move the fake clock `periods` poll periods, inside act so each refetch settles. */
+async function advancePollPeriods(periods: number) {
+  await act(async () => {
+    vi.advanceTimersByTime(periods * 3000);
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   client.getInitiativeDial.mockResolvedValue({
@@ -303,22 +326,23 @@ describe("run history (Spec W1, D-W1-3)", () => {
   });
 
   it.each([
-    [true, 2],
-    [false, 1],
+    [true, 1],
+    [false, 0],
   ])(
     "a queued leg (%s) keeps the page polling even while the task waits on the user",
-    async (legQueued, fetches) => {
+    async (legQueued, pollsPerPeriod) => {
       vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       try {
         client.getTask.mockResolvedValue(
           detail({ status: "waiting_on_user", leg_queued: legQueued }),
         );
-        renderDetail();
-        await screen.findByText("Book the dentist");
-        await act(async () => {
-          vi.advanceTimersByTime(3000);
-        });
-        expect(client.getTask).toHaveBeenCalledTimes(fetches);
+        await renderSettled();
+        expect(client.getTask).toHaveBeenCalledTimes(1);
+        await advancePollPeriods(1);
+        expect(client.getTask).toHaveBeenCalledTimes(1 + pollsPerPeriod);
+        // It keeps polling (or keeps quiet): one more period, one more fetch (or none).
+        await advancePollPeriods(1);
+        expect(client.getTask).toHaveBeenCalledTimes(1 + 2 * pollsPerPeriod);
       } finally {
         vi.useRealTimers();
       }
@@ -336,11 +360,8 @@ describe("run history (Spec W1, D-W1-3)", () => {
         client.getTask.mockResolvedValue(
           detail({ ...state, leg_queued: true, runs: [stoppedByPause] }),
         );
-        renderDetail();
-        await screen.findByText("Book the dentist");
-        await act(async () => {
-          vi.advanceTimersByTime(9000);
-        });
+        await renderSettled();
+        await advancePollPeriods(3);
         expect(
           document.querySelector('[data-slot="run-history-starting"]'),
         ).toBeNull();
@@ -360,11 +381,8 @@ describe("run history (Spec W1, D-W1-3)", () => {
           runs: [{ ...stoppedByPause, status: "running", stop_reason: null }],
         }),
       );
-      renderDetail();
-      await screen.findByText("Book the dentist");
-      await act(async () => {
-        vi.advanceTimersByTime(9000);
-      });
+      await renderSettled();
+      await advancePollPeriods(3);
       expect(client.getTask).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
