@@ -24,6 +24,7 @@ from _erase_seed import (
     PERSONA_KINDS,
     STRANGER,
     Seeded,
+    SeedTemplates,
     conversation_of,
     ids_naming,
     legacy_edition,
@@ -40,8 +41,8 @@ from persona_api.services.erasure_service import PERSONA_ERASE_JOB_TYPE, capture
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
-    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object, erase_templates: SeedTemplates) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder, erase_templates) as legacy:  # type: ignore[arg-type]
         yield legacy
 
 

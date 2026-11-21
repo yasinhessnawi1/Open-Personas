@@ -14,7 +14,16 @@ from pathlib import Path  # noqa: TC003 - a fixture annotation
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from _erase_seed import OTHER_OWNER, OWNER, PERSONA, SIBLING, STRANGER, Seeded, legacy_edition
+from _erase_seed import (
+    OTHER_OWNER,
+    OWNER,
+    PERSONA,
+    SIBLING,
+    STRANGER,
+    Seeded,
+    SeedTemplates,
+    legacy_edition,
+)
 from persona.errors import PermanentJobError
 from persona_api.jobs.handlers.persona_erase import (
     PERSONA_ERASE_JOB_TYPE,
@@ -43,8 +52,8 @@ class _Context:
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
-    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object, erase_templates: SeedTemplates) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder, erase_templates) as legacy:  # type: ignore[arg-type]
         yield legacy
 
 

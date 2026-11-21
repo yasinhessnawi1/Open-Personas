@@ -24,6 +24,7 @@ from _erase_seed import (
     SIBLING,
     STRANGER,
     Seeded,
+    SeedTemplates,
     chunk,
     conversation_of,
     ids_naming,
@@ -66,8 +67,8 @@ _TABLES = (
 
 
 @pytest.fixture
-def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
-    with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
+def seeded(tmp_path: Path, embedder: object, erase_templates: SeedTemplates) -> Iterator[Seeded]:
+    with legacy_edition(tmp_path, embedder, erase_templates) as legacy:  # type: ignore[arg-type]
         yield legacy
 
 

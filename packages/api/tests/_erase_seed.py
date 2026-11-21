@@ -8,10 +8,16 @@ are pinned in the integration tests.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
+import stat
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psutil
@@ -25,7 +31,6 @@ from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, inspect,
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from pathlib import Path
 
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
@@ -480,15 +485,20 @@ def files_held_open_under(root: Path) -> list[str]:
 
 
 @contextmanager
-def legacy_edition(tmp_path: Path, embedder: Embedder) -> Iterator[Seeded]:
+def legacy_edition(
+    tmp_path: Path, embedder: Embedder, templates: SeedTemplates | None = None
+) -> Iterator[Seeded]:
     """A seeded legacy edition that gives back every file it opened.
 
     Chroma's persistent client keeps each collection's segment files open until it is closed,
     and a SQLite engine keeps its pooled connection. Never closed, a few dozen tests of them
     reached Windows' 512 open-file limit and failed unrelated tests that ran later. The exit
     asserts nothing under ``tmp_path`` is still open.
+
+    With ``templates`` (the ``erase_templates`` fixture) the seed is a copy of one built once
+    per session, the same files a fresh :func:`seed` makes (R9-312); without, it is built here.
     """
-    seeded = seed(tmp_path, embedder)
+    seeded = seed(tmp_path, embedder) if templates is None else templates.seeded(tmp_path, embedder)
     try:
         yield seeded
     finally:
@@ -505,6 +515,102 @@ def seed(tmp_path: Path, embedder: Embedder) -> Seeded:
     create_community_schema(engine)
     memory = ChromaBackend(persist_path=tmp_path / "chroma", embedder=embedder)
     return seed_into(engine, memory, tmp_path)
+
+
+class SeedTemplates:
+    """The community schema and the erase seed, each built once per test session (R9-312).
+
+    Building the schema is a few hundred DDL statements that SQLite commits one at a time (about
+    1.5 s on Windows), and seeding the rows and Chroma's collections takes as long again. Every
+    erase test paid both. Here each is built once into a folder of its own, closed, and made
+    read-only, and every test gets a byte copy under its own ``tmp_path``: the same SQLite file,
+    Chroma folder, workspace and audit logs a fresh build makes, as real files.
+
+    A template is never opened again once built, and its files are read-only, so a write to one
+    fails loudly instead of reaching the next test. Copies are written with fresh modification
+    times, as a fresh build's files have, because the audit sweep reads a log's age.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._schema: Path | None = None
+        self._seeds: dict[tuple[str, str, str, int], Path] = {}
+
+    def community_engine(self, tmp_path: Path) -> Engine:
+        """A community engine on a copy of the empty, up to date schema."""
+        target = tmp_path / "community.db"
+        shutil.copyfile(self._schema_db(), target)
+        return make_community_engine(target)
+
+    def seeded(self, tmp_path: Path, embedder: Embedder) -> Seeded:
+        """What :func:`seed` returns, from a copy of the seed this embedder built."""
+        shutil.copytree(
+            self._seed_tree(embedder), tmp_path, copy_function=shutil.copyfile, dirs_exist_ok=True
+        )
+        workspace_root = tmp_path / "workspace"
+        return Seeded(
+            engine=make_community_engine(tmp_path / "community.db"),
+            memory=ChromaBackend(persist_path=tmp_path / "chroma", embedder=embedder),
+            audit=MemoryAuditLogger(),
+            storage=LocalFileStorage(workspace_root),
+            workspace_root=workspace_root,
+            audit_root=tmp_path / "audit",
+        )
+
+    def fingerprint(self) -> dict[str, str]:
+        """Every template file built so far, by path, as its SHA-256 and whether it is writable."""
+        return {
+            str(path.relative_to(self._root)): (
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                + (" writable" if os.access(path, os.W_OK) else " read-only")
+            )
+            for path in sorted(self._root.rglob("*"))
+            if path.is_file()
+        }
+
+    # Each build goes into a fresh folder and closes what it opened even when it fails, so a
+    # failed build is retried by the next test and shows its own error there, not a collision
+    # with the half-built folder it left.
+
+    def _schema_db(self) -> Path:
+        if self._schema is None:
+            folder = Path(tempfile.mkdtemp(prefix="schema-", dir=self._root))
+            engine = make_community_engine(folder / "community.db")
+            try:
+                create_community_schema(engine)
+            finally:
+                engine.dispose()
+            self._schema = _frozen(folder) / "community.db"
+        return self._schema
+
+    def _seed_tree(self, embedder: Embedder) -> Path:
+        # The vectors are the embedder's, so each kind of embedder gets a seed of its own.
+        kind = type(embedder)
+        key = (kind.__module__, kind.__qualname__, embedder.model_name, embedder.dimension)
+        if key not in self._seeds:
+            folder = Path(tempfile.mkdtemp(prefix="seed-", dir=self._root))
+            engine = make_community_engine(folder / "community.db")
+            try:
+                create_community_schema(engine)
+                memory = ChromaBackend(persist_path=folder / "chroma", embedder=embedder)
+                try:
+                    seed_into(engine, memory, folder)
+                finally:
+                    memory.close()
+            finally:
+                engine.dispose()
+            self._seeds[key] = _frozen(folder)
+        return self._seeds[key]
+
+
+def _frozen(folder: Path) -> Path:
+    """Make every file under ``folder`` read-only, once nothing holds any of them open."""
+    leaked = open_files_under(folder)
+    assert leaked == [], f"a template was left open: {leaked[:5]}"
+    for path in folder.rglob("*"):
+        if path.is_file():
+            path.chmod(stat.S_IREAD)
+    return folder
 
 
 def ids_naming(engine: Engine, table: str, value: str) -> list[str]:

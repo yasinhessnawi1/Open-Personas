@@ -25,6 +25,7 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    from _erase_seed import SeedTemplates
     from sqlalchemy import Engine
 
 # --- R9-027: the api suite NEVER touches huggingface.co ---------------------
@@ -305,6 +306,18 @@ class HashEmbedder384:
 @pytest.fixture
 def embedder() -> HashEmbedder384:
     return HashEmbedder384()
+
+
+@pytest.fixture(scope="session")
+def erase_templates(tmp_path_factory: pytest.TempPathFactory) -> SeedTemplates:
+    """The community schema and the erase seed, built once per session and copied per test.
+
+    R9-312: building them per test cost the erase suites about 19 minutes on the Windows
+    runner. Each test still gets files of its own; see ``_erase_seed.SeedTemplates``.
+    """
+    from _erase_seed import SeedTemplates  # noqa: PLC0415 - only the erase tests need it
+
+    return SeedTemplates(tmp_path_factory.mktemp("erase-templates"))
 
 
 @pytest.fixture(scope="session")

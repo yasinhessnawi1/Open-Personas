@@ -2,22 +2,39 @@
 
 CI on a8ea528a: on the GitHub Windows runner ``psutil.Process().open_files()`` raised
 ``AccessDenied`` at every erase fixture's teardown. The guard now falls back to a rename probe;
-these pin that it does, and that the probe finds a real unclosed Chroma client.
+these pin that it does, and that the probe finds a real unclosed Chroma client. And the seed
+the erase tests copy from a session template (R9-312) is each test's own: what one copy changes
+never reaches the template or the next copy.
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
 from typing import TYPE_CHECKING
 
 import _erase_seed
 import psutil
 import pytest
-from _erase_seed import files_held_open_under, open_files_under, seed
+from _erase_seed import (
+    OWNER,
+    PERSONA,
+    PERSONA_KINDS,
+    SIBLING,
+    chunk,
+    files_held_open_under,
+    ids_naming,
+    legacy_edition,
+    open_files_under,
+    seed,
+)
+from persona_api.db.models import personas
+from sqlalchemy import delete
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from _erase_seed import Seeded, SeedTemplates
     from persona.stores.embedder import Embedder
 
 
@@ -48,3 +65,52 @@ def test_the_probe_finds_an_unclosed_chroma_client_and_not_a_closed_one(
 
     assert files_held_open_under(tmp_path) == []
     assert not list(tmp_path.rglob("*.leakprobe")), "every probe renamed back"
+
+
+_ONLY_ONE = "written-in-copy-one"
+
+
+def _found_by_search(seeded: Seeded) -> list[str]:
+    """The sibling's identity chunks a vector search for the copy-one chunk returns."""
+    hits = seeded.memory.query(
+        persona_id=SIBLING, store_kind="identity", text=chunk(_ONLY_ONE).text, top_k=10
+    )
+    return [hit.id for hit in hits]
+
+
+def _persona_left(seeded: Seeded) -> tuple[list[str], int, bool]:
+    memory = sum(
+        len(seeded.memory.get_all(persona_id=PERSONA, store_kind=kind)) for kind in PERSONA_KINDS
+    )
+    folder = (seeded.workspace_root / OWNER / PERSONA / "sandbox" / "out.txt").exists()
+    return ids_naming(seeded.engine, "personas", PERSONA), memory, folder
+
+
+def test_a_copied_seed_is_the_tests_own_and_the_template_never_changes(
+    tmp_path: Path, embedder: Embedder, erase_templates: SeedTemplates
+) -> None:
+    """R9-312: a copy changed in every store leaves the template, and the next copy, whole."""
+    first, second, schema = tmp_path / "first", tmp_path / "second", tmp_path / "schema"
+    for folder in (first, second, schema):
+        folder.mkdir()
+    # Both templates, so the fingerprint below covers the bare schema too.
+    erase_templates.community_engine(schema).dispose()
+    with legacy_edition(first, embedder, erase_templates) as one:
+        template = erase_templates.fingerprint()
+        assert _persona_left(one) == ([PERSONA], len(PERSONA_KINDS), True)
+        with one.engine.begin() as conn:
+            conn.execute(delete(personas).where(personas.c.id == PERSONA))
+        for kind in PERSONA_KINDS:
+            one.memory.delete_persona(PERSONA, kind)
+        shutil.rmtree(one.workspace_root / OWNER / PERSONA)
+        one.memory.upsert(persona_id=SIBLING, store_kind="identity", chunks=[chunk(_ONLY_ONE)])
+        assert _persona_left(one) == ([], 0, False)
+        assert _ONLY_ONE in _found_by_search(one), "the search sees what this copy wrote"
+
+    with legacy_edition(second, embedder, erase_templates) as two:
+        assert _persona_left(two) == ([PERSONA], len(PERSONA_KINDS), True)
+        assert _ONLY_ONE not in _found_by_search(two)
+
+    assert erase_templates.fingerprint() == template
+    assert template, "the copies came from a template"
+    assert all(state.endswith(" read-only") for state in template.values()), template

@@ -15,8 +15,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from _erase_seed import OWNER, legacy_edition, row
-from persona_api.db.community import create_community_schema, make_community_engine
+from _erase_seed import OWNER, SeedTemplates, legacy_edition, row
 from persona_api.db.models import erasures as erasures_t
 from persona_api.services import legacy_audit_sweep
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
@@ -43,9 +42,8 @@ _SECRET = "what the user said"
 
 
 @pytest.fixture
-def engine(tmp_path: Path) -> Iterator[Engine]:
-    eng = make_community_engine(tmp_path / "community.db")
-    create_community_schema(eng)
+def engine(tmp_path: Path, erase_templates: SeedTemplates) -> Iterator[Engine]:
+    eng = erase_templates.community_engine(tmp_path)
     with eng.begin() as conn:
         for owner in (_OWNER, _OTHER):
             row(conn, "users", id=owner, email=f"{owner}@x.test")
@@ -268,9 +266,10 @@ def test_the_cli_prints_counts_and_never_a_name(
 def test_the_resume_erases_a_claimed_legacy_persona_in_full(
     tmp_path: Path,
     embedder: Any,  # noqa: ANN401
+    erase_templates: SeedTemplates,
 ) -> None:
     """The claim is all the sweep adds: the existing persona erasure finishes it, files too."""
-    with legacy_edition(tmp_path, embedder) as seeded:  # type: ignore[arg-type]
+    with legacy_edition(tmp_path, embedder, erase_templates) as seeded:
         _resume_erases_in_full(seeded)
 
 
