@@ -20,6 +20,8 @@ from _erase_seed import (
     OWNER,
     PERSONA,
     PERSONA_KINDS,
+    SIBLING,
+    chunk,
     files_held_open_under,
     ids_naming,
     legacy_edition,
@@ -65,6 +67,17 @@ def test_the_probe_finds_an_unclosed_chroma_client_and_not_a_closed_one(
     assert not list(tmp_path.rglob("*.leakprobe")), "every probe renamed back"
 
 
+_ONLY_ONE = "written-in-copy-one"
+
+
+def _found_by_search(seeded: Seeded) -> list[str]:
+    """The sibling's identity chunks a vector search for the copy-one chunk returns."""
+    hits = seeded.memory.query(
+        persona_id=SIBLING, store_kind="identity", text=chunk(_ONLY_ONE).text, top_k=10
+    )
+    return [hit.id for hit in hits]
+
+
 def _persona_left(seeded: Seeded) -> tuple[list[str], int, bool]:
     memory = sum(
         len(seeded.memory.get_all(persona_id=PERSONA, store_kind=kind)) for kind in PERSONA_KINDS
@@ -77,9 +90,11 @@ def test_a_copied_seed_is_the_tests_own_and_the_template_never_changes(
     tmp_path: Path, embedder: Embedder, erase_templates: SeedTemplates
 ) -> None:
     """R9-312: a copy changed in every store leaves the template, and the next copy, whole."""
-    first, second = tmp_path / "first", tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
+    first, second, schema = tmp_path / "first", tmp_path / "second", tmp_path / "schema"
+    for folder in (first, second, schema):
+        folder.mkdir()
+    # Both templates, so the fingerprint below covers the bare schema too.
+    erase_templates.community_engine(schema).dispose()
     with legacy_edition(first, embedder, erase_templates) as one:
         template = erase_templates.fingerprint()
         assert _persona_left(one) == ([PERSONA], len(PERSONA_KINDS), True)
@@ -88,10 +103,13 @@ def test_a_copied_seed_is_the_tests_own_and_the_template_never_changes(
         for kind in PERSONA_KINDS:
             one.memory.delete_persona(PERSONA, kind)
         shutil.rmtree(one.workspace_root / OWNER / PERSONA)
+        one.memory.upsert(persona_id=SIBLING, store_kind="identity", chunks=[chunk(_ONLY_ONE)])
         assert _persona_left(one) == ([], 0, False)
+        assert _ONLY_ONE in _found_by_search(one), "the search sees what this copy wrote"
 
     with legacy_edition(second, embedder, erase_templates) as two:
         assert _persona_left(two) == ([PERSONA], len(PERSONA_KINDS), True)
+        assert _ONLY_ONE not in _found_by_search(two)
 
     assert erase_templates.fingerprint() == template
     assert template, "the copies came from a template"

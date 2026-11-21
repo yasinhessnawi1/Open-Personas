@@ -13,9 +13,11 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import psutil
@@ -29,7 +31,6 @@ from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, insert, inspect,
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
-    from pathlib import Path
 
     from persona.stores.backend import Backend
     from persona.stores.embedder import Embedder
@@ -533,7 +534,7 @@ class SeedTemplates:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._schema: Path | None = None
-        self._seeds: dict[tuple[str, str, int], Path] = {}
+        self._seeds: dict[tuple[str, str, str, int], Path] = {}
 
     def community_engine(self, tmp_path: Path) -> Engine:
         """A community engine on a copy of the empty, up to date schema."""
@@ -567,26 +568,37 @@ class SeedTemplates:
             if path.is_file()
         }
 
+    # Each build goes into a fresh folder and closes what it opened even when it fails, so a
+    # failed build is retried by the next test and shows its own error there, not a collision
+    # with the half-built folder it left.
+
     def _schema_db(self) -> Path:
         if self._schema is None:
-            folder = self._root / "schema"
-            folder.mkdir()
+            folder = Path(tempfile.mkdtemp(prefix="schema-", dir=self._root))
             engine = make_community_engine(folder / "community.db")
-            create_community_schema(engine)
-            engine.dispose()
+            try:
+                create_community_schema(engine)
+            finally:
+                engine.dispose()
             self._schema = _frozen(folder) / "community.db"
         return self._schema
 
     def _seed_tree(self, embedder: Embedder) -> Path:
         # The vectors are the embedder's, so each kind of embedder gets a seed of its own.
-        key = (type(embedder).__qualname__, embedder.model_name, embedder.dimension)
+        kind = type(embedder)
+        key = (kind.__module__, kind.__qualname__, embedder.model_name, embedder.dimension)
         if key not in self._seeds:
-            folder = self._root / f"seed{len(self._seeds)}"
-            folder.mkdir()
-            built = seed(folder, embedder)
-            assert isinstance(built.memory, ChromaBackend)
-            built.memory.close()
-            built.engine.dispose()
+            folder = Path(tempfile.mkdtemp(prefix="seed-", dir=self._root))
+            engine = make_community_engine(folder / "community.db")
+            try:
+                create_community_schema(engine)
+                memory = ChromaBackend(persist_path=folder / "chroma", embedder=embedder)
+                try:
+                    seed_into(engine, memory, folder)
+                finally:
+                    memory.close()
+            finally:
+                engine.dispose()
             self._seeds[key] = _frozen(folder)
         return self._seeds[key]
 
