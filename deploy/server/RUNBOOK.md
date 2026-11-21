@@ -86,6 +86,10 @@ every other script test).
 
 - **Two hosts** (2026-11-07): core on Oracle, voice on Azure later. The core host runs no
   voice and no LiveKit, and opens only 22, 80 and 443.
+- **Deploy order: the core host migrates before the voice host deploys.** Voice reads the
+  core's database, and a newer voice image may read a column only a newer migration adds
+  (`personas.create_complete`, migration 069), so a voice deploy ahead of the core's migrate
+  answers 500 until it runs.
 - **CPU torch** on Linux (D1): the api image carries no CUDA libraries and builds on arm64.
 - **Build on the host** for go-live, Docker's data root on the block volume (D2); images
   built in CI and pulled from GHCR by digest are a follow-up.
@@ -704,7 +708,8 @@ no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtim
 
 A failed nightly backup, an erasure failed or unfinished for 15 minutes or a persona create
 unfinished for 30 (hourly, `bin/erasurecheck.sh`; the api's sweep erases such a create after
-15, so one still there means that sweep is not running), a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
+15, so one still there means that sweep is not running; each count is its own query, and
+the create count is skipped with a notice until migration 069 has run), a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
 backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB` in the profile, 20 on
 Oracle) is never silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
 

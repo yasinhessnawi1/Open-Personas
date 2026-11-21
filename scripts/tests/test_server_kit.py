@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
 import re
 import shlex
 import shutil
@@ -1040,54 +1041,120 @@ def test_the_erasure_check_reports_failed_and_long_unfinished_erasures() -> None
     assert "state = 'failed'" in check
     assert "state <> 'complete'" in check
     assert 'STALL_MINUTES="${OP_ERASURE_STALL_MINUTES:-15}"' in check
-    assert "exit 1" in check
+    assert "status=1" in check
+    assert 'exit "${status}"' in check
     timer = (KIT / "systemd" / "open-persona-erasurecheck.timer").read_text(encoding="utf-8")
     assert "OnCalendar=hourly" in timer
     provision = (KIT / "bin" / "provision.sh").read_text(encoding="utf-8")
     assert "open-persona-erasurecheck.timer" in provision.split("systemctl enable --now", 1)[1]
 
 
-def _run_erasure_check(tmp_path: Path, answer: str) -> tuple[subprocess.CompletedProcess[str], str]:
-    """Run erasurecheck.sh beside a stub compose.sh that answers ``answer`` and keeps the SQL."""
+# The stub compose.sh answers by the query it is sent: ``FAIL`` exits 1, anything else is echoed.
+_ERASURE_STUB = b"""#!/usr/bin/env bash
+here="$(dirname "$0")"
+sql="${@: -1}"
+printf '%s\n' "${sql}" >> "${here}/asked"
+case "${sql}" in
+  *information_schema*) answer="${STUB_COLUMN}" ;;
+  *"FROM personas"*) answer="${STUB_ABANDONED}" ;;
+  *"FROM erasures"*) answer="${STUB_STALLED}" ;;
+  *) answer=FAIL ;;
+esac
+[ "${answer}" = FAIL ] && exit 1
+echo "${answer}"
+"""
+_ABANDONED_SQL = (
+    "SELECT count(*) FROM personas WHERE NOT create_complete"
+    " AND created_at < now() - interval '30 minutes'"
+)
+
+
+def _run_erasure_check(
+    tmp_path: Path, *, stalled: str, column: str, abandoned: str
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run erasurecheck.sh beside a stub compose.sh; return the result and each SQL it sent."""
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash unavailable")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     shutil.copy(KIT / "bin" / "erasurecheck.sh", bin_dir / "erasurecheck.sh")
-    (bin_dir / "compose.sh").write_bytes(
-        b'#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$(dirname "$0")/asked"\n'
-        + f"echo '{answer}'\n".encode()
-    )
+    (bin_dir / "compose.sh").write_bytes(_ERASURE_STUB)
     (bin_dir / "compose.sh").chmod(0o755)
+    env = {
+        **os.environ,
+        "STUB_STALLED": stalled,
+        "STUB_COLUMN": column,
+        "STUB_ABANDONED": abandoned,
+    }
     result = subprocess.run(
-        [bash, str(bin_dir / "erasurecheck.sh")], capture_output=True, text=True, check=False
+        [bash, str(bin_dir / "erasurecheck.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
-    return result, (bin_dir / "asked").read_text(encoding="utf-8")
+    asked = bin_dir / "asked"
+    sent = asked.read_text(encoding="utf-8").splitlines() if asked.exists() else []
+    return result, sent
 
 
 @pytest.mark.parametrize(
-    ("answer", "code", "said"),
+    ("stalled", "column", "abandoned", "code", "said"),
     [
-        ("0 0", 0, "no stalled erasures and no abandoned persona creates"),
-        ("2 0", 1, "2 erasure(s) failed or unfinished for 15+ minutes"),
-        ("0 3", 1, "3 persona create(s) unfinished for 30+ minutes"),
-        ("1 1", 1, "1 persona create(s) unfinished for 30+ minutes"),
-        ("", 1, "unexpected answer from the database"),
+        ("0", "1", "0", 0, ["no stalled erasures and no abandoned persona creates"]),
+        ("2", "1", "0", 1, ["2 erasure(s) failed or unfinished for 15+ minutes"]),
+        ("0", "1", "3", 1, ["3 persona create(s) unfinished for 30+ minutes"]),
+        (
+            "2",
+            "1",
+            "1",
+            1,
+            ["2 erasure(s) failed", "1 persona create(s) unfinished for 30+ minutes"],
+        ),
+        ("", "1", "0", 1, ["could not count stalled erasures"]),
     ],
+    ids=["clean", "stalled", "abandoned", "both", "empty answer"],
 )
 def test_the_erasure_check_alerts_on_an_abandoned_persona_create(
-    tmp_path: Path, answer: str, code: int, said: str
+    tmp_path: Path, stalled: str, column: str, abandoned: str, code: int, said: list[str]
 ) -> None:
     """R9-293 round 2 LOW-3: a create left unfinished past twice the sweep's grace alerts."""
-    result, asked = _run_erasure_check(tmp_path, answer)
+    result, sent = _run_erasure_check(tmp_path, stalled=stalled, column=column, abandoned=abandoned)
     assert result.returncode == code, result.stderr
-    assert said in result.stdout + result.stderr
-    assert (
-        "SELECT count(*) FROM personas WHERE NOT create_complete"
-        " AND created_at < now() - interval '30 minutes'"
-    ) in asked
-    assert "FROM erasures WHERE state = 'failed'" in asked
+    for line in said:
+        assert line in result.stdout + result.stderr
+    assert _ABANDONED_SQL in sent
+    assert any("FROM erasures WHERE state = 'failed'" in sql for sql in sent)
+
+
+@pytest.mark.parametrize(
+    ("stalled", "abandoned", "kept", "failed"),
+    [
+        ("FAIL", "3", "3 persona create(s) unfinished", "could not count stalled erasures"),
+        ("2", "FAIL", "2 erasure(s) failed", "could not count abandoned persona creates"),
+    ],
+    ids=["stalled count fails", "abandoned count fails"],
+)
+def test_one_failing_count_never_hides_the_other(
+    tmp_path: Path, stalled: str, abandoned: str, kept: str, failed: str
+) -> None:
+    """R9-293 round 3, Finding 5: each count is its own psql call, so both are reported."""
+    result, sent = _run_erasure_check(tmp_path, stalled=stalled, column="1", abandoned=abandoned)
+    assert result.returncode == 1
+    assert kept in result.stderr
+    assert failed in result.stderr
+    assert len(sent) == 3, "stalled, the column check and abandoned, one call each"
+
+
+def test_the_erasure_check_skips_the_abandoned_count_before_migration_069(
+    tmp_path: Path,
+) -> None:
+    """Round 3, Finding 5: mid-deploy, before migrate adds the column, there is no false alarm."""
+    result, sent = _run_erasure_check(tmp_path, stalled="0", column="0", abandoned="FAIL")
+    assert result.returncode == 0, result.stderr
+    assert "not migrated yet" in result.stdout
+    assert _ABANDONED_SQL not in sent, "the count is never sent against a missing column"
 
 
 def _systemctl_enables(script: str) -> list[list[str]]:
