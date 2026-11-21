@@ -157,34 +157,53 @@ def claim_abandoned_create(engine: Engine, *, owner_id: str, persona_id: str) ->
     """Claim the erasure of a create that never finished, or nothing (R9-293 review MEDIUM-2).
 
     The persona's row is locked (FOR UPDATE) while it is still incomplete, and held through
-    the capture, the claim and the row's delete: a create finishing at that moment waits on
+    the capture, the row's delete and the claim: a create finishing at that moment waits on
     the lock, then finds no incomplete row, fails and is undone. A row that turned complete
     before the lock is kept, and nothing is claimed (``None``). The resume runs the rest of
     the erasure, the fence included.
+
+    SQLite has no row lock (round 3, Finding 4), so the delete itself requires the row still
+    incomplete, and the claim is written after it, in the same transaction. A create that
+    finished in between keeps its row: the transaction rolls back, and no erasure is claimed.
     """
     ledger = ErasureLedger(engine)
-    with engine.begin() as conn:
-        held = conn.execute(
-            select(personas_t.c.id)
-            .where(
-                personas_t.c.id == persona_id,
-                personas_t.c.owner_id == owner_id,
-                personas_t.c.create_complete.is_(False),
+    try:
+        with engine.begin() as conn:
+            held = conn.execute(
+                select(personas_t.c.id)
+                .where(
+                    personas_t.c.id == persona_id,
+                    personas_t.c.owner_id == owner_id,
+                    personas_t.c.create_complete.is_(False),
+                )
+                .with_for_update()
+            ).first()
+            if held is None:
+                return None
+            captured = capture_persona(conn, owner_id=owner_id, persona_id=persona_id)
+            deleted = delete_persona_row(
+                conn, owner_id=owner_id, persona_id=persona_id, only_incomplete=True
             )
-            .with_for_update()
-        ).first()
-        if held is None:
-            return None
-        captured = capture_persona(conn, owner_id=owner_id, persona_id=persona_id)
-        erasure = ledger.claim(
-            owner_id=owner_id,
-            subject_kind=SubjectKind.PERSONA,
-            subject_id=persona_id,
-            captured=captured,
+            if deleted == 0:
+                raise _FinishedMeanwhile
+            erasure = ledger.claim_in(
+                conn,
+                owner_id=owner_id,
+                subject_kind=SubjectKind.PERSONA,
+                subject_id=persona_id,
+                captured=captured,
+            )
+    except _FinishedMeanwhile:
+        _log.info(
+            "abandoned persona create finished before its delete persona={pid}", pid=persona_id
         )
-        delete_persona_row(conn, owner_id=owner_id, persona_id=persona_id)
+        return None
     ledger.record_step(erasure.id, "row", {"personas": 1})
     return erasure
+
+
+class _FinishedMeanwhile(Exception):  # noqa: N818 - a control signal, not an error
+    """The create finished between the check and the delete: roll back and claim nothing."""
 
 
 def erase_persona_now(

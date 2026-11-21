@@ -258,3 +258,33 @@ def test_finishing_a_create_is_not_an_update(
         ).one()
     assert complete
     assert updated == created
+
+
+def test_a_create_finishing_under_the_sqlite_delete_keeps_its_row(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3, Finding 4: SQLite has no FOR UPDATE, so the delete itself requires incomplete.
+
+    The create finishes between the sweep's check and its delete. The row stays, complete, and
+    no erasure is left claimed for it.
+    """
+    from persona_api.services import erasure_start  # noqa: PLC0415
+    from sqlalchemy import update  # noqa: PLC0415
+
+    pid = _crashed_create(seeded, embedder, monkeypatch)
+    capture = erasure_start.capture_persona
+
+    def _finishes_meanwhile(conn: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        captured = capture(conn, **kwargs)
+        with seeded.engine.begin() as other:  # the create's final UPDATE, on its own connection
+            other.execute(
+                update(personas_t).where(personas_t.c.id == pid).values(create_complete=True)
+            )
+        return captured
+
+    monkeypatch.setattr(erasure_start, "capture_persona", _finishes_meanwhile)
+    claimed = erasure_start.claim_abandoned_create(seeded.engine, owner_id=OWNER, persona_id=pid)
+
+    assert claimed is None
+    assert _rows(seeded)[pid] is True, "the finished row is kept"
+    assert ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid) is None, "nothing claimed"

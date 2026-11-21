@@ -740,7 +740,9 @@ def persona_exists(engine: Engine, persona_id: str) -> bool:
         return found.first() is not None
 
 
-def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> int:
+def delete_persona_row(
+    conn: Connection, *, owner_id: str, persona_id: str, only_incomplete: bool = False
+) -> int:
     """Delete the persona's row, scoped to its owner, and return how many rows went (0 or 1).
 
     Channels that have this persona foregrounded forget it first. The channel's foreign key is
@@ -749,6 +751,11 @@ def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> i
     cannot). The foreign key cascade then takes conversations, messages, tasks, runs and the
     rest. Runs inside the caller's transaction; 0 when the row is already gone, which is what
     a resumed erasure finds.
+
+    ``only_incomplete`` deletes the row only while its create has not finished (R9-293 round 3,
+    Finding 4): on SQLite, which has no row lock, a create can finish between the abandoned
+    sweep's check and this delete, and its row must then stay. The caller rolls back on 0, so
+    the channel update above does not outlive a row that stays.
     """
     conn.execute(
         update(connector_channels_t)
@@ -758,11 +765,10 @@ def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> i
         )
         .values(active_persona_id=None)
     )
-    result = conn.execute(
-        delete(personas_t)
-        .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
-        .returning(personas_t.c.id)
-    )
+    which = [personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id]
+    if only_incomplete:
+        which.append(personas_t.c.create_complete.is_(False))
+    result = conn.execute(delete(personas_t).where(*which).returning(personas_t.c.id))
     return 0 if result.first() is None else 1
 
 
