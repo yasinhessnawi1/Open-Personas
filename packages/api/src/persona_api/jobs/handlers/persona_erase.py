@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from persona.errors import PermanentJobError
+from persona.errors import PermanentJobError, PersonaNotFoundError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.stores.postgres import PostgresBackend
@@ -419,6 +419,9 @@ class PersonaEraseSweep:
                 claim_abandoned_create(
                     self._engine, owner_id=str(owner_id), persona_id=str(persona_id)
                 )
+            except PersonaNotFoundError:
+                # Gone meanwhile (its own undo, or another sweep): nothing is owed (review LOW-4).
+                _log.debug("abandoned persona create already gone persona={pid}", pid=persona_id)
             except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
                 _log.error(
                     "OPERATOR ALERT: an abandoned persona create could not be claimed "

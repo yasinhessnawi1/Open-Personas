@@ -195,3 +195,35 @@ def test_a_create_swept_before_it_finished_fails_and_is_undone(
     assert len(swept) == 1
     assert swept[0] is not None, "the sweep claimed it"
     assert len(undone) == 1, "the create's undo ran"
+
+
+def test_a_create_gone_before_its_claim_is_no_alert(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review LOW-4: a row its own undo (or another sweep) took first is debug, not an alert."""
+    from persona_api.jobs.handlers import persona_erase  # noqa: PLC0415
+    from persona_api.services import erasure_start  # noqa: PLC0415
+
+    pid = _crashed_create(seeded, embedder, monkeypatch)
+    said: dict[str, list[str]] = {"debug": [], "error": []}
+
+    class _Log:
+        def debug(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["debug"].append(message)
+
+        def error(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["error"].append(message)
+
+        def warning(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["error"].append(message)
+
+    def _gone(*_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        raise PersonaNotFoundError("persona not found", context={"id": pid})
+
+    monkeypatch.setattr(persona_erase, "_log", _Log())
+    monkeypatch.setattr(erasure_start, "claim_abandoned_create", _gone)
+
+    _sweep(seeded, at=datetime.now(UTC) + ABANDONED_CREATE_GRACE + timedelta(minutes=1))
+
+    assert any("already gone" in m for m in said["debug"])
+    assert not [m for m in said["error"] if "OPERATOR ALERT" in m]
