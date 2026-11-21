@@ -40,7 +40,7 @@ from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
-from persona_api.services import notifications_service
+from persona_api.services import audit_service, notifications_service
 from persona_api.workspace_paths import is_persona_id, new_persona_id, persona_root
 
 if TYPE_CHECKING:
@@ -430,6 +430,12 @@ def create_persona(
             if finished.rowcount != 1:
                 msg = "the persona's create was swept before it finished"
                 raise RuntimeError(msg)
+            # Review round 3 (Finding 1): a complete persona is an audited one. The audit row
+            # commits with the flag, here in the create's thread, so a cancel that lands on the
+            # route's await (a shutdown) cannot leave a complete persona with no audit row.
+            audit_service.record_in(
+                conn, user_id=owner_id, action="persona.create", target=persona_id
+            )
     except Exception:
         _undo_create(compensate, persona_id)
         raise

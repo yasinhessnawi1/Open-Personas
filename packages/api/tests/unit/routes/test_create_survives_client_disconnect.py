@@ -1,9 +1,11 @@
 """A client that disconnects mid-create never skips the steps after it (R9-293 review LOW-6).
 
-The create runs in a thread. When it returns, the route records the audit row, pings the
-owner's other tabs and schedules the enrichment (voice and portrait). The worry was that a
-client gone before that point cancels the handler under BaseHTTPMiddleware (the request
-telemetry), leaving a complete persona with no audit row and no enrichment.
+The create runs in a thread, and writes its ``persona.create`` audit row there, with its
+completion (round 3, Finding 1). When it returns, the route pings the owner's other tabs and
+schedules the enrichment (voice and portrait). The worry was that a client gone before that
+point cancels the handler under BaseHTTPMiddleware (the request telemetry), leaving a
+complete persona with no enrichment. The route's own audit call is still recorded here, so a
+second audit row written by the route would fail this too.
 
 Checked on Starlette 1.1.0, FastAPI 0.136.3 and uvicorn 0.48.0: nothing cancels it. uvicorn
 only marks the cycle disconnected and drops what is sent after that, and BaseHTTPMiddleware
@@ -134,7 +136,7 @@ async def _post_then_vanish(app: Any) -> list[str]:  # noqa: ANN401
     return dropped
 
 
-def test_a_create_whose_client_left_still_records_pings_and_enriches(
+def test_a_create_whose_client_left_still_pings_and_enriches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     after: list[str] = []
@@ -144,7 +146,6 @@ def test_a_create_whose_client_left_still_records_pings_and_enriches(
     dropped = asyncio.run(asyncio.wait_for(_post_then_vanish(app), timeout=10))
 
     assert after == [
-        f"audit persona.create {_PID}",
         "ping persona.created",
         f"enrichment {_PID}",
     ]

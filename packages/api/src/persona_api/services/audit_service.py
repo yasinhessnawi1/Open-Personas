@@ -22,10 +22,11 @@ from persona_api.db.models import audit_log as audit_log_t
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
+    from sqlalchemy.engine import Connection
 
 _log = get_logger("api.audit")
 
-__all__ = ["record"]
+__all__ = ["record", "record_in"]
 
 
 def record(
@@ -40,14 +41,30 @@ def record(
     operation it audits (logged, swallowed)."""
     try:
         with engine.begin() as conn:
-            conn.execute(
-                insert(audit_log_t).values(
-                    id=f"audit_{uuid.uuid4().hex}",
-                    user_id=user_id,
-                    action=action,
-                    target=target,
-                    metadata=metadata or {},
-                )
-            )
+            record_in(conn, user_id=user_id, action=action, target=target, metadata=metadata)
     except Exception as exc:  # noqa: BLE001 — audit must not break the audited op
         _log.warning("audit_log write failed action={action}: {err}", action=action, err=str(exc))
+
+
+def record_in(
+    conn: Connection,
+    *,
+    user_id: str,
+    action: str,
+    target: str,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Append an audit-log row inside the caller's transaction; a failure fails it too.
+
+    For an operation whose outcome and audit row must commit together (R9-293: a complete
+    persona is an audited persona), unlike :func:`record`, which is best-effort.
+    """
+    conn.execute(
+        insert(audit_log_t).values(
+            id=f"audit_{uuid.uuid4().hex}",
+            user_id=user_id,
+            action=action,
+            target=target,
+            metadata=metadata or {},
+        )
+    )

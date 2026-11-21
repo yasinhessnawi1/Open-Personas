@@ -546,12 +546,8 @@ async def create_persona(
             persona_id=persona_id,
         ),
     )
-    audit_service.record(
-        engine=request.app.state.rls_engine,
-        user_id=user.id,
-        action="persona.create",
-        target=persona_id,
-    )
+    # The persona.create audit row was written with the create's completion, in its thread
+    # (R9-293 round 3): a cancel that lands on the await above cannot skip it.
     # R9-012: post-commit sidebar liveness ping — the owner's OTHER tabs/devices
     # soft-refresh their sidebar (data-only; best-effort, never fails the create).
     notifications_service.publish_sidebar_changed(
