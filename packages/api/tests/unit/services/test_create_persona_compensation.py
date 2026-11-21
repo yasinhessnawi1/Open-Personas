@@ -159,3 +159,32 @@ def test_a_final_update_that_fails_is_undone_too(monkeypatch: pytest.MonkeyPatch
         )
 
     assert len(undone) == 1
+
+
+def test_an_undo_that_finds_the_persona_gone_is_no_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 3, Finding 3: the sweep or an account erasure took the row first; info, no alert."""
+    from persona.errors import PersonaNotFoundError  # noqa: PLC0415
+
+    said: dict[str, list[str]] = {"info": [], "error": []}
+
+    class _Log:
+        def info(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["info"].append(message)
+
+        def error(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["error"].append(message)
+
+        def warning(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            said["error"].append(message)
+
+    def _already_gone(pid: str) -> None:
+        raise PersonaNotFoundError("persona not found", context={"id": pid})
+
+    monkeypatch.setattr(persona_service, "_LOG", _Log())
+    with pytest.raises(RuntimeError, match="identity index"):
+        _create(monkeypatch, _already_gone)
+
+    assert any("already gone" in m for m in said["info"])
+    assert not [m for m in said["error"] if "OPERATOR ALERT" in m]

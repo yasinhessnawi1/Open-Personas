@@ -455,6 +455,12 @@ def _undo_create(compensate: Callable[[str], object] | None, persona_id: str) ->
         return
     try:
         compensate(persona_id)
+    except PersonaNotFoundError:
+        # Review round 3 (Finding 3): the sweep, or an account erasure, removed the row first,
+        # so the undo is already done (or running there). Nothing is owed and nobody is paged.
+        _LOG.info(
+            "persona create undo found the persona already gone persona={pid}", pid=persona_id
+        )
     except Exception as exc:  # noqa: BLE001 - the create's own error is the one to raise
         _LOG.error(
             "OPERATOR ALERT: persona create failed and undoing it failed too persona={pid} "
