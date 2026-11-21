@@ -47,3 +47,11 @@ def test_069_fails_fast_on_a_busy_personas_table() -> None:
         body = inspect.getsource(step)
         assert body.index("SET lock_timeout = '5s'") < body.index("_has_column()")
         assert body.rstrip().endswith('op.execute("RESET lock_timeout")')
+
+
+def test_069_downgrade_deletes_unfinished_creates_before_the_column_goes() -> None:
+    """Round 3, Finding 8: older code would list a half-made persona, so it goes first."""
+    import inspect  # noqa: PLC0415
+
+    body = inspect.getsource(_migration().downgrade)
+    assert body.index("DELETE FROM {_TABLE} WHERE NOT {_COLUMN}") < body.index("drop_column")

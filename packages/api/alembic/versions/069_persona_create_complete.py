@@ -12,6 +12,12 @@ persona read and write behind its exclusive lock. It is set for the session at t
 ``RESET`` at the end, upgrade and downgrade alike. Adding a NOT NULL column with a constant
 default is a catalog-only change on Postgres 11 and later, so the lock is brief.
 
+Downgrade (round 3, Finding 8): code before 069 cannot tell an unfinished create from a
+persona, so it would list one, half-made, to its owner. The downgrade therefore deletes every
+row ``WHERE NOT create_complete`` before it drops the column; the foreign key cascade takes
+the rows that hang off it (its identity chunks among them), as the abandoned-create sweep
+would have. What no cascade reaches (graph nodes, workspace files) is not erased here.
+
 Revision ID: 069_persona_create_complete
 Revises: 068_forgotten_conversations
 Create Date: 2026-11-17
@@ -49,5 +55,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("SET lock_timeout = '5s'")
     if _has_column():
+        op.execute(sa.text(f"DELETE FROM {_TABLE} WHERE NOT {_COLUMN}"))  # noqa: S608 - constants
         op.drop_column(_TABLE, _COLUMN)
     op.execute("RESET lock_timeout")
