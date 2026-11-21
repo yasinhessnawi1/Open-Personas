@@ -24,6 +24,7 @@ from persona.tools.mcp.client import MCPClient
 from persona.tools.mcp.ssrf import assert_url_allowed
 from sqlalchemy import delete, func, insert, select, update
 
+from persona_api.db.models import persona_complete
 from persona_api.db.models import persona_mcp_assignments as assignments_t
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import user_mcp_servers as servers_t
@@ -372,7 +373,9 @@ def assign_to_persona(*, rls_engine: Engine, persona_id: str, server_id: str) ->
     """
     _require_row(rls_engine, server_id)  # 404 if not the caller's server
     with rls_engine.begin() as conn:
-        persona = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
+        persona = conn.execute(
+            select(personas_t.c.id).where(personas_t.c.id == persona_id, persona_complete)
+        ).first()
         if persona is None:
             raise MCPServerNotFoundError("persona not found", context={"id": persona_id})
         existing = conn.execute(

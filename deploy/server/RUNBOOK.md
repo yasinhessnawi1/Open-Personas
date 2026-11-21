@@ -702,8 +702,9 @@ no container runtime is planned. The seam is marked `SEAM: per-tenant MCP runtim
 
 ## Alerts
 
-A failed nightly backup, an erasure failed or unfinished for 15 minutes (hourly,
-`bin/erasurecheck.sh`), a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
+A failed nightly backup, an erasure failed or unfinished for 15 minutes or a persona create
+unfinished for 30 (hourly, `bin/erasurecheck.sh`; the api's sweep erases such a create after
+15, so one still there means that sweep is not running), a disk-usage check over 85 % (daily, `bin/diskcheck.sh`) or a
 backup refused for lack of free space (`OP_BACKUP_MIN_FREE_GB` in the profile, 20 on
 Oracle) is never silent: the unit's `OnFailure=` runs `bin/alert.sh`, which
 

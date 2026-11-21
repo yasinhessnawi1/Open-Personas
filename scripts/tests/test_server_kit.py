@@ -1047,6 +1047,49 @@ def test_the_erasure_check_reports_failed_and_long_unfinished_erasures() -> None
     assert "open-persona-erasurecheck.timer" in provision.split("systemctl enable --now", 1)[1]
 
 
+def _run_erasure_check(tmp_path: Path, answer: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run erasurecheck.sh beside a stub compose.sh that answers ``answer`` and keeps the SQL."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash unavailable")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    shutil.copy(KIT / "bin" / "erasurecheck.sh", bin_dir / "erasurecheck.sh")
+    (bin_dir / "compose.sh").write_bytes(
+        b'#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$(dirname "$0")/asked"\n'
+        + f"echo '{answer}'\n".encode()
+    )
+    (bin_dir / "compose.sh").chmod(0o755)
+    result = subprocess.run(
+        [bash, str(bin_dir / "erasurecheck.sh")], capture_output=True, text=True, check=False
+    )
+    return result, (bin_dir / "asked").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("answer", "code", "said"),
+    [
+        ("0 0", 0, "no stalled erasures and no abandoned persona creates"),
+        ("2 0", 1, "2 erasure(s) failed or unfinished for 15+ minutes"),
+        ("0 3", 1, "3 persona create(s) unfinished for 30+ minutes"),
+        ("1 1", 1, "1 persona create(s) unfinished for 30+ minutes"),
+        ("", 1, "unexpected answer from the database"),
+    ],
+)
+def test_the_erasure_check_alerts_on_an_abandoned_persona_create(
+    tmp_path: Path, answer: str, code: int, said: str
+) -> None:
+    """R9-293 round 2 LOW-3: a create left unfinished past twice the sweep's grace alerts."""
+    result, asked = _run_erasure_check(tmp_path, answer)
+    assert result.returncode == code, result.stderr
+    assert said in result.stdout + result.stderr
+    assert (
+        "SELECT count(*) FROM personas WHERE NOT create_complete"
+        " AND created_at < now() - interval '30 minutes'"
+    ) in asked
+    assert "FROM erasures WHERE state = 'failed'" in asked
+
+
 def _systemctl_enables(script: str) -> list[list[str]]:
     """Every ``systemctl enable`` command in a script, continuation lines joined, split by shlex."""
     joined = script.replace("\\\n", " ")

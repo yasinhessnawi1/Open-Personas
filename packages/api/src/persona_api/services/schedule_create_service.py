@@ -45,6 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from persona_api.db.engine import rls_connection
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.services.calendar_reschedule_service import (
     ReschedulePreview,
@@ -233,7 +234,9 @@ def _require_owned_persona(engine: Engine, *, owner_id: str, persona_id: str) ->
     posture as the schedule store (both raise the not-found domain error).
     """
     with rls_connection(engine, owner_id) as conn:
-        row = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
+        row = conn.execute(
+            select(personas_t.c.id).where(personas_t.c.id == persona_id, persona_complete)
+        ).first()
     if row is None:
         raise PersonaNotFoundError("executor persona not found", context={"persona_id": persona_id})
 

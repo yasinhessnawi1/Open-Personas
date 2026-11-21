@@ -39,6 +39,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from persona_api.db.engine import aware_utc
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import messages as messages_t
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import ConversationNotFoundError
 from persona_api.services import conversation_memory_forget as memory_forget
@@ -203,7 +204,9 @@ def create_conversation(
     conv_id = f"conv_{uuid.uuid4().hex}"
     with rls_engine.begin() as conn:
         # Verify the persona is the caller's (RLS would hide it otherwise).
-        exists = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
+        exists = conn.execute(
+            select(personas_t.c.id).where(personas_t.c.id == persona_id, persona_complete)
+        ).first()
         if exists is None:
             raise PersonaNotFoundError("persona not found", context={"id": persona_id})
         conn.execute(

@@ -70,6 +70,7 @@ from persona_runtime.routing import (
 from sqlalchemy import select, text
 
 from persona_api.approvals.action_executor import ToolboxActionExecutor
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.editions import MeteredCreditsPolicy
 from persona_api.imagegen.chat_charge import ChatImageChargeHook
@@ -860,7 +861,9 @@ class RuntimeFactory:
         """Load + validate the persona's YAML from the RLS-scoped row (→ 404)."""
         with self._engine.begin() as conn:
             row = (
-                conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id))
+                conn.execute(
+                    select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
+                )
                 .mappings()
                 .first()
             )

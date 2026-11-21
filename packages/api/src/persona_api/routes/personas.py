@@ -520,7 +520,10 @@ async def create_persona(
     user-supplied ``avatar_url`` always wins (criterion 6) and short-circuits the
     background avatar hook. Everything stays fail-soft (D-29-X-fail-soft).
     """
-    persona_id = persona_service.create_persona(
+    # R9-293 review HIGH-1: in a thread, never on the event loop. The create embeds the
+    # identity synchronously, and its undo (the persona erasure) may wait on the graph lock.
+    persona_id = await asyncio.to_thread(
+        persona_service.create_persona,
         rls_engine=request.app.state.rls_engine,
         embedder=request.app.state.embedder,
         audit_root=request.app.state.audit_root,
@@ -534,6 +537,14 @@ async def create_persona(
         # R5-D-2: the app-selected store-mutation audit backend (Postgres when
         # multi-worker). None (test overrides) ⇒ the JSONL default.
         audit_logger=getattr(request.app.state, "audit_logger", None),
+        # R9-293: a create that fails after its row committed is erased through the
+        # persona erasure before the request answers 500, so no half-made persona stays.
+        compensate=lambda persona_id: erasure_start.erase_persona_now(
+            request.app.state,
+            rls_engine=request.app.state.rls_engine,
+            owner_id=user.id,
+            persona_id=persona_id,
+        ),
     )
     audit_service.record(
         engine=request.app.state.rls_engine,
@@ -578,14 +589,25 @@ async def create_persona(
         yaml_str=body.yaml,
         generate_avatar=wants_portrait and not queue_avatar,
     )
+    queued = False
     if queue_avatar and job_queue is not None:
-        enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+        # Best-effort (R9-293 review LOW-6): the persona is complete by now, so a queue
+        # that fails costs it its portrait, never the create (a 500 for a persona that exists).
+        try:
+            enqueue_avatar_generation(job_queue, persona_id=persona_id, owner_id=user.id)
+            queued = True
+        except Exception as exc:  # noqa: BLE001 - logged; the persona stands without a portrait
+            _LOG.warning(
+                "avatar job not queued after create persona={pid} error={err}",
+                pid=persona_id,
+                err=type(exc).__name__,
+            )
     row = persona_service.get_persona(rls_engine=state.rls_engine, persona_id=persona_id)
     # "pending" only when something will actually draw: the queue, or the inline
     # hook with an image backend to call. Without either, saying pending would
     # keep the web polling for an avatar that can never arrive.
-    avatar_pending = queue_avatar or (
-        wants_portrait and getattr(state, "image_backend", None) is not None
+    avatar_pending = queued or (
+        wants_portrait and not queue_avatar and getattr(state, "image_backend", None) is not None
     )
     return _persona_detail(
         row,

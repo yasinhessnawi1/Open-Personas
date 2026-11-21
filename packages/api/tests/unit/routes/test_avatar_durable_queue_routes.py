@@ -514,3 +514,28 @@ def test_a_malformed_presentation_does_not_break_the_detail(
     monkeypatch.setattr(personas_routes.persona_service, "get_persona", lambda **_: row)
     detail = _get(_request(job_queue=_FakeQueue(latest=None), in_process_worker=None), monkeypatch)
     assert detail.presentation is None
+
+
+def test_a_queue_that_fails_never_fails_the_create(
+    recorded_calls: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-293 review LOW-6: the persona is complete; a failing enqueue costs only the portrait.
+
+    The create answers with the persona, and does not tell the web to wait for an avatar
+    that nothing will draw.
+    """
+
+    def _down(*_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        msg = "the job table is unreachable"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(personas_routes, "enqueue_avatar_generation", _down)
+
+    detail, background = _create(
+        _request(job_queue=_FakeQueue(), in_process_worker=_worker(AVATAR_JOB_TYPE))
+    )
+
+    assert detail.id == _PERSONA
+    assert detail.avatar_status is None
+    asyncio.run(background())
+    assert recorded_calls == ["voice"], "no inline portrait either: the queue was chosen"
