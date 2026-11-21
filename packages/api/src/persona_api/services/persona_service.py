@@ -419,11 +419,13 @@ def create_persona(
         with rls_engine.begin() as conn:
             # Review MEDIUM-2: only an incomplete row turns complete. If the abandoned-create
             # sweep took it first, this matches nothing, and the create fails (and is undone)
-            # rather than answering for a persona that is gone.
+            # rather than answering for a persona that is gone. Finishing the create is not an
+            # edit, so updated_at keeps the INSERT's stamp (onupdate would move it past
+            # created_at by however long the identity index took).
             finished = conn.execute(
                 update(personas_t)
                 .where(personas_t.c.id == persona_id, personas_t.c.create_complete.is_(False))
-                .values(create_complete=True)
+                .values(create_complete=True, updated_at=personas_t.c.updated_at)
             )
             if finished.rowcount != 1:
                 msg = "the persona's create was swept before it finished"

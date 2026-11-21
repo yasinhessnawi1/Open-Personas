@@ -227,3 +227,34 @@ def test_a_create_gone_before_its_claim_is_no_alert(
 
     assert any("already gone" in m for m in said["debug"])
     assert not [m for m in said["error"] if "OPERATOR ALERT" in m]
+
+
+def test_finishing_a_create_is_not_an_update(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final UPDATE keeps updated_at at the INSERT's stamp (CI's created == updated check)."""
+    import time  # noqa: PLC0415
+
+    build = persona_service._build_registry  # noqa: SLF001
+
+    def _slow(*a: Any, **k: Any) -> Any:  # noqa: ANN401
+        registry = build(*a, **k)
+        load = registry.load_persona
+
+        def _load(persona: Any) -> None:  # noqa: ANN401
+            load(persona)
+            time.sleep(1.1)  # past the next second: SQLite's now() has second resolution
+
+        registry.load_persona = _load
+        return registry
+
+    monkeypatch.setattr(persona_service, "_build_registry", _slow)
+    pid = _create(seeded, embedder)
+    with seeded.engine.connect() as conn:
+        created, updated, complete = conn.execute(
+            select(
+                personas_t.c.created_at, personas_t.c.updated_at, personas_t.c.create_complete
+            ).where(personas_t.c.id == pid)
+        ).one()
+    assert complete
+    assert updated == created
