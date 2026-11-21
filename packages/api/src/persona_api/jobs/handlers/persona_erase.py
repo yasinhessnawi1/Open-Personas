@@ -19,18 +19,19 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from persona.errors import PermanentJobError
+from persona.errors import PermanentJobError, PersonaNotFoundError
 from persona.jobs import LONG_LEASE, JobPayload, JobTypeSpec, RetryPolicy
 from persona.logging import get_logger
 from persona.stores.postgres import PostgresBackend
 from pydantic import field_validator
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from persona_api.db.audit_factory import build_audit_logger
 from persona_api.db.engine import aware_utc
 from persona_api.db.models import jobs as jobs_t
+from persona_api.db.models import personas as personas_t
 from persona_api.errors import ErasureRecordError
 from persona_api.jobs.handlers.avatar import JobTypeCarrier
 from persona_api.jobs.queue import JobQueue
@@ -259,6 +260,9 @@ def _has_live_job(conn: Connection, erasure_id: str) -> bool:
 #: An erasure changed more recently than this is left alone by a resume (review L4): the
 #: route that claimed it may still be fencing it, deleting its row or handing it off.
 RESUME_GRACE = timedelta(minutes=2)
+#: A create whose identity is still not indexed after this never finished (R9-293): its
+#: process died between the commit and the undo, and the sweep erases it.
+ABANDONED_CREATE_GRACE = timedelta(minutes=15)
 
 
 def resume_persona_erasures(
@@ -367,6 +371,7 @@ class PersonaEraseSweep:
         self._finished: set[tuple[str, str]] = set()  # done during the current sweep
 
     def __call__(self) -> int:
+        self._claim_abandoned_creates()
         resumed = resume_persona_erasures(engine=self._engine, run=self._run, grace=self._grace)
         self._graph_backstop()
         for erasure in stalled_persona_erasures(self._engine, now=self._clock()):
@@ -380,6 +385,50 @@ class PersonaEraseSweep:
                 code=erasure.error_code or "none",
             )
         return resumed
+
+    def _claim_abandoned_creates(self) -> None:
+        """Claim the erasure of every create that never finished (R9-293 review HIGH-2).
+
+        A row with ``create_complete`` false older than :data:`ABANDONED_CREATE_GRACE` is a
+        create whose process died between its commit and its undo. Its erasure is claimed and
+        its row deleted under the row's lock, still incomplete (``claim_abandoned_create``,
+        review MEDIUM-2), and the resume runs the rest. A younger one may still be finishing,
+        and is left alone. On Postgres the cutoff is the database's clock (review MEDIUM-2:
+        ``created_at`` is the database's ``now()``); the legacy SQLite edition uses this one.
+        """
+        from persona_api.services.erasure_start import claim_abandoned_create  # noqa: PLC0415
+
+        cutoff: Any = (
+            func.now() - ABANDONED_CREATE_GRACE
+            if self._engine.dialect.name == "postgresql"
+            else self._clock() - ABANDONED_CREATE_GRACE
+        )
+        try:
+            with self._engine.connect() as conn:
+                abandoned = conn.execute(
+                    select(personas_t.c.id, personas_t.c.owner_id).where(
+                        personas_t.c.create_complete.is_(False),
+                        personas_t.c.created_at < cutoff,
+                    )
+                ).all()
+        except Exception as exc:  # noqa: BLE001 - logged; the sweep goes on to the resume
+            _log.error("abandoned creates could not be read error={err}", err=type(exc).__name__)
+            return
+        for persona_id, owner_id in abandoned:
+            try:
+                claim_abandoned_create(
+                    self._engine, owner_id=str(owner_id), persona_id=str(persona_id)
+                )
+            except PersonaNotFoundError:
+                # Gone meanwhile (its own undo, or another sweep): nothing is owed (review LOW-4).
+                _log.debug("abandoned persona create already gone persona={pid}", pid=persona_id)
+            except Exception as exc:  # noqa: BLE001 - per persona: the next is still tried
+                _log.error(
+                    "OPERATOR ALERT: an abandoned persona create could not be claimed "
+                    "persona={pid} error={err}",
+                    pid=persona_id,
+                    err=type(exc).__name__,
+                )
 
     def _graph_backstop(self) -> None:
         """Take out of the graph any erased persona something still names (review H-2).

@@ -37,12 +37,14 @@ from sqlalchemy import delete, func, insert, select, update
 
 from persona_api.db.models import connector_channels as connector_channels_t
 from persona_api.db.models import conversations as conversations_t
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.schemas import PersonaSummary
-from persona_api.services import notifications_service
+from persona_api.services import audit_service, notifications_service
 from persona_api.workspace_paths import is_persona_id, new_persona_id, persona_root
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from persona.stores.backend import Backend
@@ -365,6 +367,7 @@ def create_persona(
     avatar_url: str | None = None,
     memory_backend: Backend | None = None,
     audit_logger: AuditLogger | None = None,
+    compensate: Callable[[str], object] | None = None,
 ) -> str:
     """Create a persona: insert the row + populate memory stores (D-08-8).
 
@@ -377,6 +380,11 @@ def create_persona(
     ``memory_chunks.persona_id`` FK (a separate connection can't see an
     uncommitted row; verified in research). Both transactions carry the tenant
     GUC, so RLS holds throughout.
+
+    R9-293: a failure after the row commits leaves a half-made persona (in the owner's list,
+    without its identity memory). ``compensate`` is then called with the new persona's id
+    (the route erases it through the persona erasure) before the original error is raised
+    again; an undo that fails itself is logged and never hides that error.
     """
     persona_id = new_persona_id()
     persona = load_persona_from_yaml(yaml_str, persona_id=persona_id, owner_id=owner_id)
@@ -400,12 +408,66 @@ def create_persona(
                 schema_version=persona.schema_version,
                 avatar_url=avatar_url,
                 avatar_source=avatar_source,
+                # R9-293 review HIGH-2: hidden until the identity is indexed below.
+                create_complete=False,
             )
         )
     # Persona row committed → its FK target is visible to the store connections.
-    registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
-    registry.load_persona(persona)
+    try:
+        registry = _build_registry(rls_engine, embedder, audit_root, memory_backend, audit_logger)
+        registry.load_persona(persona)
+        with rls_engine.begin() as conn:
+            # Review MEDIUM-2: only an incomplete row turns complete. If the abandoned-create
+            # sweep took it first, this matches nothing, and the create fails (and is undone)
+            # rather than answering for a persona that is gone. Finishing the create is not an
+            # edit, so updated_at keeps the INSERT's stamp (onupdate would move it past
+            # created_at by however long the identity index took).
+            finished = conn.execute(
+                update(personas_t)
+                .where(personas_t.c.id == persona_id, personas_t.c.create_complete.is_(False))
+                .values(create_complete=True, updated_at=personas_t.c.updated_at)
+            )
+            if finished.rowcount != 1:
+                msg = "the persona's create was swept before it finished"
+                raise RuntimeError(msg)
+            # Review round 3 (Finding 1): a complete persona is an audited one. The audit row
+            # commits with the flag, here in the create's thread, so a cancel that lands on the
+            # route's await (a shutdown) cannot leave a complete persona with no audit row.
+            audit_service.record_in(
+                conn, user_id=owner_id, action="persona.create", target=persona_id
+            )
+    except Exception:
+        _undo_create(compensate, persona_id)
+        raise
     return persona_id
+
+
+def _undo_create(compensate: Callable[[str], object] | None, persona_id: str) -> None:
+    """Undo a create that failed after its row committed (R9-293); never raises."""
+    # The row stays hidden (create_complete is false), and the erasure sweep erases it
+    # after ABANDONED_CREATE_GRACE; the alert says an undo is owed (review HIGH-2).
+    if compensate is None:
+        _LOG.error(
+            "OPERATOR ALERT: persona create failed after its row committed and nothing undid "
+            "it persona={pid}; the erasure sweep erases it",
+            pid=persona_id,
+        )
+        return
+    try:
+        compensate(persona_id)
+    except PersonaNotFoundError:
+        # Review round 3 (Finding 3): the sweep, or an account erasure, removed the row first,
+        # so the undo is already done (or running there). Nothing is owed and nobody is paged.
+        _LOG.info(
+            "persona create undo found the persona already gone persona={pid}", pid=persona_id
+        )
+    except Exception as exc:  # noqa: BLE001 - the create's own error is the one to raise
+        _LOG.error(
+            "OPERATOR ALERT: persona create failed and undoing it failed too persona={pid} "
+            "error={err}; the erasure sweep erases it",
+            pid=persona_id,
+            err=type(exc).__name__,
+        )
 
 
 def update_persona(
@@ -441,7 +503,7 @@ def update_persona(
     persona, yaml_str = _guard_default_capabilities(persona, yaml_str)
     with rls_engine.begin() as conn:
         current = conn.execute(
-            select(personas_t.c.yaml).where(personas_t.c.id == persona_id)
+            select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
         ).first()
         if current is None:
             raise PersonaNotFoundError("persona not found", context={"id": persona_id})
@@ -456,7 +518,7 @@ def update_persona(
             values["avatar_source"] = "uploaded"
         result = conn.execute(
             update(personas_t)
-            .where(personas_t.c.id == persona_id)
+            .where(personas_t.c.id == persona_id, persona_complete)
             .values(**values)
             .returning(personas_t.c.id)
         )
@@ -542,7 +604,9 @@ def get_persona(*, rls_engine: Engine, persona_id: str) -> dict[str, object]:
     """Return a persona row (RLS-scoped → 404 if not the caller's)."""
     with rls_engine.begin() as conn:
         row = (
-            conn.execute(select(personas_t).where(personas_t.c.id == persona_id)).mappings().first()
+            conn.execute(select(personas_t).where(personas_t.c.id == persona_id, persona_complete))
+            .mappings()
+            .first()
         )
     if row is None:
         raise PersonaNotFoundError("persona not found", context={"id": persona_id})
@@ -560,7 +624,9 @@ def persona_display_name(*, rls_engine: Engine, persona_id: str) -> str | None:
     """
     with rls_engine.begin() as conn:
         row = (
-            conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id))
+            conn.execute(
+                select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
+            )
             .mappings()
             .first()
         )
@@ -575,6 +641,7 @@ def list_personas(*, rls_engine: Engine, limit: int, offset: int) -> list[dict[s
         rows = (
             conn.execute(
                 select(personas_t)
+                .where(persona_complete)
                 .order_by(personas_t.c.created_at.desc())
                 .limit(limit)
                 .offset(offset)
@@ -673,7 +740,9 @@ def persona_exists(engine: Engine, persona_id: str) -> bool:
         return found.first() is not None
 
 
-def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> int:
+def delete_persona_row(
+    conn: Connection, *, owner_id: str, persona_id: str, only_incomplete: bool = False
+) -> int:
     """Delete the persona's row, scoped to its owner, and return how many rows went (0 or 1).
 
     Channels that have this persona foregrounded forget it first. The channel's foreign key is
@@ -682,6 +751,11 @@ def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> i
     cannot). The foreign key cascade then takes conversations, messages, tasks, runs and the
     rest. Runs inside the caller's transaction; 0 when the row is already gone, which is what
     a resumed erasure finds.
+
+    ``only_incomplete`` deletes the row only while its create has not finished (R9-293 round 3,
+    Finding 4): on SQLite, which has no row lock, a create can finish between the abandoned
+    sweep's check and this delete, and its row must then stay. The caller rolls back on 0, so
+    the channel update above does not outlive a row that stays.
     """
     conn.execute(
         update(connector_channels_t)
@@ -691,11 +765,10 @@ def delete_persona_row(conn: Connection, *, owner_id: str, persona_id: str) -> i
         )
         .values(active_persona_id=None)
     )
-    result = conn.execute(
-        delete(personas_t)
-        .where(personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id)
-        .returning(personas_t.c.id)
-    )
+    which = [personas_t.c.id == persona_id, personas_t.c.owner_id == owner_id]
+    if only_incomplete:
+        which.append(personas_t.c.create_complete.is_(False))
+    result = conn.execute(delete(personas_t).where(*which).returning(personas_t.c.id))
     return 0 if result.first() is None else 1
 
 

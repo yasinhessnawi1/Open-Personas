@@ -32,6 +32,7 @@ from persona.tools import known_tool_names
 from persona.tools.mcp.catalog import known_mcp_server_names
 from sqlalchemy import select, update
 
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.services.persona_service import load_persona_from_yaml
 
@@ -122,7 +123,9 @@ def grant_tool_consent(
     # Load the current YAML under the RLS scope.
     with rls_engine.begin() as conn:
         row = (
-            conn.execute(select(personas_t.c.yaml).where(personas_t.c.id == persona_id))
+            conn.execute(
+                select(personas_t.c.yaml).where(personas_t.c.id == persona_id, persona_complete)
+            )
             .mappings()
             .first()
         )
@@ -145,7 +148,7 @@ def grant_tool_consent(
     with rls_engine.begin() as conn:
         result = conn.execute(
             update(personas_t)
-            .where(personas_t.c.id == persona_id)
+            .where(personas_t.c.id == persona_id, persona_complete)
             .values(yaml=new_yaml)
             .returning(personas_t.c.id)
         )

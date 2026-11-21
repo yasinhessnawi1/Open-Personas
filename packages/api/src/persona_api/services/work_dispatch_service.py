@@ -28,6 +28,7 @@ from persona.logging import get_logger
 from persona.tasks import Contract, ContractAttachment, Task, TaskKind, UserDispatch
 from sqlalchemy import select
 
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.errors import WorkBriefTooLongError
 from persona_api.tasks.handler import enqueue_task_leg
@@ -79,7 +80,9 @@ PERSONA_GONE_MESSAGE = "That persona is gone, so this cannot run again."
 def _require_persona(rls_engine: Engine, persona_id: str, *, message: str | None = None) -> None:
     """404 unless the persona is the caller's (RLS makes another tenant's invisible)."""
     with rls_engine.begin() as conn:
-        found = conn.execute(select(personas_t.c.id).where(personas_t.c.id == persona_id)).first()
+        found = conn.execute(
+            select(personas_t.c.id).where(personas_t.c.id == persona_id, persona_complete)
+        ).first()
     if found is None:
         raise PersonaNotFoundError(message or "persona not found", context={"id": persona_id})
 

@@ -45,6 +45,7 @@ from sqlalchemy import func, select
 from persona_api.db.models import calls as calls_t
 from persona_api.db.models import conversations as conversations_t
 from persona_api.db.models import graph_nodes as graph_nodes_t
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import schedules as schedules_t
 from persona_api.db.models import tasks as tasks_t
@@ -74,7 +75,7 @@ def get_nav_counts(
     columns = [
         select(func.count())
         .select_from(personas_t)
-        .where(personas_t.c.owner_id == owner_id)
+        .where(personas_t.c.owner_id == owner_id, persona_complete)
         .scalar_subquery()
         .label("personas"),
         select(func.count())

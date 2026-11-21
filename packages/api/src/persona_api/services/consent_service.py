@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from persona.errors import PersonaNotFoundError
 from sqlalchemy import select, update
 
+from persona_api.db.models import persona_complete
 from persona_api.db.models import personas as personas_t
 
 if TYPE_CHECKING:
@@ -61,7 +62,9 @@ def read_consent(*, rls_engine: Engine, persona_id: str) -> ConsentState:
     with rls_engine.begin() as conn:
         row = (
             conn.execute(
-                select(personas_t.c.consent_to_auto_dispatch).where(personas_t.c.id == persona_id)
+                select(personas_t.c.consent_to_auto_dispatch).where(
+                    personas_t.c.id == persona_id, persona_complete
+                )
             )
             .mappings()
             .first()
@@ -87,7 +90,7 @@ def set_consent(
     with rls_engine.begin() as conn:
         result = conn.execute(
             update(personas_t)
-            .where(personas_t.c.id == persona_id)
+            .where(personas_t.c.id == persona_id, persona_complete)
             .values(consent_to_auto_dispatch=granted, consent_updated_at=now)
             .returning(personas_t.c.id)
         )

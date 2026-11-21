@@ -119,6 +119,20 @@ def _require_counts(counts: Mapping[str, int]) -> dict[str, int]:
     return clean
 
 
+def _get_on(conn: Connection, subject_kind: SubjectKind, subject_id: str) -> Erasure | None:
+    """This subject's open erasure, else its latest finished one, read on ``conn``."""
+    finished_last = case((erasures_t.c.state == ErasureState.COMPLETE.value, 1), else_=0)
+    row = conn.execute(
+        select(erasures_t)
+        .where(
+            erasures_t.c.subject_kind == subject_kind.value,
+            erasures_t.c.subject_id == subject_id,
+        )
+        .order_by(finished_last, erasures_t.c.requested_at.desc(), erasures_t.c.id.desc())
+    ).first()
+    return None if row is None else _to_erasure(row)
+
+
 def _to_erasure(row: Any) -> Erasure:  # noqa: ANN401 - a SQLAlchemy Row
     return Erasure(
         id=row.id,
@@ -184,17 +198,8 @@ class ErasureLedger:
 
     def get(self, subject_kind: SubjectKind, subject_id: str) -> Erasure | None:
         """This subject's open erasure, else its latest finished one, else ``None``."""
-        finished_last = case((erasures_t.c.state == ErasureState.COMPLETE.value, 1), else_=0)
         with self._engine.connect() as conn:
-            row = conn.execute(
-                select(erasures_t)
-                .where(
-                    erasures_t.c.subject_kind == subject_kind.value,
-                    erasures_t.c.subject_id == subject_id,
-                )
-                .order_by(finished_last, erasures_t.c.requested_at.desc(), erasures_t.c.id.desc())
-            ).first()
-        return None if row is None else _to_erasure(row)
+            return _get_on(conn, subject_kind, subject_id)
 
     def unfinished(self) -> list[Erasure]:
         """Every erasure that has not completed, oldest first, for a sweep to resume."""
@@ -240,6 +245,40 @@ class ErasureLedger:
             pass
         claimed = self.get(subject_kind, subject_id)
         if claimed is None:  # pragma: no cover - the row was just written or found
+            raise _refuse("claim_not_visible")
+        return claimed
+
+    def claim_in(
+        self,
+        conn: Connection,
+        *,
+        owner_id: str,
+        subject_kind: SubjectKind,
+        subject_id: str,
+        captured: Mapping[str, Sequence[str]],
+    ) -> Erasure:
+        """:meth:`claim` inside the caller's transaction, so it commits or rolls back with it.
+
+        For a claim that must not outlive what the caller does in the same transaction (R9-293
+        round 3, Finding 4: the abandoned create's conditional delete). A claim of the same
+        subject committed meanwhile fails this insert on the open-subject index, and the
+        caller's whole transaction rolls back with it; the caller's next run finds that claim.
+        """
+        clean = _require_captured(captured)
+        existing = _get_on(conn, subject_kind, subject_id)
+        if existing is not None and existing.state is not ErasureState.COMPLETE:
+            return existing
+        conn.execute(
+            insert(erasures_t).values(
+                id=f"erasure_{uuid.uuid4().hex}",
+                owner_id=owner_id,
+                subject_kind=subject_kind.value,
+                subject_id=subject_id,
+                captured=clean,
+            )
+        )
+        claimed = _get_on(conn, subject_kind, subject_id)
+        if claimed is None:  # pragma: no cover - the row was just written
             raise _refuse("claim_not_visible")
         return claimed
 
