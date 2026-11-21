@@ -36,3 +36,14 @@ def test_the_model_column_is_complete_unless_a_create_says_otherwise() -> None:
     text = _MIGRATION.read_text(encoding="utf-8")
     assert 'server_default=sa.text("true")' in text
     assert "nullable=False" in text
+
+
+def test_069_fails_fast_on_a_busy_personas_table() -> None:
+    """Round 2 LOW-2, as 057 and 058: a 5 s lock_timeout, reset afterwards, both directions."""
+    import inspect  # noqa: PLC0415
+
+    module = _migration()
+    for step in (module.upgrade, module.downgrade):
+        body = inspect.getsource(step)
+        assert body.index("SET lock_timeout = '5s'") < body.index("_has_column()")
+        assert body.rstrip().endswith('op.execute("RESET lock_timeout")')
