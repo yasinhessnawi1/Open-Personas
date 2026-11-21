@@ -398,9 +398,10 @@ def _check_persona_ownership(
     if engine is None:
         msg = "ownership_engine not configured on app.state"
         raise RuntimeError(msg)
+    # A create still in progress (or abandoned) is not the owner's persona yet (R9-293).
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT 1 FROM personas WHERE id = :pid AND owner_id = :uid"),
+            text("SELECT 1 FROM personas WHERE id = :pid AND owner_id = :uid AND create_complete"),
             {"pid": persona_id, "uid": user_id},
         ).first()
     if row is None:

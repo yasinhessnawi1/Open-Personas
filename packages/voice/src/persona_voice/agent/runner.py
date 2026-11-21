@@ -187,9 +187,13 @@ def _load_persona(engine: Engine, persona_id: str) -> Persona:
     """
     import yaml
 
+    # As the api's read, a create still in progress (or abandoned) is not found (R9-293).
     with engine.begin() as conn:
         row = (
-            conn.execute(text("SELECT yaml FROM personas WHERE id = :pid"), {"pid": persona_id})
+            conn.execute(
+                text("SELECT yaml FROM personas WHERE id = :pid AND create_complete"),
+                {"pid": persona_id},
+            )
             .mappings()
             .first()
         )

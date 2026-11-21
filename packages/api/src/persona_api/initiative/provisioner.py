@@ -50,6 +50,7 @@ _CANDIDATES_SQL = text(
     FROM personas p
     JOIN users u ON u.id = p.owner_id
     WHERE p.initiative_dial != 'off'
+      AND p.create_complete
       AND NOT EXISTS (
           SELECT 1 FROM schedules s WHERE s.id = ('initsched:' || p.id)
       )
