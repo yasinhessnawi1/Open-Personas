@@ -122,7 +122,7 @@ def test_069_downgrade_deletes_unfinished_creates_and_keeps_the_rest(clean_db: s
             )
             opened = conn.execute(
                 text(
-                    "SELECT subject_id, owner_id, state FROM erasures "
+                    "SELECT subject_id, owner_id, state, captured FROM erasures "
                     "WHERE subject_kind = 'persona' ORDER BY subject_id"
                 )
             ).all()
@@ -130,6 +130,15 @@ def test_069_downgrade_deletes_unfinished_creates_and_keeps_the_rest(clean_db: s
         engine.dispose()
     assert left == ["p_done"], "older code never sees the half-made persona"
     # p_half is not a minted id, which no erasure acts on; p_done is kept.
-    assert [tuple(r) for r in opened] == [(_HALF_MINTED, _OWNER, "pending")], (
+    assert [tuple(r)[:3] for r in opened] == [(_HALF_MINTED, _OWNER, "pending")], (
         "the half-made persona's erasure is open for the sweep"
     )
+    # What capture_persona captures, every key of it (PR #56 review LOW-1); nothing hangs off
+    # this persona, so each list is empty.
+    assert opened[0].captured == {
+        "conversations": [],
+        "tasks": [],
+        "runs": [],
+        "schedules": [],
+        "event_triggers": [],
+    }

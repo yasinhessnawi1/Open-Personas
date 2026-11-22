@@ -13,16 +13,27 @@ persona read and write behind its exclusive lock. It is set for the session at t
 default is a catalog-only change on Postgres 11 and later, so the lock is brief.
 
 Downgrade (round 3, Finding 8): code before 069 cannot tell an unfinished create from a
-persona, so it would list one, half-made, to its owner. The downgrade therefore deletes every
-row ``WHERE NOT create_complete`` before it drops the column; the foreign key cascade takes
-the rows that hang off it (its identity chunks among them), as the abandoned-create sweep
-would have. What no cascade reaches (graph nodes, workspace files) is erased by the persona
-erasure (R9-322): before the delete, the downgrade opens one for each such persona in the
-``erasures`` ledger (061, so older code has it and its sweep), and that sweep runs it. The
-ledger row holds ids only, as the sweep's own claim does: the persona's conversations, tasks,
-runs and event triggers, read before the cascade takes them. A persona that already has an
-open erasure keeps it (the ledger allows one), and an id that is not minted
-(``persona_<32 hex>``) is skipped, as in 063: the erasure refuses any other.
+persona, so it would list one, half-made, to its owner. The downgrade therefore deletes the
+unfinished creates before it drops the column; the foreign key cascade takes the rows that hang
+off them (their identity chunks among them), as the abandoned-create sweep would have.
+
+What no cascade reaches (graph nodes, workspace files) is erased by the persona erasure
+(R9-322): the downgrade opens one for each persona it deleted, in the ``erasures`` ledger (061,
+so older code has it and its sweep), and that sweep runs it. In order, in one transaction:
+
+1. Read every unfinished create, and for each the ids its erasure needs once the rows are gone:
+   what ``capture_persona`` (``services/erasure_service.py``) captures, mirrored here on
+   lightweight tables so this migration does not change when that service does (PR #56 review
+   LOW-1): conversations, tasks, runs (the persona's, and those its tasks name), schedules (its
+   tasks', its initiative scan ``initsched:<id>``, and any of the owner's whose template names
+   the persona, its tasks or its conversations) and event triggers. Ids only, never content.
+2. Delete those ids, and only those, while still unfinished (review LOW-2). A create that began
+   after the read is still running, and its own completion or undo settles it; one that finished
+   meanwhile is a persona, and is kept. Under READ COMMITTED a delete by predicate alone would
+   take a row the read never saw, with no erasure for it.
+3. Open an erasure for each persona the delete really removed. One that already has an open
+   erasure keeps it (the ledger allows one), and an id that is not minted
+   (``persona_<32 hex>``) is skipped, as in 063: the erasure refuses any other.
 
 Revision ID: 069_persona_create_complete
 Revises: 068_forgotten_conversations
@@ -33,7 +44,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import TYPE_CHECKING
+from collections.abc import Collection, Mapping
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -52,9 +64,30 @@ _TABLE = "personas"
 _COLUMN = "create_complete"
 #: The only persona ids an erasure acts on (``new_persona_id``; 063 holds to the same).
 _MINTED = re.compile(r"persona_[0-9a-f]{32}")
-#: What the erasure's later steps need once the rows are gone, keyed as ``capture_persona``
-#: keys it: each table's ids for the persona under its owner.
-_CAPTURED = ("conversations", "tasks", "runs", "event_triggers")
+
+# The tables the capture reads, as they stand at 069: only the columns it needs.
+_personas = sa.table(_TABLE, sa.column("id"), sa.column("owner_id"), sa.column(_COLUMN, sa.Boolean))
+_conversations = sa.table(
+    "conversations", sa.column("id"), sa.column("owner_id"), sa.column("persona_id")
+)
+_tasks = sa.table(
+    "tasks",
+    sa.column("id"),
+    sa.column("owner_id"),
+    sa.column("persona_id"),
+    sa.column("schedule_id"),
+    sa.column("run_ids", sa.JSON),
+)
+_runs = sa.table("runs", sa.column("id"), sa.column("owner_id"), sa.column("persona_id"))
+_schedules = sa.table(
+    "schedules", sa.column("id"), sa.column("owner_id"), sa.column("payload_template", sa.JSON)
+)
+_event_triggers = sa.table(
+    "event_triggers", sa.column("id"), sa.column("owner_id"), sa.column("persona_id")
+)
+
+#: An unfinished create: its owner, and the ids its erasure needs.
+Create = tuple[str, dict[str, list[str]]]
 
 
 def _has_column() -> bool:
@@ -71,27 +104,85 @@ def upgrade() -> None:
     op.execute("RESET lock_timeout")
 
 
-def _capture(conn: Connection, owner_id: str, persona_id: str) -> dict[str, list[str]]:
-    return {
-        table: sorted(
-            str(row_id)
-            for (row_id,) in conn.execute(
-                sa.text(f"SELECT id FROM {table} WHERE persona_id = :p AND owner_id = :o"),  # noqa: S608 - constants
-                {"p": persona_id, "o": owner_id},
-            )
+def _ids(conn: Connection, stmt: Any) -> list[str]:  # noqa: ANN401 - a select
+    return sorted({str(value) for (value,) in conn.execute(stmt) if value is not None})
+
+
+def _names(value: Any, ids: frozenset[str]) -> bool:  # noqa: ANN401 - stored JSON
+    """Whether a stored JSON value names any of ``ids`` anywhere inside it."""
+    if isinstance(value, str):
+        return value in ids
+    if isinstance(value, Mapping):
+        return any(_names(v, ids) for v in value.values())
+    if isinstance(value, list | tuple):
+        return any(_names(v, ids) for v in value)
+    return False
+
+
+def _owned(table: Any, owner_id: str, persona_id: str) -> Any:  # noqa: ANN401 - sa objects
+    return sa.and_(table.c.persona_id == persona_id, table.c.owner_id == owner_id)
+
+
+def capture(conn: Connection, owner_id: str, persona_id: str) -> dict[str, list[str]]:
+    """What ``capture_persona`` captures for this persona, read the same way."""
+    conversations = _ids(
+        conn, sa.select(_conversations.c.id).where(_owned(_conversations, owner_id, persona_id))
+    )
+    task_rows = conn.execute(
+        sa.select(_tasks.c.id, _tasks.c.schedule_id, _tasks.c.run_ids).where(
+            _owned(_tasks, owner_id, persona_id)
         )
-        for table in _CAPTURED
+    ).all()
+    tasks = sorted(str(t.id) for t in task_rows)
+    runs = _ids(conn, sa.select(_runs.c.id).where(_owned(_runs, owner_id, persona_id)))
+    runs = sorted({*runs, *(str(r) for t in task_rows for r in (t.run_ids or []))})
+    named = frozenset({persona_id, *conversations, *tasks})
+    schedules = {str(t.schedule_id) for t in task_rows if t.schedule_id is not None}
+    for schedule_id, template in conn.execute(
+        sa.select(_schedules.c.id, _schedules.c.payload_template).where(
+            _schedules.c.owner_id == owner_id
+        )
+    ):
+        if schedule_id == f"initsched:{persona_id}" or _names(template, named):
+            schedules.add(str(schedule_id))
+    triggers = _ids(
+        conn,
+        sa.select(_event_triggers.c.id).where(_owned(_event_triggers, owner_id, persona_id)),
+    )
+    return {
+        "conversations": conversations,
+        "tasks": tasks,
+        "runs": runs,
+        "schedules": sorted(schedules),
+        "event_triggers": triggers,
     }
 
 
-def open_erasures(conn: Connection) -> int:
-    """Open a persona erasure for each unfinished create the downgrade deletes; how many."""
-    unfinished = conn.execute(
-        sa.text(f"SELECT id, owner_id FROM {_TABLE} WHERE NOT {_COLUMN}")  # noqa: S608 - constants
+def unfinished_creates(conn: Connection) -> dict[str, Create]:
+    """Every unfinished create, with what its erasure needs (step 1)."""
+    rows = conn.execute(
+        sa.select(_personas.c.id, _personas.c.owner_id).where(_personas.c[_COLUMN].is_(False))
     ).all()
+    return {str(pid): (str(owner), capture(conn, str(owner), str(pid))) for pid, owner in rows}
+
+
+def delete_creates(conn: Connection, persona_ids: Collection[str]) -> list[str]:
+    """Delete these creates, and only these, while still unfinished (step 2); the ids deleted."""
+    if not persona_ids:
+        return []
+    deleted = conn.execute(
+        sa.delete(_personas)
+        .where(_personas.c.id.in_(sorted(persona_ids)), _personas.c[_COLUMN].is_(False))
+        .returning(_personas.c.id)
+    )
+    return sorted(str(pid) for (pid,) in deleted)
+
+
+def open_erasures(conn: Connection, creates: Mapping[str, Create]) -> int:
+    """Open a persona erasure for each of these deleted creates (step 3); how many."""
     opened = 0
-    for persona_id, owner_id in unfinished:
-        if not _MINTED.fullmatch(str(persona_id)):
+    for persona_id, (owner_id, captured) in sorted(creates.items()):
+        if not _MINTED.fullmatch(persona_id):
             continue
         already = conn.execute(
             sa.text(
@@ -105,20 +196,27 @@ def open_erasures(conn: Connection) -> int:
         conn.execute(
             erasures.insert().values(
                 id=f"erasure_{uuid.uuid4().hex}",
-                owner_id=str(owner_id),
+                owner_id=owner_id,
                 subject_kind="persona",
-                subject_id=str(persona_id),
-                captured=_capture(conn, str(owner_id), str(persona_id)),
+                subject_id=persona_id,
+                captured=captured,
             )
         )
         opened += 1
     return opened
 
 
+def erase_unfinished_creates(conn: Connection) -> list[str]:
+    """Steps 1 to 3: the unfinished creates deleted, each with an erasure open for the sweep."""
+    creates = unfinished_creates(conn)
+    deleted = delete_creates(conn, creates)
+    open_erasures(conn, {pid: creates[pid] for pid in deleted})
+    return deleted
+
+
 def downgrade() -> None:
     op.execute("SET lock_timeout = '5s'")
     if _has_column():
-        open_erasures(op.get_bind())
-        op.execute(sa.text(f"DELETE FROM {_TABLE} WHERE NOT {_COLUMN}"))  # noqa: S608 - constants
+        erase_unfinished_creates(op.get_bind())
         op.drop_column(_TABLE, _COLUMN)
     op.execute("RESET lock_timeout")
