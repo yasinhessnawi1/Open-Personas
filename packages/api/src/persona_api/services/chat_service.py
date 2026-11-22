@@ -29,6 +29,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, cast
 
+from persona.concurrency import DEFAULT_LONG_OP_INSTANCE
 from persona.errors import PersonaError, PersonaNotFoundError
 from persona.graph.errors import GraphNodeBusyError
 from persona.logging import get_logger
@@ -653,6 +654,7 @@ async def start_chat_turn(
     document_context: DocumentContext | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
+    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
     persist_user_message: bool = True,
@@ -753,6 +755,8 @@ async def start_chat_turn(
         user_id=owner_id,
         op_class="chat",
         max_concurrent=max_concurrent_long_ops,
+        # R9-318: the slot names this instance, so its next boot can free it.
+        instance_id=long_op_instance,
     )
     if op_token is None:
         from persona_api.errors import ConcurrencyCappedError  # noqa: PLC0415
@@ -1009,6 +1013,7 @@ async def regenerate_turn(
     title_builder: Callable[[str], Awaitable[str]] | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
+    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
 ) -> ChatTurnHandle:
@@ -1111,6 +1116,7 @@ async def regenerate_turn(
         title_builder=title_builder,
         workspace_root=workspace_root,
         max_concurrent_long_ops=max_concurrent_long_ops,
+        long_op_instance=long_op_instance,
         file_storage=file_storage,
         event_channel=event_channel,
     )
@@ -1129,6 +1135,7 @@ async def edit_and_rerun_turn(
     title_builder: Callable[[str], Awaitable[str]] | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
+    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
 ) -> ChatTurnHandle:
@@ -1241,6 +1248,7 @@ async def edit_and_rerun_turn(
         title_builder=title_builder,
         workspace_root=workspace_root,
         max_concurrent_long_ops=max_concurrent_long_ops,
+        long_op_instance=long_op_instance,
         file_storage=file_storage,
         event_channel=event_channel,
     )

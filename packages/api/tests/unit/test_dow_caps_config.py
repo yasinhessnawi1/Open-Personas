@@ -96,3 +96,80 @@ def test_long_cap_zero_writes_no_row_and_never_touches_db() -> None:
     release_long_op(rls_engine=engine, user_id="u", op_id=token)
     release_long_op(rls_engine=engine, user_id="u", op_id=None)
     engine.begin.assert_not_called()
+
+
+# --- R9-318: a slot names the instance and the boot that took it ----------------
+
+
+def test_admit_long_op_stamps_the_instance_and_this_process_boot() -> None:
+    """The boot sweep can only tell an earlier process's slot from a live one if every slot
+    records who took it: the api instance and this process's boot id."""
+    from persona.concurrency import PROCESS_BOOT_ID  # noqa: PLC0415
+
+    engine = MagicMock()
+    conn = engine.begin.return_value.__enter__.return_value
+    conn.execute.return_value.scalar_one.return_value = 0
+    token = admit_long_op(
+        rls_engine=engine, user_id="u", op_class="chat", max_concurrent=3, instance_id="api-2"
+    )
+    assert token is not None
+    inserts = [c for c in conn.execute.call_args_list if "INSERT INTO inflight_ops" in str(c[0][0])]
+    assert len(inserts) == 1
+    params = inserts[0][0][1]
+    assert params["instance"] == "api-2"
+    assert params["boot"] == PROCESS_BOOT_ID
+    assert params["id"] == token
+
+
+def test_instance_id_defaults_to_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PERSONA_API_INSTANCE_ID", raising=False)
+    assert APIConfig().instance_id == "api"
+
+
+def test_instance_id_parses_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PERSONA_API_INSTANCE_ID", "api-2")
+    assert APIConfig().instance_id == "api-2"
+
+
+@pytest.mark.parametrize("bad", ["", "has space", "x" * 65, "semi;colon"])
+def test_instance_id_rejects_a_malformed_name(monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    monkeypatch.setenv("PERSONA_API_INSTANCE_ID", bad)
+    with pytest.raises(ValidationError):
+        APIConfig()
+
+
+@pytest.mark.asyncio
+async def test_a_chat_turn_takes_its_slot_under_the_configured_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route hands the app's instance id to the turn, and the turn to the admission."""
+    import persona.concurrency as concurrency  # noqa: PLC0415
+    from persona_api.errors import ConcurrencyCappedError  # noqa: PLC0415
+    from persona_api.services import chat_service  # noqa: PLC0415
+
+    seen: dict[str, object] = {}
+
+    def _admit(**kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(concurrency, "admit_long_op", _admit)
+    registry = MagicMock()
+    registry.get.return_value = None
+    sink = MagicMock()
+    sink.heal_orphaned_running.return_value = None
+    with pytest.raises(ConcurrencyCappedError):
+        await chat_service.start_chat_turn(
+            rls_engine=MagicMock(),
+            sink=sink,
+            registry=registry,
+            loop_builder=MagicMock(),
+            owner_id="u",
+            conversation_id="c",
+            user_message="hi",
+            max_concurrent_long_ops=3,
+            long_op_instance="api-2",
+        )
+    assert seen["instance_id"] == "api-2"
+    assert seen["op_class"] == "chat"

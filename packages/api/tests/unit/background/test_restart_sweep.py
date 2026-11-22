@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from persona import logging as plog
+from persona.concurrency import PROCESS_BOOT_ID
 from persona.config import PersonaCoreConfig
 from persona_api.background.restart_sweep import reconcile_in_flight_on_startup
 from persona_api.db.community import (
@@ -24,6 +25,7 @@ from persona_api.db.community import (
     make_community_engine,
 )
 from persona_api.db.models import conversations as conversations_t
+from persona_api.db.models import inflight_ops as inflight_ops_t
 from persona_api.db.models import messages as messages_t
 from persona_api.db.models import personas as personas_t
 from persona_api.db.models import runs as runs_t
@@ -136,12 +138,16 @@ def test_sweep_is_idempotent(engine: Engine) -> None:
     first = reconcile_in_flight_on_startup(engine=engine)
     second = reconcile_in_flight_on_startup(engine=engine)
 
-    assert first == {"messages": 1, "runs": 1}
-    assert second == {"messages": 0, "runs": 0}  # a second pass finds nothing
+    assert first == {"messages": 1, "runs": 1, "long_ops": 0}
+    assert second == {"messages": 0, "runs": 0, "long_ops": 0}  # a second pass finds nothing
 
 
 def test_sweep_noop_on_clean_database(engine: Engine) -> None:
-    assert reconcile_in_flight_on_startup(engine=engine) == {"messages": 0, "runs": 0}
+    assert reconcile_in_flight_on_startup(engine=engine) == {
+        "messages": 0,
+        "runs": 0,
+        "long_ops": 0,
+    }
 
 
 def test_sweep_logs_a_warning_with_the_healed_count(
@@ -229,7 +235,108 @@ def test_the_boot_sweep_lifts_the_statement_timeout_before_its_scans() -> None:
         def begin(self):  # type: ignore[no-untyped-def]  # noqa: ANN202
             yield _Conn()
 
-    assert reconcile_in_flight_on_startup(engine=_Engine()) == {"messages": 0, "runs": 0}  # type: ignore[arg-type]
+    counts = reconcile_in_flight_on_startup(engine=_Engine())  # type: ignore[arg-type]
+    assert counts == {"messages": 0, "runs": 0, "long_ops": 0}
     assert sql[0] == "SELECT set_config('statement_timeout', '0', true)"
     assert sql[1].startswith("UPDATE messages")
     assert sql[2].startswith("UPDATE runs")
+    # R9-318: the long-op slot sweep shares the lifted transaction.
+    assert sql[3].startswith("DELETE FROM inflight_ops")
+
+
+# --- R9-318: long-op slots left by an earlier boot ------------------------------------------
+
+_PREVIOUS_BOOT = "boot_of_the_previous_process"
+
+
+def _slot(conn: object, sid: str, *, instance_id: str | None, boot_id: str | None) -> None:
+    conn.execute(  # type: ignore[attr-defined]
+        insert(inflight_ops_t).values(
+            id=sid, user_id=_OWNER, op_class="chat", instance_id=instance_id, boot_id=boot_id
+        )
+    )
+
+
+def _slot_ids(engine: Engine) -> set[str]:
+    with engine.begin() as conn:
+        return set(conn.execute(select(inflight_ops_t.c.id)).scalars().all())
+
+
+def test_a_slot_left_by_a_previous_boot_is_released(engine: Engine) -> None:
+    """R9-318: a turn abandoned at the shutdown deadline never reaches its ``finally``, so its
+    slot outlives the process. Left alone it holds the user's cap for the hour-long TTL; the
+    boot sweep frees it before the new process serves anyone."""
+    with engine.begin() as conn:
+        _slot(conn, "slot_previous", instance_id="api", boot_id=_PREVIOUS_BOOT)
+
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+
+    assert _slot_ids(engine) == set()
+    assert counts["long_ops"] == 1
+
+
+def test_a_slot_written_before_boot_ids_existed_is_released(engine: Engine) -> None:
+    """A row from the code before migration 070 carries no instance or boot id. It can only
+    come from an earlier process, so the sweep frees it too."""
+    with engine.begin() as conn:
+        _slot(conn, "slot_legacy", instance_id=None, boot_id=None)
+
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+
+    assert _slot_ids(engine) == set()
+    assert counts["long_ops"] == 1
+
+
+def test_a_slot_of_the_current_process_is_kept(engine: Engine) -> None:
+    """A slot this very process took is a live op: the sweep must not free it, or the cap
+    would admit one op too many."""
+    with engine.begin() as conn:
+        _slot(conn, "slot_live", instance_id="api", boot_id=PROCESS_BOOT_ID)
+
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+
+    assert _slot_ids(engine) == {"slot_live"}
+    assert counts["long_ops"] == 0
+
+
+def test_a_slot_of_another_instance_is_kept(engine: Engine) -> None:
+    """With a second api instance, a booting instance frees only its own earlier boots'
+    slots. Another instance's slot may be a live op on that instance."""
+    with engine.begin() as conn:
+        _slot(conn, "slot_other_instance", instance_id="api-2", boot_id=_PREVIOUS_BOOT)
+        _slot(conn, "slot_mine", instance_id="api-1", boot_id=_PREVIOUS_BOOT)
+
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api-1")
+
+    assert _slot_ids(engine) == {"slot_other_instance"}
+    assert counts["long_ops"] == 1
+
+
+def test_the_long_op_sweep_is_idempotent(engine: Engine) -> None:
+    with engine.begin() as conn:
+        _slot(conn, "slot_previous", instance_id="api", boot_id=_PREVIOUS_BOOT)
+        _slot(conn, "slot_live", instance_id="api", boot_id=PROCESS_BOOT_ID)
+
+    first = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+    second = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+
+    assert first["long_ops"] == 1
+    assert second["long_ops"] == 0
+    assert _slot_ids(engine) == {"slot_live"}
+
+
+def test_the_sweep_logs_the_released_slots(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Never silent: a released slot is evidence of an unclean shutdown, like an orphan turn."""
+    plog.reset_for_testing()
+    plog.get_logger("test.trigger", config=PersonaCoreConfig(log_format="pretty"))
+    with engine.begin() as conn:
+        _slot(conn, "slot_previous", instance_id="api", boot_id=_PREVIOUS_BOOT)
+
+    reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+
+    plog.reset_for_testing()
+    output = capsys.readouterr().err
+    assert "WARNING" in output
+    assert "long_ops_released=1" in output

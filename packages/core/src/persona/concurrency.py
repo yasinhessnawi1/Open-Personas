@@ -33,6 +33,17 @@ the same self-healing staleness-sweep discipline the integration conftest uses f
 orphaned pooled connections; ``release_long_op`` is the clean-exit path that frees a
 slot immediately.
 
+**The boot sweep (R9-318).** The TTL alone holds a dead process's slot for up to an
+hour: a turn abandoned at the shutdown deadline never reaches its ``finally``, and a user
+at the cap gets 429 until the row ages out. So every slot records who took it: the api
+instance (``instance_id``, one name per running api) and :data:`PROCESS_BOOT_ID`, minted
+once per process. At boot, :func:`release_previous_boot_long_ops` deletes this instance's
+slots from any other boot, and the slots written before those columns existed (NULL), at
+once. A slot of the current process is kept, and so is another instance's: with two api
+instances, a booting one cannot tell whether the other's slot is a live op. Failure
+polarity, if two processes ever share an instance name: the booting one frees the other's
+live slots, so the cap briefly admits a few too many; it never locks anyone out.
+
 Both forms **fail loud** at the API edge (over-cap ⇒ ``ConcurrencyCappedError`` →
 429 + ``Retry-After``); the core helpers themselves stay error-free (yield/return a
 status) so persona-core takes no persona-api dependency — the api/voice caller owns
@@ -54,10 +65,13 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
 
 __all__ = [
+    "DEFAULT_LONG_OP_INSTANCE",
     "DEFAULT_LONG_OP_TTL_SECONDS",
+    "PROCESS_BOOT_ID",
     "acquire_user_concurrency",
     "admit_long_op",
     "release_long_op",
+    "release_previous_boot_long_ops",
 ]
 
 # Default staleness horizon for the durable-count crash reclamation. Must exceed the
@@ -65,6 +79,14 @@ __all__ = [
 # mid-run — an hour is generous for a chat turn / agentic run and still reclaims a
 # crashed process's slot within the hour. Callers may override per op_class.
 DEFAULT_LONG_OP_TTL_SECONDS = 3600
+
+# R9-318: the name of the api instance a slot belongs to, when the caller names none. The
+# api passes its configured ``PERSONA_API_INSTANCE_ID``, whose default is this same name.
+DEFAULT_LONG_OP_INSTANCE = "api"
+
+# R9-318: this process's boot, stamped on every slot it takes. Minted once at import, so it
+# is the same for every caller in the process and new on every restart.
+PROCESS_BOOT_ID = uuid.uuid4().hex
 
 # Sentinel returned by ``admit_long_op`` when the cap is unlimited (max <= 0). Never a
 # real ``inflight_ops`` row id (those are uuid hex), so ``release_long_op`` no-ops it.
@@ -95,9 +117,18 @@ _COUNT_INFLIGHT_SQL = text(
     "SELECT count(*) FROM inflight_ops WHERE user_id = :uid AND op_class = :cls"
 )
 _INSERT_INFLIGHT_SQL = text(
-    "INSERT INTO inflight_ops (id, user_id, op_class) VALUES (:id, :uid, :cls)"
+    "INSERT INTO inflight_ops (id, user_id, op_class, instance_id, boot_id) "
+    "VALUES (:id, :uid, :cls, :instance, :boot)"
 )
 _DELETE_INFLIGHT_SQL = text("DELETE FROM inflight_ops WHERE id = :id AND user_id = :uid")
+# R9-318: this instance's slots from any other boot, and the unstamped ones written before
+# migration 070 (only an earlier process can have written those). Portable SQL: it also runs
+# on the community SQLite store, where no slot is ever written and it deletes nothing.
+_DELETE_PREVIOUS_BOOTS_SQL = text(
+    "DELETE FROM inflight_ops "
+    "WHERE (instance_id = :instance OR instance_id IS NULL) "
+    "AND (boot_id IS NULL OR boot_id <> :boot)"
+)
 
 
 @contextmanager
@@ -149,6 +180,7 @@ def admit_long_op(
     op_class: str,
     max_concurrent: int,
     ttl_seconds: int = DEFAULT_LONG_OP_TTL_SECONDS,
+    instance_id: str = DEFAULT_LONG_OP_INSTANCE,
 ) -> str | None:
     """Admit a long-running op under the per-user per-class HARD cap; return a token.
 
@@ -157,7 +189,9 @@ def admit_long_op(
     per-(user, op_class) advisory lock so concurrent starts can't both pass a
     near-cap check (exactly ``max_concurrent`` are admitted). Before counting, rows
     older than ``ttl_seconds`` are swept so a crashed process's leaked row can't eat a
-    slot forever (crash-safety — see module docstring).
+    slot forever (crash-safety, see the module docstring). The row records ``instance_id``
+    and :data:`PROCESS_BOOT_ID`, so the next boot's sweep can free it if this process
+    dies holding it (R9-318).
 
     Returns:
         The op token to pass to :func:`release_long_op` on completion, or ``None`` if
@@ -176,7 +210,16 @@ def admit_long_op(
         count = conn.execute(_COUNT_INFLIGHT_SQL, {"uid": user_id, "cls": op_class}).scalar_one()
         if int(count) >= max_concurrent:
             return None
-        conn.execute(_INSERT_INFLIGHT_SQL, {"id": op_id, "uid": user_id, "cls": op_class})
+        conn.execute(
+            _INSERT_INFLIGHT_SQL,
+            {
+                "id": op_id,
+                "uid": user_id,
+                "cls": op_class,
+                "instance": instance_id,
+                "boot": PROCESS_BOOT_ID,
+            },
+        )
     return op_id
 
 
@@ -192,3 +235,28 @@ def release_long_op(*, rls_engine: Engine, user_id: str, op_id: str | None) -> N
         return
     with rls_engine.begin() as conn:
         conn.execute(_DELETE_INFLIGHT_SQL, {"id": op_id, "uid": user_id})
+
+
+def release_previous_boot_long_ops(
+    *,
+    conn: Connection,
+    instance_id: str = DEFAULT_LONG_OP_INSTANCE,
+    boot_id: str = PROCESS_BOOT_ID,
+) -> int:
+    """Free every slot an earlier boot of this instance left behind; return how many (R9-318).
+
+    A process that dies holding a slot (a turn abandoned at the shutdown deadline, a kill)
+    never runs its release, and the TTL sweep in :func:`admit_long_op` would hold that slot
+    for up to an hour. Run once at boot, this deletes the instance's slots whose boot is not
+    ``boot_id``, and the unstamped slots from before migration 070. Slots of the current
+    boot and of other instances are kept. Idempotent: a second pass deletes nothing.
+
+    Args:
+        conn: An open connection inside a transaction on an engine that sees every tenant's
+            rows (the admin engine on cloud): at boot no user scope is bound, so an RLS
+            scoped connection would match nothing.
+        instance_id: This api instance's name, as its slots were stamped.
+        boot_id: The current boot. Defaults to :data:`PROCESS_BOOT_ID`.
+    """
+    result = conn.execute(_DELETE_PREVIOUS_BOOTS_SQL, {"instance": instance_id, "boot": boot_id})
+    return int(result.rowcount)

@@ -29,6 +29,14 @@ which reconciles the identical row shape the moment the conversation is next
 used, without waiting for a boot. A healed count is logged at WARNING (never
 silent) — an orphan is evidence of an unclean prior shutdown, worth an
 operator's attention even though the row itself is now safely terminal.
+
+R9-318: the same pass frees the durable long-op slots (``inflight_ops``) the previous
+process held when it died. A turn abandoned at the shutdown deadline never reaches the
+``finally`` that releases its slot, and the TTL would keep that slot for an hour, so a user
+at the concurrency cap would get 429 until it aged out. The sweep is scoped to this api
+instance's earlier boots (see :func:`persona.concurrency.release_previous_boot_long_ops`),
+so it stays correct if a second api instance is ever added, as long as each has its own
+``PERSONA_API_INSTANCE_ID``.
 """
 
 from __future__ import annotations
@@ -36,6 +44,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from persona.concurrency import (
+    DEFAULT_LONG_OP_INSTANCE,
+    PROCESS_BOOT_ID,
+    release_previous_boot_long_ops,
+)
 from persona.logging import get_logger
 from sqlalchemy import update
 
@@ -60,8 +73,13 @@ __all__ = ["reconcile_in_flight_on_startup"]
 _ORPHANED_RUN_STATES = ("running", "awaiting_user")
 
 
-def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
-    """Mark orphaned in-flight chat turns + runs terminal. Returns the per-table counts.
+def reconcile_in_flight_on_startup(
+    *,
+    engine: Engine,
+    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
+    boot_id: str = PROCESS_BOOT_ID,
+) -> dict[str, int]:
+    """Mark orphaned in-flight chat turns + runs terminal and free their long-op slots.
 
     MUST run on an RLS-bypassing engine (admin on cloud, the community engine on
     sqlite) — at startup no user scope is bound, so an RLS-scoped engine would
@@ -70,9 +88,14 @@ def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
     Args:
         engine: The RLS-bypassing engine (``admin_engine`` if present, else the
             community ``rls_engine``).
+        long_op_instance: This api instance's name (``PERSONA_API_INSTANCE_ID``). Only
+            its own earlier boots' long-op slots are freed.
+        boot_id: The current process's boot. Defaults to the one this process stamps on
+            the slots it takes.
 
     Returns:
-        ``{"messages": <n turns interrupted>, "runs": <n runs errored>}``.
+        ``{"messages": <n turns interrupted>, "runs": <n runs errored>,
+        "long_ops": <n long-op slots freed>}``.
     """
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -95,15 +118,20 @@ def reconcile_in_flight_on_startup(*, engine: Engine) -> dict[str, int]:
             )
             .values(status="error", error="interrupted by a server restart", finished_at=now)
         )
-    counts = {"messages": msg_result.rowcount, "runs": run_result.rowcount}
-    if counts["messages"] or counts["runs"]:
+        # R9-318: the slots those turns and runs held die with them.
+        long_ops = release_previous_boot_long_ops(
+            conn=conn, instance_id=long_op_instance, boot_id=boot_id
+        )
+    counts = {"messages": msg_result.rowcount, "runs": run_result.rowcount, "long_ops": long_ops}
+    if any(counts.values()):
         # R9-022: WARNING, not INFO — never silent (this repo's standing rule). A
         # nonzero count means the PRIOR process died mid-turn/mid-run; the rows are
         # now safely terminal, but an operator should still see that it happened.
         _log.warning(
             "restart sweep reconciled orphaned in-flight rows "
-            "turns_interrupted={turns} runs_errored={runs}",
+            "turns_interrupted={turns} runs_errored={runs} long_ops_released={long_ops}",
             turns=counts["messages"],
             runs=counts["runs"],
+            long_ops=counts["long_ops"],
         )
     return counts
