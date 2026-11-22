@@ -21,7 +21,7 @@ import asyncio
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
-from persona_runtime.graph_voice import shutdown_graph_executor
+from persona_runtime.graph_voice import configure_graph_executor, shutdown_graph_executor
 from persona_runtime.tier import free_tier_registry_from_env, tier_registry_from_env
 
 from persona_voice.agent.openrouter_mode import resolve_voice_openrouter_mode
@@ -86,6 +86,8 @@ class InProcessAgentLauncher:
         self._crisis_warmup: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._singletons_lock = asyncio.Lock()
+        # R9-323: size the process's voice graph pool before any call can query it.
+        configure_graph_executor(config.graph_query_workers)
 
     def launch(
         self, *, session_id: str, user_id: str, persona_id: str, conversation_id: str

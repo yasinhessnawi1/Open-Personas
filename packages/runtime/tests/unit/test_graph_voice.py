@@ -22,8 +22,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from loguru import logger as _loguru_logger
 from persona.graph.config import GraphSettings
+from persona_runtime import graph_voice
 from persona_runtime.graph_voice import (
     VOICE_NODE_BUDGET,
+    configure_graph_executor,
     shutdown_graph_executor,
     start_graph_retrieval,
     take_graph_if_ready,
@@ -191,6 +193,234 @@ class TestOwnExecutor:
         shutdown_graph_executor()
         shutdown_graph_executor()  # idempotent
         assert (await start_graph_retrieval(_sleeper(0), "q")).items
+
+
+@pytest.fixture
+def graph_log() -> Iterator[list[tuple[str, str]]]:
+    """``(level, message)`` of every record the voice graph module emits."""
+    captured: list[tuple[str, str]] = []
+
+    def _sink(message: object) -> None:
+        record = message.record  # type: ignore[attr-defined]
+        if record["name"] == "persona_runtime.graph_voice":
+            captured.append((record["level"].name, record["message"]))
+
+    sink = _loguru_logger.add(_sink, level="DEBUG")
+    try:
+        yield captured
+    finally:
+        _loguru_logger.remove(sink)
+
+
+@pytest.fixture
+def fresh_pool() -> Iterator[None]:
+    """A voice graph pool built from scratch at the default size, released after."""
+    shutdown_graph_executor()
+    configure_graph_executor(graph_voice.DEFAULT_GRAPH_QUERY_WORKERS)
+    try:
+        yield
+    finally:
+        configure_graph_executor(graph_voice.DEFAULT_GRAPH_QUERY_WORKERS)
+        shutdown_graph_executor()
+
+
+class _Gate:
+    """Graph queries that hold their worker until released, and say when they start."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.ran: list[str] = []
+
+    def query(self, label: str) -> tuple[Callable[[str], GraphContext], threading.Event]:
+        started = threading.Event()
+
+        def gated(query: str) -> GraphContext:
+            self.ran.append(label)
+            started.set()
+            assert self.release.wait(_GATE_TIMEOUT_S), "the gate was never released"
+            return _sleeper(0)(query)
+
+        return gated, started
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestLateDrops:
+    """R9-323: a query dropped as late gives its slot back, and the drops are visible."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("fresh_pool")
+    async def test_a_late_query_behind_busy_workers_is_cancelled_and_never_runs(self) -> None:
+        # Both workers are held; the third query waits in the queue. Dropping it as
+        # late must cancel it, so it never takes a worker for a turn that has moved
+        # on. A fourth query submitted after it proves the queue was drained past it.
+        gate = _Gate()
+        query_a, started_a = gate.query("a")
+        query_b, started_b = gate.query("b")
+        query_c, _ = gate.query("c")
+        query_d, _ = gate.query("d")
+        a = start_graph_retrieval(query_a, "q")
+        b = start_graph_retrieval(query_b, "q")
+        try:
+            assert started_a.wait(_GATE_TIMEOUT_S)
+            assert started_b.wait(_GATE_TIMEOUT_S)
+            c = start_graph_retrieval(query_c, "q")
+            assert take_graph_if_ready(c) == GraphContext()
+            assert c.cancelled()
+            # The cancel reaches the pool on the next loop pass, which a real turn
+            # gives at its next await; both workers are still held until then.
+            await asyncio.sleep(0)
+            d = start_graph_retrieval(query_d, "q")
+        finally:
+            gate.release.set()
+        await asyncio.gather(a, b, d)
+        assert sorted(gate.ran) == ["a", "b", "d"]  # the dropped query never ran
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("fresh_pool")
+    async def test_a_running_late_query_is_ignored_when_it_finishes(
+        self, graph_log: list[tuple[str, str]]
+    ) -> None:
+        # A query already running cannot be stopped; it finishes, its result is
+        # ignored, and the pool goes on serving the next turn.
+        gate = _Gate()
+        query_a, started_a = gate.query("a")
+        a = start_graph_retrieval(query_a, "q")
+        try:
+            assert started_a.wait(_GATE_TIMEOUT_S)
+            assert take_graph_if_ready(a) == GraphContext()
+        finally:
+            gate.release.set()
+        assert (await start_graph_retrieval(_sleeper(0), "q")).items
+        assert a.cancelled()
+        assert not [message for _, message in graph_log if "query failed" in message]
+
+    @pytest.mark.asyncio
+    async def test_late_drops_are_counted_and_warned_at_most_once_a_minute(
+        self, monkeypatch: pytest.MonkeyPatch, graph_log: list[tuple[str, str]]
+    ) -> None:
+        clock = _FakeClock()
+        meter = graph_voice.LateDropMeter(clock=clock)
+        monkeypatch.setattr(graph_voice, "_LATE_DROPS", meter)
+        loop = asyncio.get_running_loop()
+
+        def drop_one() -> None:
+            pending: asyncio.Future[GraphContext] = loop.create_future()
+            assert take_graph_if_ready(pending) == GraphContext()
+            assert pending.cancelled()
+
+        drop_one()  # the first drop in the process is reported at once
+        for seconds in (10.0, 30.0, 59.0):
+            clock.now = 1000.0 + seconds
+            drop_one()  # within the minute: noted at debug only
+        clock.now = 1000.0 + 61.0
+        drop_one()  # a minute on: one report for the drops since the last one
+
+        warnings = [message for level, message in graph_log if level == "WARNING"]
+        debugs = [message for level, message in graph_log if level == "DEBUG"]
+        assert len(debugs) == 5  # every drop is noted at debug
+        assert len(warnings) == 2
+        assert "1 since the last report, 1 in this process" in warnings[0]
+        assert "4 since the last report, 5 in this process" in warnings[1]
+        assert meter.total == 5
+
+    @pytest.mark.asyncio
+    async def test_a_ready_query_is_not_a_late_drop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        meter = graph_voice.LateDropMeter(clock=_FakeClock())
+        monkeypatch.setattr(graph_voice, "_LATE_DROPS", meter)
+        future = start_graph_retrieval(_sleeper(0), "q")
+        await asyncio.wait({future})
+        assert take_graph_if_ready(future).items
+        assert meter.total == 0
+
+
+class TestPoolSizeAndShutdown:
+    """R9-323: the worker count is configurable, and shutdown is quiet and race-safe."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("fresh_pool")
+    async def test_the_configured_worker_count_runs_that_many_queries_at_once(self) -> None:
+        configure_graph_executor(3)
+        gate = _Gate()
+        queries = [gate.query(label) for label in ("a", "b", "c")]
+        futures = [start_graph_retrieval(query, "q") for query, _ in queries]
+        try:
+            assert all(started.wait(_GATE_TIMEOUT_S) for _, started in queries)
+        finally:
+            gate.release.set()
+        await asyncio.gather(*futures)
+
+    @pytest.mark.parametrize("workers", [0, -1])
+    def test_a_worker_count_below_one_is_refused(self, workers: int) -> None:
+        with pytest.raises(ValueError, match="at least 1"):
+            configure_graph_executor(workers)
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("fresh_pool")
+    async def test_a_shutdown_between_pool_lookup_and_submit_runs_the_turn_graph_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The process closes the pool after start_graph_retrieval has looked it up
+        # but before it submits. The turn must not see the RuntimeError.
+        real_pool = graph_voice._graph_pool  # noqa: SLF001
+
+        def racing_pool() -> ThreadPoolExecutor:
+            pool = real_pool()
+            shutdown_graph_executor()
+            return pool
+
+        monkeypatch.setattr(graph_voice, "_graph_pool", racing_pool)
+        ran: list[str] = []
+
+        def query(text: str) -> GraphContext:
+            ran.append(text)
+            return _sleeper(0)(text)
+
+        future = start_graph_retrieval(query, "q")
+        assert future.done()
+        assert take_graph_if_ready(future) == GraphContext()
+        assert ran == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("fresh_pool")
+    async def test_a_shutdown_with_queued_queries_is_quiet(
+        self, graph_log: list[tuple[str, str]]
+    ) -> None:
+        # Shutdown cancels the queued queries. A cancelled query is not a failure:
+        # no warning, and nothing for the loop's exception handler.
+        loop = asyncio.get_running_loop()
+        reported: list[dict[str, Any]] = []
+        loop.set_exception_handler(lambda _loop, context: reported.append(context))
+        gate = _Gate()
+        query_a, started_a = gate.query("a")
+        query_b, started_b = gate.query("b")
+        query_c, _ = gate.query("c")
+        try:
+            a = start_graph_retrieval(query_a, "q")
+            b = start_graph_retrieval(query_b, "q")
+            assert started_a.wait(_GATE_TIMEOUT_S)
+            assert started_b.wait(_GATE_TIMEOUT_S)
+            c = start_graph_retrieval(query_c, "q")
+            shutdown_graph_executor()
+            done, _ = await asyncio.wait({c}, timeout=_GATE_TIMEOUT_S)
+            assert c in done
+            assert c.cancelled()
+            gate.release.set()
+            await asyncio.gather(a, b)
+            del c, done
+            gc.collect()
+        finally:
+            gate.release.set()
+            loop.set_exception_handler(None)
+        assert sorted(gate.ran) == ["a", "b"]
+        assert reported == []
+        assert [message for level, message in graph_log if level == "WARNING"] == []
 
 
 @pytest.fixture

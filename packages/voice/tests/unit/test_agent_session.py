@@ -29,9 +29,11 @@ pytestmark = [pytest.mark.asyncio]
 
 class _FakeConfig:
     """Minimal launcher config stand-in — only ``is_cloud`` is read by ``_ensure_singletons``
-    (Spec M4 T5c: the free-registry build is cloud-gated; ``False`` ⇒ community, no gating)."""
+    (Spec M4 T5c: the free-registry build is cloud-gated; ``False`` ⇒ community, no gating).
+    ``graph_query_workers`` sizes the voice graph pool when the launcher is built (R9-323)."""
 
     is_cloud = False
+    graph_query_workers = 2
 
 
 class _FakeSessionMachine:
@@ -599,20 +601,54 @@ async def test_warm_starts_the_crisis_encoder_warmup_off_loop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_releases_the_voice_graph_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_aclose_releases_the_voice_graph_pool_after_the_calls_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R9-323: the voice graph query has its own small pool; the launcher closes it
-    with the process's other shared resources, after every call task has ended."""
+    with the process's other shared resources, only once every call task has ended."""
     from persona_voice.agent import launcher as launcher_module
 
-    released: list[int] = []
+    order: list[str] = []
     monkeypatch.setattr(
-        launcher_module, "shutdown_graph_executor", lambda: released.append(len(released))
+        launcher_module, "shutdown_graph_executor", lambda: order.append("pool released")
     )
     launcher = InProcessAgentLauncher(config=_FakeConfig())  # type: ignore[arg-type]
+    in_call = asyncio.Event()
+
+    async def blocked_call() -> None:
+        in_call.set()
+        try:
+            await asyncio.Event().wait()  # a call that only ends when cancelled
+        except asyncio.CancelledError:
+            # The call's own teardown takes a few loop passes; the pool must outlive it.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            order.append("call finished")
+            raise
+
+    task = asyncio.create_task(blocked_call())
+    launcher._tasks.add(task)  # noqa: SLF001 (the launcher's own call-task set)
+    await in_call.wait()
 
     await launcher.aclose()
 
-    assert released == [0]
+    assert order == ["call finished", "pool released"]
+
+
+async def test_the_launcher_sizes_the_voice_graph_pool_from_its_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-323: PERSONA_VOICE_GRAPH_QUERY_WORKERS reaches the pool through the launcher."""
+    from persona_voice.agent import launcher as launcher_module
+
+    sizes: list[int] = []
+    monkeypatch.setattr(launcher_module, "configure_graph_executor", sizes.append)
+    config = _FakeConfig()
+    config.graph_query_workers = 5
+
+    InProcessAgentLauncher(config=config)  # type: ignore[arg-type]
+
+    assert sizes == [5]
 
 
 # ---------- R9-202: the bill follows the conversation, not the session -------

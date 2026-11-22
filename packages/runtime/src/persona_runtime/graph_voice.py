@@ -17,6 +17,15 @@ gets the tighter slice):
    window is dropped for that turn (the turn proceeds **graph-off**) — never
    awaited on the critical path. So graph-awareness on voice is either free
    (overlapped) or absent (skipped), never a tax.
+
+The query runs on a small pool of its own (R9-323), not the loop's default
+executor: the turn's store read goes through ``asyncio.to_thread``, and a query
+whose result may be dropped must not queue ahead of it when the shared pool is
+full. A failed query logs its exception type once and is always read, so a
+barge-in never leaves an unread error behind. A query dropped as late is
+cancelled, so a queued one never takes a worker for a turn that has moved on,
+and the drops are counted and reported (:class:`LateDropMeter`) so an operator
+can see graph memory going off under a slow graph backend.
 """
 
 from __future__ import annotations
@@ -24,7 +33,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import math
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -38,7 +49,10 @@ if TYPE_CHECKING:
     from persona.graph.config import GraphSettings
 
 __all__ = [
+    "DEFAULT_GRAPH_QUERY_WORKERS",
     "VOICE_NODE_BUDGET",
+    "LateDropMeter",
+    "configure_graph_executor",
     "shutdown_graph_executor",
     "start_graph_retrieval",
     "take_graph_if_ready",
@@ -55,15 +69,35 @@ _VOICE_FLOOR_BUMP = 0.06
 
 _log = get_logger("runtime.graph_voice")
 
-#: Workers in the voice graph pool (R9-323). A voice turn runs one query and a
-#: worker process holds few calls, so two is enough; the bound keeps a slow
-#: graph backend from piling up threads.
-_GRAPH_POOL_WORKERS = 2
+#: Default workers in the voice graph pool (R9-323). A voice turn runs one query
+#: and a worker process holds few calls, so two is enough; the bound keeps a slow
+#: graph backend from piling up threads. The voice service sets the real count
+#: from ``PERSONA_VOICE_GRAPH_QUERY_WORKERS`` (:func:`configure_graph_executor`).
+DEFAULT_GRAPH_QUERY_WORKERS = 2
+
+#: The shortest gap between two late-drop warnings (:class:`LateDropMeter`).
+_LATE_DROP_REPORT_INTERVAL_S = 60.0
 
 # Lazily created so importing this module starts no threads, and replaced after a
 # shutdown so a later kick-off in the same process still has a pool.
 _GRAPH_POOL: ThreadPoolExecutor | None = None
+_GRAPH_POOL_WORKERS = DEFAULT_GRAPH_QUERY_WORKERS
 _GRAPH_POOL_LOCK = threading.Lock()
+
+
+def configure_graph_executor(max_workers: int) -> None:
+    """Set the voice graph pool's worker count (R9-323).
+
+    Takes effect when the pool is next built: at the first query, or after
+    :func:`shutdown_graph_executor`. The voice launcher calls it once at
+    construction, before any call can start a query.
+    """
+    if max_workers < 1:
+        msg = f"the voice graph pool needs at least 1 worker, got {max_workers}"
+        raise ValueError(msg)
+    global _GRAPH_POOL_WORKERS  # noqa: PLW0603 (module singleton, see _graph_pool)
+    with _GRAPH_POOL_LOCK:
+        _GRAPH_POOL_WORKERS = max_workers
 
 
 def _graph_pool() -> ThreadPoolExecutor:
@@ -88,6 +122,57 @@ def shutdown_graph_executor() -> None:
         pool, _GRAPH_POOL = _GRAPH_POOL, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+class LateDropMeter:
+    """Counts graph queries dropped as late, and reports them at a bounded rate.
+
+    Every drop is noted at debug. A warning goes out at the first drop, then at
+    most once per ``interval_s`` while drops keep coming, naming how many came
+    since the last report and in the whole process. A run of them means graph
+    memory is quietly off for the calls in this process (R9-323).
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        interval_s: float = _LATE_DROP_REPORT_INTERVAL_S,
+    ) -> None:
+        self._clock = clock
+        self._interval_s = interval_s
+        self._lock = threading.Lock()
+        self._total = 0
+        self._reported = 0
+        self._last_report = -math.inf
+
+    @property
+    def total(self) -> int:
+        """Late drops in this process so far."""
+        return self._total
+
+    def note(self) -> None:
+        """Record one late drop, and warn when a report is due."""
+        with self._lock:
+            self._total += 1
+            total = self._total
+            now = self._clock()
+            due = now - self._last_report >= self._interval_s
+            since_last = total - self._reported
+            if due:
+                self._reported = total
+                self._last_report = now
+        _log.debug("voice graph query not ready by assembly; dropped ({total})", total=total)
+        if due:
+            _log.warning(
+                "voice graph queries dropped as late: {since_last} since the last report, "
+                "{total} in this process; those turns ran graph-off",
+                since_last=since_last,
+                total=total,
+            )
+
+
+_LATE_DROPS = LateDropMeter()
 
 
 def voice_graph_settings(base: GraphSettings) -> GraphSettings:
@@ -130,10 +215,20 @@ def start_graph_retrieval(
     The pool is the module's own (R9-323), so the query never queues ahead of
     the turn's store read in the default executor. A done callback reads every
     outcome: a failure logs one warning and its error is never left unread.
+
+    If the process closes the pool between the lookup and the submit, the turn
+    gets a finished future holding an empty bundle: it runs graph-off.
     """
     loop = asyncio.get_running_loop()
     call = functools.partial(contextvars.copy_context().run, graph_retrieval, query)
-    future = loop.run_in_executor(_graph_pool(), call)
+    try:
+        future = loop.run_in_executor(_graph_pool(), call)
+    except RuntimeError:
+        # "cannot schedule new futures after shutdown": the process is closing.
+        _log.debug("voice graph pool closed at kick-off; the turn runs graph-off")
+        closed: asyncio.Future[GraphContext] = loop.create_future()
+        closed.set_result(GraphContext())
+        return closed
     future.add_done_callback(_log_failure)
     return future
 
@@ -146,16 +241,21 @@ def take_graph_if_ready(task: asyncio.Future[GraphContext]) -> GraphContext:
     block) rather than waiting — the zero-serial guarantee and the degrade-to-off
     fallback in one. A query that errored also degrades to off (graph is additive
     presence, never a failure path on voice).
+
+    A query not ready is cancelled (R9-323): one still queued never runs, so it
+    gives its place in the small pool back (the cancel reaches the pool on the
+    loop's next pass, at the turn's next await); one already running finishes
+    and is ignored. Each such drop is counted by the process's :class:`LateDropMeter`.
     """
     if task.done():
         if task.cancelled() or task.exception() is not None:
             return GraphContext()
         return task.result()
-    # Not ready by assembly time: drop the graph for this turn. Detach so the
-    # abandoned task's result/exception is consumed (no "never retrieved"
-    # warning); an owner-scoped read has no side effects, so letting it finish in
-    # the pool is harmless.
-    task.add_done_callback(_discard_result)
+    # Not ready by assembly time: drop the graph for this turn. Cancelling marks
+    # the future done (nothing is left unread) and stops a queued query; an
+    # owner-scoped read has no side effects, so one already running may finish.
+    task.cancel()
+    _LATE_DROPS.note()
     return GraphContext()
 
 
@@ -177,9 +277,3 @@ def _log_failure(future: asyncio.Future[GraphContext]) -> None:
             )
     except Exception:  # noqa: BLE001, S110 (a log line must never break the loop)
         pass
-
-
-def _discard_result(task: asyncio.Future[GraphContext]) -> None:
-    """Consume an abandoned task's outcome so asyncio doesn't warn."""
-    if not task.cancelled():
-        task.exception()
