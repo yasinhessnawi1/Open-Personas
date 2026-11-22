@@ -241,6 +241,11 @@ class _BackgroundEraser:
     def _loop(self) -> None:
         while True:
             deps, erasure, done = self._queue.get()
+            # A cancelled future is skipped (its erasure stays in the ledger for the sweep), and
+            # one marked running can no longer be cancelled, so set_result below cannot raise
+            # and stop this thread (PR #56 review LOW-4).
+            if not done.set_running_or_notify_cancel():
+                continue
             try:
                 run_persona_erasure_inline(deps, erasure)  # logs a failure; never raises
             finally:

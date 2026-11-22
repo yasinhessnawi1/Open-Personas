@@ -10,6 +10,7 @@ as the DELETE route does. The request answers at once.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from datetime import UTC, datetime
@@ -189,3 +190,37 @@ def test_with_no_platform_engine_the_undo_refuses(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(RuntimeError, match="no platform engine"):
         _undo(_state())
+
+
+def test_a_cancelled_run_is_skipped_and_the_thread_keeps_going(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #56 review LOW-4: a queued run whose future was cancelled never runs, and it cannot
+    stop the thread (setting a cancelled future's result raises), so the next run still does."""
+    first_running, release = threading.Event(), threading.Event()
+    ran: list[str] = []
+
+    def _run(_deps: object, erasure: Erasure) -> None:
+        ran.append(erasure.id)
+        if erasure.id == "erasure_first":
+            first_running.set()
+            release.wait(30)
+
+    monkeypatch.setattr(erasure_start, "run_persona_erasure_inline", _run)
+    eraser = erasure_start._BackgroundEraser("test-undo-erase")  # noqa: SLF001
+    named = {
+        name: dataclasses.replace(_erasure(), id=f"erasure_{name}")
+        for name in ("first", "cancelled", "after")
+    }
+    deps: Any = object()
+
+    first = eraser.submit(deps, named["first"])
+    assert first_running.wait(_PROMPT_S)
+    cancelled = eraser.submit(deps, named["cancelled"])
+    assert cancelled.cancel(), "still queued, so it can be cancelled"
+    after = eraser.submit(deps, named["after"])
+    release.set()
+
+    after.result(timeout=_PROMPT_S)
+    assert first.done()
+    assert ran == ["erasure_first", "erasure_after"], "the cancelled run never ran"
