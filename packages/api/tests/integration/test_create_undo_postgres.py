@@ -255,6 +255,51 @@ def test_the_sweep_claims_an_abandoned_create_as_persona_platform(
     assert erasure.counts.get("row") == {"personas": 1}
 
 
+def test_a_sweep_claim_that_loses_the_race_takes_the_open_erasure(
+    migrated_engine: Engine, platform: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-322: another claim commits between the sweep's read and its insert. On Postgres the
+    failed insert aborts the transaction unless it ran in a savepoint; with one, the sweep's
+    claim is the erasure that won and its row delete still commits."""
+    from persona_api.services import erasure_ledger  # noqa: PLC0415
+
+    _owner(migrated_engine)
+    pid = f"persona_{uuid.uuid4().hex}"
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO personas (id, owner_id, yaml, create_complete, created_at) "
+                "VALUES (:p, :o, 'x: 1', false, now() - interval '1 hour')"
+            ),
+            {"p": pid, "o": _OWNER},
+        )
+    won = ErasureLedger(platform).claim(
+        owner_id=_OWNER, subject_kind=SubjectKind.PERSONA, subject_id=pid, captured={}
+    )
+    real = erasure_ledger._get_on  # noqa: SLF001
+    stale = [True]
+
+    def _read_before_the_other_claim(conn: Any, kind: SubjectKind, subject: str) -> Any:  # noqa: ANN401
+        if subject == pid and stale[0]:
+            stale[0] = False
+            return None
+        return real(conn, kind, subject)
+
+    monkeypatch.setattr(erasure_ledger, "_get_on", _read_before_the_other_claim)
+
+    claimed = erasure_start.claim_abandoned_create(platform, owner_id=_OWNER, persona_id=pid)
+
+    assert not stale[0], "the claim read before the other claim committed"
+    assert claimed is not None
+    assert claimed.id == won.id, "the erasure that won"
+    with migrated_engine.connect() as conn:
+        rows = conn.execute(text("SELECT count(*) FROM personas WHERE id = :p"), {"p": pid})
+        assert rows.scalar_one() == 0, "the row delete committed with the claim"
+    erasure = ErasureLedger(migrated_engine).get(SubjectKind.PERSONA, pid)
+    assert erasure is not None
+    assert erasure.counts.get("row") == {"personas": 1}
+
+
 def test_a_create_finishing_under_the_sweeps_lock_matches_nothing_and_is_undone(
     migrated_engine: Engine,
     app_engine: Engine,

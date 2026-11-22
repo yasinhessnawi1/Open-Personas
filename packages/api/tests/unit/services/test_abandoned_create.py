@@ -288,3 +288,52 @@ def test_a_create_finishing_under_the_sqlite_delete_keeps_its_row(
     assert claimed is None
     assert _rows(seeded)[pid] is True, "the finished row is kept"
     assert ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid) is None, "nothing claimed"
+
+
+def test_a_claim_that_loses_the_race_is_no_alert_and_the_row_still_goes(
+    seeded: Seeded, embedder: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-322: the create's own undo, a DELETE or an account erasure claims the persona's
+    erasure between the sweep's read and its insert. The sweep's claim is that erasure: no
+    "could not be claimed" alert, and the row is deleted under the sweep's lock as before."""
+    from persona_api.jobs.handlers import persona_erase  # noqa: PLC0415
+    from persona_api.services import erasure_ledger  # noqa: PLC0415
+    from persona_api.services.erasure_ledger import SubjectKind as Kind  # noqa: PLC0415
+
+    pid = _crashed_create(seeded, embedder, monkeypatch)
+    ledger = ErasureLedger(seeded.engine)
+    won = ledger.claim(owner_id=OWNER, subject_kind=Kind.PERSONA, subject_id=pid, captured={})
+    real = erasure_ledger._get_on  # noqa: SLF001
+    stale = [True]
+
+    def _read_before_the_other_claim(conn: Any, kind: Kind, subject: str) -> Any:  # noqa: ANN401
+        if subject == pid and stale[0]:
+            stale[0] = False
+            return None
+        return real(conn, kind, subject)
+
+    errors: list[str] = []
+
+    class _Log:
+        def debug(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+            return None
+
+        def error(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            errors.append(message)
+
+        def warning(self, message: str, **_k: Any) -> None:  # noqa: ANN401
+            errors.append(message)
+
+    monkeypatch.setattr(erasure_ledger, "_get_on", _read_before_the_other_claim)
+    monkeypatch.setattr(persona_erase, "_log", _Log())
+
+    _sweep(seeded, at=datetime.now(UTC) + ABANDONED_CREATE_GRACE + timedelta(minutes=1))
+
+    assert not stale[0], "the sweep's claim read before the other claim committed"
+    # (The clock is past the stall threshold too, so only the claim's alert is the point.)
+    assert not [m for m in errors if "could not be claimed" in m]
+    assert pid not in _rows(seeded), "the row went under the sweep's lock"
+    erasure = ledger.get(SubjectKind.PERSONA, pid)
+    assert erasure is not None
+    assert erasure.id == won.id, "one erasure: the one that won"
+    assert erasure.counts.get("row") == {"personas": 1}

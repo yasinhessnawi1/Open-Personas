@@ -261,24 +261,31 @@ class ErasureLedger:
 
         For a claim that must not outlive what the caller does in the same transaction (R9-293
         round 3, Finding 4: the abandoned create's conditional delete). A claim of the same
-        subject committed meanwhile fails this insert on the open-subject index, and the
-        caller's whole transaction rolls back with it; the caller's next run finds that claim.
+        subject committed between the read and the insert fails the insert on the open-subject
+        index (R9-322). The insert runs in a savepoint, so only it rolls back: that claim is
+        this erasure, as in :meth:`claim`, and the caller's transaction carries on.
         """
         clean = _require_captured(captured)
         existing = _get_on(conn, subject_kind, subject_id)
         if existing is not None and existing.state is not ErasureState.COMPLETE:
             return existing
-        conn.execute(
-            insert(erasures_t).values(
-                id=f"erasure_{uuid.uuid4().hex}",
-                owner_id=owner_id,
-                subject_kind=subject_kind.value,
-                subject_id=subject_id,
-                captured=clean,
-            )
-        )
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    insert(erasures_t).values(
+                        id=f"erasure_{uuid.uuid4().hex}",
+                        owner_id=owner_id,
+                        subject_kind=subject_kind.value,
+                        subject_id=subject_id,
+                        captured=clean,
+                    )
+                )
+        except IntegrityError:
+            # The other claim committed first (an insert that meets an uncommitted one waits
+            # for its outcome), so the read below sees it.
+            pass
         claimed = _get_on(conn, subject_kind, subject_id)
-        if claimed is None:  # pragma: no cover - the row was just written
+        if claimed is None:  # pragma: no cover - the row was just written or found
             raise _refuse("claim_not_visible")
         return claimed
 
