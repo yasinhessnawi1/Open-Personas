@@ -14,12 +14,16 @@ The route's half of D-R9-284-erase, in this order:
 Then the route hands the erasure to the ``persona_erase`` job, or, where this process runs no
 worker that consumes it (legacy SQLite, a keyless boot), to :func:`run_persona_erasure_inline`
 in the background. A failure there is recorded in the ledger and the erasure resumes at the
-next start (:func:`resume_persona_erasures_on_startup`).
+next start (:func:`resume_persona_erasures_on_startup`). A failed create's undo
+(:func:`undo_failed_create`) does the same, on its own background thread (R9-320).
 """
 
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
+from concurrent.futures import Future
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -59,10 +63,10 @@ __all__ = [
     "begin_persona_erasure",
     "claim_abandoned_create",
     "dispatch_persona_erasure",
-    "erase_persona_now",
     "erase_deps_from_state",
     "resume_persona_erasures_on_startup",
     "run_persona_erasure_inline",
+    "undo_failed_create",
 ]
 
 _log = get_logger("api.erasure")
@@ -206,18 +210,64 @@ class _FinishedMeanwhile(Exception):  # noqa: N818 - a control signal, not an er
     """The create finished between the check and the delete: roll back and claim nothing."""
 
 
-def erase_persona_now(
+class _BackgroundEraser:
+    """One daemon thread that runs handed-off persona erasures in turn (R9-320).
+
+    Not the default executor: a run can wait minutes on the owner's graph maintenance lock,
+    and the app's other ``to_thread`` calls share that pool. One thread, so creates that fail
+    for everyone and are retried queue their erasures here instead of each holding a thread.
+    A daemon, so a wait in flight never holds the process at shutdown: Postgres rolls its
+    transaction back, the ledger keeps the erasure, and the resume finishes it.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._queue: queue.SimpleQueue[tuple[PersonaEraseDeps, Erasure, Future[None]]] = (
+            queue.SimpleQueue()
+        )
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def submit(self, deps: PersonaEraseDeps, erasure: Erasure) -> Future[None]:
+        """Queue the erasure; the future is done once its run has ended, however it ended."""
+        done: Future[None] = Future()
+        self._queue.put((deps, erasure, done))
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._loop, name=self._name, daemon=True)
+                self._thread.start()
+        return done
+
+    def _loop(self) -> None:
+        while True:
+            deps, erasure, done = self._queue.get()
+            try:
+                run_persona_erasure_inline(deps, erasure)  # logs a failure; never raises
+            finally:
+                done.set_result(None)
+
+
+_CREATE_UNDO_ERASER = _BackgroundEraser("create-undo-erase")
+
+
+def undo_failed_create(
     state: Any,  # noqa: ANN401 - app.state
     *,
     rls_engine: Engine,
     owner_id: str,
     persona_id: str,
-) -> None:
-    """Erase a persona here and now, through the persona erasure, before returning (R9-293).
+) -> Future[None] | None:
+    """Undo a create that failed after its row committed (R9-293), without waiting (R9-320).
 
-    For a create that failed after its row committed: the half-made persona is claimed,
-    fenced, deleted and erased in full (memory, graph, files, rows) before the request answers.
-    A step that fails raises; the ledger keeps the erasure, and the startup resume finishes it.
+    The half-made persona is claimed, fenced and its row deleted here, so it is gone before
+    the request answers 500. The rest of its erasure (memory, graph, files, rows) is handed
+    off as the DELETE route hands it: to the ``persona_erase`` job when a worker here consumes
+    it, else to one background thread. Its graph step can wait minutes behind the owner's
+    consolidation run, and the failed request must not wait with it.
+
+    Raises ``PersonaNotFoundError`` when the row is gone already (the sweep or an account
+    erasure took it first). A run that fails is recorded in the ledger and resumed by the
+    sweep. Returns the background run's future, or ``None`` when the job took it.
     """
     deps = erase_deps_from_state(state)
     platform = getattr(state, "platform_engine", None)
@@ -227,7 +277,9 @@ def erase_persona_now(
     erasure = begin_persona_erasure(
         rls_engine=rls_engine, platform_engine=platform, owner_id=owner_id, persona_id=persona_id
     )
-    erase_persona(deps, erasure)
+    if dispatch_persona_erasure(state, erasure):
+        return None
+    return _CREATE_UNDO_ERASER.submit(deps, erasure)
 
 
 def dispatch_persona_erasure(state: Any, erasure: Erasure, *, token: str = "") -> bool:  # noqa: ANN401

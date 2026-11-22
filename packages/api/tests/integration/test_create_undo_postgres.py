@@ -2,10 +2,11 @@
 
 The create runs as production does: the personas row and the identity chunks through the
 ``persona_app`` row-level-security engine under the owner's GUC, and the undo
-(``erase_persona_now``) captures through that same engine and erases on ``persona_platform``
-(BYPASSRLS, not a superuser): fence, row, memory, graph, files, rows. The identity index writes
-its chunks and then fails; afterwards no row, no chunk and no open erasure is left, and the
-graph step ran. Runs in CI.
+(``undo_failed_create``) captures through that same engine and erases on ``persona_platform``
+(BYPASSRLS, not a superuser): fence and row before the request answers, then memory, graph,
+files and rows in the background (R9-320). The identity index writes its chunks and then fails;
+once the background run ends no row, no chunk and no open erasure is left, and the graph step
+ran. Runs in CI.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from persona.graph.maintenance_lock import graph_maintenance_held
 from persona.registry import PersonaRegistry
 from persona.stores.postgres import PostgresBackend
 from persona_api.config import APIConfig
@@ -29,6 +31,7 @@ from sqlalchemy import create_engine, event, text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from concurrent.futures import Future
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
@@ -112,31 +115,8 @@ def test_a_failed_create_is_erased_through_the_hosted_path(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(PersonaRegistry, "load_persona", _writes_then_fails)
-    audit_root = tmp_path / "audit"
-    audit_root.mkdir()
-    state = SimpleNamespace(
-        platform_engine=platform,
-        embedder=embedder,
-        config=APIConfig(audit_root=str(audit_root)),
-        file_storage=None,
-        workspace_root=tmp_path / "workspace",
-    )
-    token = current_user_id.set(_OWNER)
-    try:
-        with pytest.raises(RuntimeError, match="identity index"):
-            persona_service.create_persona(
-                rls_engine=app_engine,
-                embedder=embedder,
-                audit_root=audit_root,
-                owner_id=_OWNER,
-                yaml_str=_YAML,
-                memory_backend=PostgresBackend(engine=app_engine, embedder=embedder),
-                compensate=lambda pid: erasure_start.erase_persona_now(
-                    state, rls_engine=app_engine, owner_id=_OWNER, persona_id=pid
-                ),
-            )
-    finally:
-        current_user_id.reset(token)
+    runs = _failed_create(app_engine, platform, embedder, tmp_path)
+    runs[0].result(timeout=60)
 
     (pid,) = created
     with migrated_engine.connect() as conn:
@@ -151,6 +131,93 @@ def test_a_failed_create_is_erased_through_the_hosted_path(
     assert erasure.state is ErasureState.COMPLETE
     assert "graph" in erasure.counts, "the graph step ran"
     assert sum(erasure.counts["memory"].values()) > 0, "the identity chunks were deleted"
+
+
+def _failed_create(
+    app_engine: Engine,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+    tmp_path: Path,
+) -> list[Future[None]]:
+    """A create whose identity index fails, undone as the route undoes it.
+
+    No worker here, so the rest of the erasure runs on the undo's background thread; the
+    returned future is that run.
+    """
+    audit_root = tmp_path / "audit"
+    audit_root.mkdir()
+    state = SimpleNamespace(
+        platform_engine=platform,
+        embedder=embedder,
+        config=APIConfig(audit_root=str(audit_root)),
+        file_storage=None,
+        workspace_root=tmp_path / "workspace",
+    )
+    runs: list[Future[None]] = []
+
+    def _undo(pid: str) -> None:
+        run = erasure_start.undo_failed_create(
+            state, rls_engine=app_engine, owner_id=_OWNER, persona_id=pid
+        )
+        assert run is not None, "no worker here: the erasure runs in the background"
+        runs.append(run)
+
+    token = current_user_id.set(_OWNER)
+    try:
+        with pytest.raises(RuntimeError, match="identity index"):
+            persona_service.create_persona(
+                rls_engine=app_engine,
+                embedder=embedder,
+                audit_root=audit_root,
+                owner_id=_OWNER,
+                yaml_str=_YAML,
+                memory_backend=PostgresBackend(engine=app_engine, embedder=embedder),
+                compensate=_undo,
+            )
+    finally:
+        current_user_id.reset(token)
+    assert len(runs) == 1, "the create's undo ran"
+    return runs
+
+
+def test_a_failed_create_answers_while_its_owners_graph_lock_is_held(
+    migrated_engine: Engine,
+    app_engine: Engine,
+    platform: Engine,
+    embedder: Any,  # noqa: ANN401
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9-320: a consolidation run holds the owner's graph lock. The failed create still answers
+    at once with its row gone; its erasure finishes once the lock is released."""
+    _owner(migrated_engine)
+    created: list[str] = []
+
+    def _fails(_self: PersonaRegistry, persona: Any) -> None:  # noqa: ANN401
+        created.append(str(persona.persona_id))
+        msg = "the identity index went away"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(PersonaRegistry, "load_persona", _fails)
+    with graph_maintenance_held(migrated_engine, _OWNER):
+        started = time.monotonic()
+        runs = _failed_create(app_engine, platform, embedder, tmp_path)
+        answered_in = time.monotonic() - started
+        (pid,) = created
+        with migrated_engine.connect() as conn:
+            rows = conn.execute(text("SELECT count(*) FROM personas WHERE id = :p"), {"p": pid})
+            assert rows.scalar_one() == 0, "the row is gone before the request answers"
+        erasure = ErasureLedger(migrated_engine).get(SubjectKind.PERSONA, pid)
+        assert erasure is not None
+        assert erasure.state is not ErasureState.COMPLETE, "the graph step is still waiting"
+        assert not runs[0].done(), "and it waits in the background, not in the request"
+    assert answered_in < 20, "the undo did not wait on the graph lock"
+
+    runs[0].result(timeout=60)
+    erasure = ErasureLedger(migrated_engine).get(SubjectKind.PERSONA, pid)
+    assert erasure is not None
+    assert erasure.state is ErasureState.COMPLETE
+    assert "graph" in erasure.counts
 
 
 def _owner(migrated_engine: Engine) -> None:
@@ -213,13 +280,17 @@ def test_a_create_finishing_under_the_sweeps_lock_matches_nothing_and_is_undone(
         committed.set()
         assert locked.wait(20), "the sweep never took the lock"
 
-    def _update_waiting() -> bool:
+    def _update_waiting(sweeper_pid: int) -> bool:
+        """The create's UPDATE, in this test's database, waiting on the sweep's own session."""
         with migrated_engine.connect() as conn:
             waiting = conn.execute(
                 text(
-                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
-                    "AND query LIKE 'UPDATE personas%'"
-                )
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                    "AND query LIKE 'UPDATE personas%' "
+                    "AND CAST(:sweeper AS integer) = ANY(pg_blocking_pids(pid))"
+                ),
+                {"sweeper": sweeper_pid},
             )
             return int(waiting.scalar_one()) > 0
 
@@ -227,8 +298,9 @@ def test_a_create_finishing_under_the_sweeps_lock_matches_nothing_and_is_undone(
 
     def _capture_once_the_update_waits(conn: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         locked.set()  # the row is locked FOR UPDATE by now
+        sweeper_pid = int(conn.execute(text("SELECT pg_backend_pid()")).scalar_one())
         deadline = time.monotonic() + 20
-        while not _update_waiting():
+        while not _update_waiting(sweeper_pid):
             assert time.monotonic() < deadline, "the final UPDATE never waited on the lock"
             time.sleep(0.05)
         return capture(conn, **kwargs)
@@ -275,4 +347,4 @@ def test_a_create_finishing_under_the_sweeps_lock_matches_nothing_and_is_undone(
             {"p": pid},
         )
         assert rows.scalar_one() == 0
-        assert audits.scalar_one() == 0, "the audit row rolled back with the UPDATE"
+        assert audits.scalar_one() == 0, "no persona.create audit: the create never finished"

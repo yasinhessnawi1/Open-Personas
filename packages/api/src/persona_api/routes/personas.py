@@ -521,7 +521,8 @@ async def create_persona(
     background avatar hook. Everything stays fail-soft (D-29-X-fail-soft).
     """
     # R9-293 review HIGH-1: in a thread, never on the event loop. The create embeds the
-    # identity synchronously, and its undo (the persona erasure) may wait on the graph lock.
+    # identity synchronously, and a failed create's undo deletes the row (R9-320: the rest of
+    # its erasure is handed off, so the undo never waits on the graph lock here).
     persona_id = await asyncio.to_thread(
         persona_service.create_persona,
         rls_engine=request.app.state.rls_engine,
@@ -537,9 +538,10 @@ async def create_persona(
         # R5-D-2: the app-selected store-mutation audit backend (Postgres when
         # multi-worker). None (test overrides) ⇒ the JSONL default.
         audit_logger=getattr(request.app.state, "audit_logger", None),
-        # R9-293: a create that fails after its row committed is erased through the
-        # persona erasure before the request answers 500, so no half-made persona stays.
-        compensate=lambda persona_id: erasure_start.erase_persona_now(
+        # R9-293: a create that fails after its row committed has its row deleted before the
+        # request answers 500, so no half-made persona stays; the rest of its erasure runs in
+        # the background, as a DELETE's does (R9-320).
+        compensate=lambda persona_id: erasure_start.undo_failed_create(
             request.app.state,
             rls_engine=request.app.state.rls_engine,
             owner_id=user.id,
