@@ -35,7 +35,7 @@ process held when it died. A turn abandoned at the shutdown deadline never reach
 ``finally`` that releases its slot, and the TTL would keep that slot for an hour, so a user
 at the concurrency cap would get 429 until it aged out. The sweep is scoped to this api
 instance's earlier boots (see :func:`persona.concurrency.release_previous_boot_long_ops`),
-so it stays correct if a second api instance is ever added, as long as each has its own
+so it stays correct if a second api process is ever added, as long as each has its own
 ``PERSONA_API_INSTANCE_ID``.
 """
 
@@ -44,11 +44,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from persona.concurrency import (
-    DEFAULT_LONG_OP_INSTANCE,
-    PROCESS_BOOT_ID,
-    release_previous_boot_long_ops,
-)
+from persona.concurrency import PROCESS_BOOT_ID, release_previous_boot_long_ops
 from persona.logging import get_logger
 from sqlalchemy import update
 
@@ -76,7 +72,7 @@ _ORPHANED_RUN_STATES = ("running", "awaiting_user")
 def reconcile_in_flight_on_startup(
     *,
     engine: Engine,
-    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
+    long_op_instance: str,
     boot_id: str = PROCESS_BOOT_ID,
 ) -> dict[str, int]:
     """Mark orphaned in-flight chat turns + runs terminal and free their long-op slots.
@@ -118,7 +114,8 @@ def reconcile_in_flight_on_startup(
             )
             .values(status="error", error="interrupted by a server restart", finished_at=now)
         )
-        # R9-318: the slots those turns and runs held die with them.
+        # R9-318: the slots those chat turns held die with them. Only a chat turn takes a
+        # long-op slot (W1, D-W1-24: an agentic one-off runs on the worker instead).
         long_ops = release_previous_boot_long_ops(
             conn=conn, instance_id=long_op_instance, boot_id=boot_id
         )

@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from persona.approvals import is_decision_cue
-from persona.concurrency import DEFAULT_LONG_OP_INSTANCE
 from persona.graph.errors import GraphNodeBusyError
 from persona.stores.episodic import EpisodicStore
 
@@ -522,7 +521,8 @@ async def post_message(
         # Spec R7 (R7-D-4): the per-user long-op concurrency cap (chat SSE). 0 =
         # uncapped (community / unset), so existing behaviour is unchanged.
         max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
-        long_op_instance=getattr(request.app.state, "long_op_instance", DEFAULT_LONG_OP_INSTANCE),
+        # R9-318: always set by the app; no fallback, so a missing name fails loudly.
+        long_op_instance=request.app.state.long_op_instance,
         # R5-D-4: the file-storage backend the turn resolves inbound image bytes
         # through (local/S3). workspace_root stays for the deferred file-tool paths.
         file_storage=getattr(request.app.state, "file_storage", None),
@@ -595,7 +595,8 @@ async def regenerate_message(
         event_channel=getattr(request.app.state, "event_channel", None),
         workspace_root=getattr(request.app.state, "workspace_root", None),
         max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
-        long_op_instance=getattr(request.app.state, "long_op_instance", DEFAULT_LONG_OP_INSTANCE),
+        # R9-318: always set by the app; no fallback, so a missing name fails loudly.
+        long_op_instance=request.app.state.long_op_instance,
         file_storage=getattr(request.app.state, "file_storage", None),
     )
     return StreamingResponse(
@@ -649,7 +650,8 @@ async def edit_message(
         event_channel=getattr(request.app.state, "event_channel", None),
         workspace_root=getattr(request.app.state, "workspace_root", None),
         max_concurrent_long_ops=getattr(request.app.state, "max_concurrent_long_ops", 0),
-        long_op_instance=getattr(request.app.state, "long_op_instance", DEFAULT_LONG_OP_INSTANCE),
+        # R9-318: always set by the app; no fallback, so a missing name fails loudly.
+        long_op_instance=request.app.state.long_op_instance,
         file_storage=getattr(request.app.state, "file_storage", None),
     )
     return StreamingResponse(

@@ -95,7 +95,7 @@ def test_sweep_marks_orphaned_streaming_message_interrupted(engine: Engine) -> N
         _msg(conn, "m_complete", "complete")
         _msg(conn, "m_legacy", None)
 
-    counts = reconcile_in_flight_on_startup(engine=engine)
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     with engine.begin() as conn:
         rows = {
@@ -115,7 +115,7 @@ def test_sweep_marks_orphaned_runs_error_with_finished_at(engine: Engine) -> Non
         _run(conn, "r_done", "completed")
         _run(conn, "r_error", "error")
 
-    counts = reconcile_in_flight_on_startup(engine=engine)
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     with engine.begin() as conn:
         rows = {r["id"]: dict(r) for r in conn.execute(select(runs_t)).mappings().all()}
@@ -135,15 +135,15 @@ def test_sweep_is_idempotent(engine: Engine) -> None:
         _msg(conn, "m_running", "running")
         _run(conn, "r_running", "running")
 
-    first = reconcile_in_flight_on_startup(engine=engine)
-    second = reconcile_in_flight_on_startup(engine=engine)
+    first = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
+    second = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     assert first == {"messages": 1, "runs": 1, "long_ops": 0}
     assert second == {"messages": 0, "runs": 0, "long_ops": 0}  # a second pass finds nothing
 
 
 def test_sweep_noop_on_clean_database(engine: Engine) -> None:
-    assert reconcile_in_flight_on_startup(engine=engine) == {
+    assert reconcile_in_flight_on_startup(engine=engine, long_op_instance="api") == {
         "messages": 0,
         "runs": 0,
         "long_ops": 0,
@@ -163,7 +163,7 @@ def test_sweep_logs_a_warning_with_the_healed_count(
         _msg(conn, "m_running", "running")
         _run(conn, "r_running", "running")
 
-    reconcile_in_flight_on_startup(engine=engine)
+    reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     plog.reset_for_testing()  # flush before reading (mirrors persona.logging's own tests)
     output = capsys.readouterr().err
@@ -180,7 +180,7 @@ def test_sweep_logs_nothing_on_a_clean_database(
     plog.reset_for_testing()
     plog.get_logger("test.trigger", config=PersonaCoreConfig(log_format="pretty"))
 
-    reconcile_in_flight_on_startup(engine=engine)
+    reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     plog.reset_for_testing()
     output = capsys.readouterr().err
@@ -200,7 +200,7 @@ def test_a_parked_run_that_belongs_to_a_task_survives_the_sweep(engine: Engine) 
         _run(conn, "r_parked_alone", "awaiting_user")
         _run(conn, "r_running_in_a_task", "running", task_id="task_1")
 
-    counts = reconcile_in_flight_on_startup(engine=engine)
+    counts = reconcile_in_flight_on_startup(engine=engine, long_op_instance="api")
 
     with engine.begin() as conn:
         rows = {r["id"]: dict(r) for r in conn.execute(select(runs_t)).mappings().all()}
@@ -235,7 +235,7 @@ def test_the_boot_sweep_lifts_the_statement_timeout_before_its_scans() -> None:
         def begin(self):  # type: ignore[no-untyped-def]  # noqa: ANN202
             yield _Conn()
 
-    counts = reconcile_in_flight_on_startup(engine=_Engine())  # type: ignore[arg-type]
+    counts = reconcile_in_flight_on_startup(engine=_Engine(), long_op_instance="api")  # type: ignore[arg-type]
     assert counts == {"messages": 0, "runs": 0, "long_ops": 0}
     assert sql[0] == "SELECT set_config('statement_timeout', '0', true)"
     assert sql[1].startswith("UPDATE messages")

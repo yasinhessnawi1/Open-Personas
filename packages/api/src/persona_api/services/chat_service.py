@@ -29,7 +29,6 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, cast
 
-from persona.concurrency import DEFAULT_LONG_OP_INSTANCE
 from persona.errors import PersonaError, PersonaNotFoundError
 from persona.graph.errors import GraphNodeBusyError
 from persona.logging import get_logger
@@ -654,7 +653,7 @@ async def start_chat_turn(
     document_context: DocumentContext | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
-    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
+    long_op_instance: str,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
     persist_user_message: bool = True,
@@ -1013,7 +1012,7 @@ async def regenerate_turn(
     title_builder: Callable[[str], Awaitable[str]] | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
-    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
+    long_op_instance: str,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
 ) -> ChatTurnHandle:
@@ -1135,7 +1134,7 @@ async def edit_and_rerun_turn(
     title_builder: Callable[[str], Awaitable[str]] | None = None,
     workspace_root: Path | None = None,
     max_concurrent_long_ops: int = 0,
-    long_op_instance: str = DEFAULT_LONG_OP_INSTANCE,
+    long_op_instance: str,
     file_storage: FileStorage | None = None,
     event_channel: UserEventChannel | None = None,
 ) -> ChatTurnHandle:

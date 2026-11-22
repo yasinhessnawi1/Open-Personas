@@ -263,9 +263,12 @@ class APIConfig(BaseSettings):
     max_concurrent_long_ops_per_user: int = Field(
         default=3, ge=0, validation_alias="MAX_CONCURRENT_LONG_OPS_PER_USER"
     )
-    # R9-318: this api instance's name. Every long-op slot records it, and the boot sweep
-    # frees only this instance's slots from earlier boots, so each running api instance needs
-    # its own. One instance (production today) keeps the default.
+    # R9-318: this api process's name. Every long-op slot records it, and the boot sweep
+    # frees only this name's slots from earlier boots, so the invariant is one name per api
+    # PROCESS: ``uvicorn --workers N`` would run N processes under one name, and each one's
+    # boot would free the others' live slots. The api Dockerfile pins ``--workers 1``. One
+    # process (production today) keeps this default, the only one: every layer below takes
+    # the name as a required argument.
     instance_id: str = Field(
         default="api", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$"
     )

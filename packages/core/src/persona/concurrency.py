@@ -36,7 +36,7 @@ slot immediately.
 **The boot sweep (R9-318).** The TTL alone holds a dead process's slot for up to an
 hour: a turn abandoned at the shutdown deadline never reaches its ``finally``, and a user
 at the cap gets 429 until the row ages out. So every slot records who took it: the api
-instance (``instance_id``, one name per running api) and :data:`PROCESS_BOOT_ID`, minted
+instance (``instance_id``, one name per api process) and :data:`PROCESS_BOOT_ID`, minted
 once per process. At boot, :func:`release_previous_boot_long_ops` deletes this instance's
 slots from any other boot, and the slots written before those columns existed (NULL), at
 once. A slot of the current process is kept, and so is another instance's: with two api
@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection, Engine
 
 __all__ = [
-    "DEFAULT_LONG_OP_INSTANCE",
     "DEFAULT_LONG_OP_TTL_SECONDS",
     "PROCESS_BOOT_ID",
     "acquire_user_concurrency",
@@ -79,10 +78,6 @@ __all__ = [
 # mid-run — an hour is generous for a chat turn / agentic run and still reclaims a
 # crashed process's slot within the hour. Callers may override per op_class.
 DEFAULT_LONG_OP_TTL_SECONDS = 3600
-
-# R9-318: the name of the api instance a slot belongs to, when the caller names none. The
-# api passes its configured ``PERSONA_API_INSTANCE_ID``, whose default is this same name.
-DEFAULT_LONG_OP_INSTANCE = "api"
 
 # R9-318: this process's boot, stamped on every slot it takes. Minted once at import, so it
 # is the same for every caller in the process and new on every restart.
@@ -179,8 +174,8 @@ def admit_long_op(
     user_id: str,
     op_class: str,
     max_concurrent: int,
+    instance_id: str,
     ttl_seconds: int = DEFAULT_LONG_OP_TTL_SECONDS,
-    instance_id: str = DEFAULT_LONG_OP_INSTANCE,
 ) -> str | None:
     """Admit a long-running op under the per-user per-class HARD cap; return a token.
 
@@ -240,7 +235,7 @@ def release_long_op(*, rls_engine: Engine, user_id: str, op_id: str | None) -> N
 def release_previous_boot_long_ops(
     *,
     conn: Connection,
-    instance_id: str = DEFAULT_LONG_OP_INSTANCE,
+    instance_id: str,
     boot_id: str = PROCESS_BOOT_ID,
 ) -> int:
     """Free every slot an earlier boot of this instance left behind; return how many (R9-318).

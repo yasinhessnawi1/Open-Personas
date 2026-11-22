@@ -906,7 +906,7 @@ async def test_a_parked_run_is_not_reaped_as_an_orphan_by_a_restart(
     backend = _ScriptedBackend([_reply("[ASK_USER] Which day?"), _reply("[FINAL] done")])
     assert await _worker(app_engine, su_engine, embedder, tmp_path, backend).run_once() == 1
 
-    reconcile_in_flight_on_startup(engine=su_engine)
+    reconcile_in_flight_on_startup(engine=su_engine, long_op_instance="api")
 
     with su_engine.begin() as conn:
         status = conn.execute(

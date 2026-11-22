@@ -89,7 +89,9 @@ def test_long_cap_zero_writes_no_row_and_never_touches_db() -> None:
     """max_concurrent<=0 (community/uncapped): admits a sentinel token WITHOUT opening
     a transaction or writing an inflight_ops row — SQLite-safe."""
     engine = MagicMock()
-    token = admit_long_op(rls_engine=engine, user_id="u", op_class="chat", max_concurrent=0)
+    token = admit_long_op(
+        rls_engine=engine, user_id="u", op_class="chat", instance_id="api", max_concurrent=0
+    )
     assert token is not None  # admitted
     engine.begin.assert_not_called()
     # Releasing the unlimited sentinel (or None) is a no-op that never touches the DB.
@@ -173,3 +175,28 @@ async def test_a_chat_turn_takes_its_slot_under_the_configured_instance(
         )
     assert seen["instance_id"] == "api-2"
     assert seen["op_class"] == "chat"
+
+
+def test_the_instance_has_no_default_below_the_config() -> None:
+    """R9-318 review LOW-1: the one default lives in ``APIConfig``. Every layer below takes the
+    instance as a required keyword, so a caller that forgets it fails loudly instead of
+    stamping its slots with a name the boot sweep will never look for."""
+    import inspect  # noqa: PLC0415
+
+    from persona.concurrency import release_previous_boot_long_ops  # noqa: PLC0415
+    from persona_api.background.restart_sweep import (  # noqa: PLC0415
+        reconcile_in_flight_on_startup,
+    )
+    from persona_api.services import chat_service  # noqa: PLC0415
+
+    for fn, name in (
+        (admit_long_op, "instance_id"),
+        (release_previous_boot_long_ops, "instance_id"),
+        (chat_service.start_chat_turn, "long_op_instance"),
+        (chat_service.regenerate_turn, "long_op_instance"),
+        (chat_service.edit_and_rerun_turn, "long_op_instance"),
+        (reconcile_in_flight_on_startup, "long_op_instance"),
+    ):
+        param = inspect.signature(fn).parameters[name]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__qualname__
+        assert param.default is inspect.Parameter.empty, fn.__qualname__

@@ -1,11 +1,13 @@
 """A long-op slot names the api instance and the process boot that took it (R9-318).
 
-A chat turn or agentic run abandoned at the shutdown deadline never reaches its ``finally``, so
-its ``inflight_ops`` slot is not released, and the TTL sweep frees it only after an hour. For
-that hour a user at the concurrency cap gets 429. With these two columns the boot sweep
-(``persona.concurrency.release_previous_boot_long_ops``, run by the api's restart sweep) frees
-every slot this instance's earlier boots left, at once, and keeps the slots of the current
-process and of any other instance.
+A chat turn abandoned at the shutdown deadline never reaches its ``finally``, so its
+``inflight_ops`` slot is not released, and the TTL sweep frees it only after an hour. For that
+hour a user at the concurrency cap gets 429. Only chat turns take a long-op slot: since W1
+(D-W1-24) an agentic one-off runs on the worker under its per-user claim cap instead.
+
+With these two columns the boot sweep (``persona.concurrency.release_previous_boot_long_ops``,
+run by the api's restart sweep) frees every slot this instance's earlier boots left, at once,
+and keeps the slots of the current process and of any other instance.
 
 Both columns are nullable text with no default. A slot written by the old process while this
 migration runs, or before it, has neither, and the sweep treats it as an earlier boot's: only an

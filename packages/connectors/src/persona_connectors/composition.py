@@ -549,6 +549,8 @@ def build_reply_runner(
                     owner_id=request.owner_id,
                     conversation_id=request.conversation_id,
                     user_message=request.text,
+                    # R9-318: no cap is passed, so no slot is written; the name is required.
+                    long_op_instance=api_config.instance_id,
                 )
             # The worker owns persistence + the owner scope from here; the collector
             # only drains the in-process queue (no DB touch), so it runs unscoped.
