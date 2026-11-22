@@ -66,6 +66,17 @@ class ChainedModelMetadataResolver:
         self._static = static
         self._openrouter = openrouter
 
+    @property
+    def catalog_warm(self) -> bool | None:
+        """Whether the catalog link's index is built: ``None`` when there is no such link.
+
+        A cold (or reindexing) catalog answers every no-fetch lookup with a miss, so a
+        caller that logs a miss can tell "wait for the warm-up" from "this model is in no
+        table" (R9-314). ``None`` also covers a catalog link that cannot report its state.
+        """
+        warm = getattr(self._openrouter, "warm", None)
+        return warm if isinstance(warm, bool) else None
+
     def resolve(self, model_id: str) -> ModelMetadata | None:
         """Return metadata for ``model_id`` (static first, then OpenRouter), or ``None``."""
         if self._static is not None:

@@ -70,7 +70,11 @@ from persona.tools import format_tool_result
 
 from persona_runtime.agentic.call_ledger import CallLedger
 from persona_runtime.agentic.compactor import StepHistoryCompactor
-from persona_runtime.agentic.context_window import compaction_budget
+from persona_runtime.agentic.context_window import (
+    DEFAULT_COMPACTION_BUDGET_TOKENS,
+    compaction_budget,
+    warn_summariser_unavailable,
+)
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.pruner import PROTECTED_STEPS, ToolResultPruner
 from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage, UsageCall
@@ -254,6 +258,7 @@ class AgenticLoop:
         crisis_encoder: CrisisScorer | None = None,
         park_on_question: bool = False,
         metadata_source: CostSource | None = None,
+        compaction_budget_tokens: int = DEFAULT_COMPACTION_BUDGET_TOKENS,
     ) -> None:
         # Spec W1 (D-W1-34): what to do when the model asks and there is nobody here to
         # answer. The default is the long-standing behaviour: proceed with best judgment,
@@ -291,10 +296,16 @@ class AgenticLoop:
         self._router = router  # reserved for chat-style routing; step-tier is _tier_for_step
         self._tiers = tier_registry
         self._compactor = compactor or StepHistoryCompactor()
-        # R9-314: where the compactor's budget comes from, the served models' real
-        # context windows. The composition root passes the same metadata chain the turn
-        # pricer reads; ``None`` is the zero-network static tables (CLI, tests).
+        # R9-314: the compactor's budget is min(this cost knob, the window bound). The
+        # knob's default is the 4,096 every run used before, so the default cost is
+        # unchanged; the window bound, read from the same metadata chain the turn pricer
+        # uses (``None``: the zero-network static tables), caps a raised knob at what
+        # every model that may read the context accepts.
+        if compaction_budget_tokens <= 0:
+            msg = f"compaction_budget_tokens must be positive, got {compaction_budget_tokens}"
+            raise ValueError(msg)
         self._metadata_source = metadata_source
+        self._compaction_budget_tokens = compaction_budget_tokens
         # Spec W1 (D-W1-13): the cost-keyed pruner, alongside and independent of the
         # window-keyed compactor above. The composition root passes one carrying the
         # configured ceiling; the default is the ruled 12,000 tokens.
@@ -912,16 +923,25 @@ class AgenticLoop:
         return self._compactor.compact_if_needed(context, budget, summary=summary)
 
     def _compaction_budget(self, backend: ChatBackend) -> int:
-        """The budget to compact against: the windows of the step and summary models (R9-314).
+        """The budget to compact against: the cost knob, bounded by the windows (R9-314).
 
         A compaction summarises the middle of the context on the background tier, so
-        that tier's window bounds the budget as much as the step tier's does.
+        that tier's window bounds the budget as much as the step tier's does. Reading
+        that tier is best-effort here: whatever it raises is logged once and counts as
+        an unknown window (the conservative bound), never as a failed run.
         """
+        summariser: ChatBackend | None
         try:
-            summariser: ChatBackend | None = self._tiers.get(tier_for("background"))
-        except TierNotConfiguredError:
+            summariser = self._tiers.get(tier_for("background"))
+        except Exception as exc:  # noqa: BLE001 - sizing a budget must never fail a run
+            warn_summariser_unavailable(exc)
             summariser = None
-        return compaction_budget(backend, summariser, source=self._metadata_source)
+        return compaction_budget(
+            backend,
+            summariser,
+            source=self._metadata_source,
+            cost_budget=self._compaction_budget_tokens,
+        )
 
     async def _maybe_prune(
         self,

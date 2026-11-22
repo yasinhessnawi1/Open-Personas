@@ -435,3 +435,38 @@ class TestM2ReviewFixes:
         )
         assert basis == "actual_openrouter"
         assert cents == pytest.approx(1.23)
+
+
+class TestServedModelMetadata:
+    """The pricer's lookup, exposed for the agentic compaction window (R9-314).
+
+    It must key on exactly the id the pricer keys on, or the window and the price
+    could disagree about which model this is.
+    """
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "looked_up"),
+        [
+            # An OpenRouter model IS its catalog slug: never prefixed with "openrouter/".
+            ("openrouter", "z-ai/glm-4.6", "z-ai/glm-4.6"),
+            ("openrouter", "moonshotai/kimi-k3:free", "moonshotai/kimi-k3:free"),
+            # NVIDIA catalog ids arrive already prefixed: kept as they are.
+            ("nvidia", "nvidia/nemotron-3-super-120b-a12b", "nvidia/nemotron-3-super-120b-a12b"),
+            # A bare name gains its provider prefix.
+            ("anthropic", "claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"),
+        ],
+    )
+    def test_it_looks_up_the_canonical_id_without_fetching(
+        self, provider: str, model: str, looked_up: str
+    ) -> None:
+        from persona_runtime.cost import served_model_metadata
+
+        source = _RecordingSource({looked_up: (_META, "catalog")})
+
+        assert served_model_metadata(provider, model, source=source) == _META
+        assert source.calls == [(looked_up, False)]
+
+    def test_a_miss_is_none(self) -> None:
+        from persona_runtime.cost import served_model_metadata
+
+        assert served_model_metadata("acme", "nobody", source=_RecordingSource()) is None

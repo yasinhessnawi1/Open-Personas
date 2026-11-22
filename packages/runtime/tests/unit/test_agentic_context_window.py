@@ -1,17 +1,22 @@
-"""The agentic loop compacts against the served model's real window (R9-314).
+"""The agentic compaction budget: a cost knob, bounded by the served models' window (R9-314).
 
-No production backend exposes ``max_tokens``, so the loop used to assume a 4,096 token
-window for every run and compact once the context passed about 3,300 tokens. On a
-tool-heavy run that is a compaction on most steps, and since R9-299 each one is a
-metered, charged model call. These tests pin the replacement: the window comes from
-the model metadata the runtime already prices with, the threshold is sized from it,
-and the old 4,096 survives only as the last resort, logged once.
+No production backend exposes ``max_tokens``, so the loop compacted every run against a
+4,096 token window. Simply raising that to the real window turned out to cost MORE per
+run: steps on the frontier tier then carry the whole uncompacted context, which outweighs
+the small-tier compactions it saves. So the budget is now ``min(cost budget, window)``:
+
+- the cost budget is a setting whose default (4,096) reproduces today's behaviour, so a
+  default deploy pays exactly what it paid before;
+- the window, read from the metadata the runtime prices with, is a hard upper bound, so
+  a raised budget can never exceed what every model in the chain accepts;
+- a model whose window is unknown pins that bound to the conservative 4,096, with one
+  WARNING per model set that says whether the catalog is cold or the model is missing.
 
 Nothing here reaches a provider: the backends are scripted and the metadata source is
 an in-memory fake.
 """
 
-# ruff: noqa: SLF001 - tests reset the once-only log memory and read the loop's source.
+# ruff: noqa: SLF001 - tests reset the once-only log memory.
 
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ from persona.tools import Toolbox
 from persona_runtime.agentic import context_window
 from persona_runtime.agentic.compactor import StepHistoryCompactor
 from persona_runtime.agentic.context_window import (
+    DEFAULT_COMPACTION_BUDGET_TOKENS,
     FALLBACK_CONTEXT_WINDOW,
     REPLY_RESERVE_TOKENS,
     compaction_budget,
@@ -48,13 +54,19 @@ if TYPE_CHECKING:
 _DUMMY_CFG = BackendConfig(provider="anthropic", model="m", api_key=None)  # type: ignore[arg-type]
 _WIDE = 128_000
 _NARROW = 20_000
+_RAISED = 200_000  # a budget far above any window here: the window must bound it
 
 
 class _FakeWindows:
-    """An in-memory metadata source: model id to context window, nothing else."""
+    """An in-memory metadata source: model id to context window, nothing else.
 
-    def __init__(self, windows: dict[str, int]) -> None:
+    ``catalog_warm`` mirrors the shared chain's report of its OpenRouter index; ``None``
+    means a source with no catalog at all.
+    """
+
+    def __init__(self, windows: dict[str, int], *, catalog_warm: bool | None = None) -> None:
         self._windows = windows
+        self.catalog_warm = catalog_warm
         self.lookups: list[tuple[str, bool]] = []
 
     def resolve_with_source(
@@ -87,12 +99,10 @@ class _BrokenSource:
 
 @pytest.fixture(autouse=True)
 def _fresh_log_memory() -> Iterator[None]:
-    """The fallback logs once per process; each test starts from a clean memory."""
-    context_window._warned_unknown.clear()
-    context_window._warned_failed.clear()
+    """The warnings log once per process; each test starts from a clean memory."""
+    context_window._reset_warnings()
     yield
-    context_window._warned_unknown.clear()
-    context_window._warned_failed.clear()
+    context_window._reset_warnings()
 
 
 @pytest.fixture
@@ -110,6 +120,13 @@ def _backend(
     provider: str, model: str, script: list[ChatResponse] | None = None
 ) -> ScriptedBackend:
     return ScriptedBackend([], provider_name=provider, model_name=model, chat_script=script)
+
+
+def _chain(*models: str) -> MultiModelChatBackend:
+    return MultiModelChatBackend(
+        [_backend("acme", m) for m in models],  # type: ignore[list-item]
+        max_retries_per_backend=0,
+    )
 
 
 def _threshold(budget: int) -> int:
@@ -141,16 +158,32 @@ def _rendered_tokens(context: list[ConversationMessage]) -> int:
     return count_tokens("\n".join(f"{m.role}: {m.content}" for m in context))
 
 
+def _fallback_lines(seen: list[str]) -> list[str]:
+    return [line for line in seen if "context window" in line]
+
+
 # ----- the budget itself ----------------------------------------------------
 
 
-def test_a_known_window_sizes_the_budget_and_3300_tokens_no_longer_compacts() -> None:
+def test_the_default_budget_is_todays_4096() -> None:
+    assert DEFAULT_COMPACTION_BUDGET_TOKENS == FALLBACK_CONTEXT_WINDOW == 4096
+
+
+def test_by_default_a_known_wide_window_still_compacts_at_todays_threshold() -> None:
+    """Cost neutrality: the default budget, not the 128k window, is what binds."""
     source = _FakeWindows({"acme/wide-model": _WIDE})
     step = _backend("acme", "wide-model")
 
-    budget = compaction_budget(step, None, source=source)
+    assert compaction_budget(step, step, source=source) == 4096
 
-    assert budget == _WIDE - REPLY_RESERVE_TOKENS
+
+def test_a_raised_budget_sizes_the_threshold_below_the_window() -> None:
+    source = _FakeWindows({"acme/wide-model": _WIDE})
+    step = _backend("acme", "wide-model")
+
+    budget = compaction_budget(step, step, source=source, cost_budget=50_000)
+
+    assert budget == 50_000
     compactor = StepHistoryCompactor()
     context = _context_of(3_400)
     assert _rendered_tokens(context) > _threshold(FALLBACK_CONTEXT_WINDOW)  # the old trigger
@@ -159,68 +192,135 @@ def test_a_known_window_sizes_the_budget_and_3300_tokens_no_longer_compacts() ->
     assert source.lookups == [("acme/wide-model", False)]
 
 
-def test_a_chain_is_sized_by_its_smallest_member() -> None:
+def test_the_window_bounds_a_raised_budget() -> None:
+    source = _FakeWindows({"acme/wide-model": _WIDE})
+    step = _backend("acme", "wide-model")
+
+    budget = compaction_budget(step, step, source=source, cost_budget=_RAISED)
+
+    assert budget == _WIDE - REPLY_RESERVE_TOKENS
+
+
+def test_a_chain_is_bounded_by_its_smallest_member() -> None:
     """The next step can land on any member of the chain, so the context must fit them all."""
     source = _FakeWindows({"acme/wide-model": _WIDE, "acme/narrow-model": _NARROW})
-    chain = MultiModelChatBackend(
-        [_backend("acme", "wide-model"), _backend("acme", "narrow-model")],  # type: ignore[list-item]
-        max_retries_per_backend=0,
-    )
+    chain = _chain("wide-model", "narrow-model")
 
-    assert compaction_budget(chain, None, source=source) == _NARROW - REPLY_RESERVE_TOKENS
+    budget = compaction_budget(chain, chain, source=source, cost_budget=_RAISED)
+
+    assert budget == _NARROW - REPLY_RESERVE_TOKENS
 
 
-def test_the_summariser_window_caps_the_budget() -> None:
+def test_the_summariser_window_bounds_the_budget() -> None:
     """A compaction hands the middle of the context to the background tier, so a context
     that outgrew the summariser's window could not be compacted at all."""
     source = _FakeWindows({"acme/wide-model": _WIDE, "acme/small-model": _NARROW})
 
     budget = compaction_budget(
-        _backend("acme", "wide-model"), _backend("acme", "small-model"), source=source
+        _backend("acme", "wide-model"),
+        _backend("acme", "small-model"),
+        source=source,
+        cost_budget=_RAISED,
     )
 
     assert budget == _NARROW - REPLY_RESERVE_TOKENS
 
 
-def test_an_unknown_member_does_not_hide_the_known_ones() -> None:
+def test_an_unknown_member_pins_the_window_bound_to_the_fallback(
+    warnings_seen: list[str],
+) -> None:
+    """An unknown fallback could be the small one, so a raised budget cannot be trusted."""
     source = _FakeWindows({"acme/wide-model": _WIDE})
-    chain = MultiModelChatBackend(
-        [_backend("acme", "wide-model"), _backend("acme", "mystery-model")],  # type: ignore[list-item]
-        max_retries_per_backend=0,
+    chain = _chain("wide-model", "mystery-model")
+
+    first = compaction_budget(chain, chain, source=source, cost_budget=_RAISED)
+    second = compaction_budget(chain, chain, source=source, cost_budget=_RAISED)
+
+    assert first == second == FALLBACK_CONTEXT_WINDOW
+    (line,) = _fallback_lines(warnings_seen)  # once per model set
+    assert "acme/mystery-model" in line
+    assert "not in any metadata table" in line
+
+
+def test_an_unknown_summariser_pins_the_window_bound_too(warnings_seen: list[str]) -> None:
+    source = _FakeWindows({"acme/wide-model": _WIDE})
+
+    budget = compaction_budget(
+        _backend("acme", "wide-model"),
+        _backend("acme", "mystery-small"),
+        source=source,
+        cost_budget=_RAISED,
     )
 
-    assert compaction_budget(chain, None, source=source) == _WIDE - REPLY_RESERVE_TOKENS
+    assert budget == FALLBACK_CONTEXT_WINDOW
+    assert any("acme/mystery-small" in line for line in _fallback_lines(warnings_seen))
 
 
-def test_an_unknown_window_falls_back_to_4096_and_logs_once(warnings_seen: list[str]) -> None:
-    source = _FakeWindows({})
-    step = _backend("acme", "mystery-model")
+def test_an_unresolvable_summariser_is_an_unknown_window() -> None:
+    source = _FakeWindows({"acme/wide-model": _WIDE})
 
-    first = compaction_budget(step, None, source=source)
-    second = compaction_budget(step, None, source=source)
+    budget = compaction_budget(
+        _backend("acme", "wide-model"), None, source=source, cost_budget=_RAISED
+    )
 
-    assert first == second == FALLBACK_CONTEXT_WINDOW == 4096
-    fallback_lines = [line for line in warnings_seen if "context window" in line]
-    assert len(fallback_lines) == 1, warnings_seen
-    assert "mystery-model" in fallback_lines[0]
+    assert budget == FALLBACK_CONTEXT_WINDOW
+
+
+def test_a_cold_catalog_is_named_as_the_reason(warnings_seen: list[str]) -> None:
+    """While the OpenRouter index is cold, a miss says so: the operator waits, not edits."""
+    source = _FakeWindows({}, catalog_warm=False)
+    step = _backend("openrouter", "moonshotai/kimi-k3")
+
+    assert compaction_budget(step, step, source=source, cost_budget=_RAISED) == 4096
+
+    (line,) = _fallback_lines(warnings_seen)
+    assert "catalog not warm yet" in line
+    assert "moonshotai/kimi-k3" in line
+
+
+def test_the_same_miss_logs_again_once_the_catalog_is_warm(warnings_seen: list[str]) -> None:
+    source = _FakeWindows({}, catalog_warm=False)
+    step = _backend("openrouter", "moonshotai/kimi-k3")
+    compaction_budget(step, step, source=source)
+    source.catalog_warm = True
+    compaction_budget(step, step, source=source)
+    compaction_budget(step, step, source=source)
+
+    lines = _fallback_lines(warnings_seen)
+    assert len(lines) == 2, lines
+    assert "catalog not warm yet" in lines[0]
+    assert "not in any metadata table" in lines[1]
 
 
 def test_a_failing_source_falls_back_instead_of_failing_the_run(
     warnings_seen: list[str],
 ) -> None:
-    budget = compaction_budget(_backend("acme", "wide-model"), None, source=_BrokenSource())
+    step = _backend("acme", "wide-model")
+
+    budget = compaction_budget(step, step, source=_BrokenSource(), cost_budget=_RAISED)
+    compaction_budget(step, step, source=_BrokenSource(), cost_budget=_RAISED)
 
     assert budget == FALLBACK_CONTEXT_WINDOW
-    assert any("context window" in line for line in warnings_seen), warnings_seen
+    lookup_lines = [line for line in warnings_seen if "lookup failed" in line]
+    assert len(lookup_lines) == 1, warnings_seen
 
 
-def test_an_explicit_backend_max_tokens_still_wins() -> None:
-    """A backend that states its own window is believed over the tables, unchanged."""
+def test_an_explicit_backend_max_tokens_is_the_budget_as_before() -> None:
+    """A backend that states its own window is believed over the tables and the knob,
+    exactly as before R9-314 (budget = ``max_tokens``)."""
     source = _FakeWindows({"acme/wide-model": _WIDE})
     step = _backend("acme", "wide-model")
     step.max_tokens = 30  # type: ignore[attr-defined]
 
-    assert compaction_budget(step, None, source=source) == 30
+    assert compaction_budget(step, step, source=source) == 30
+    step.max_tokens = 60_000  # type: ignore[attr-defined]
+    assert compaction_budget(step, step, source=source) == 60_000
+
+
+def test_a_budget_that_is_not_positive_is_refused() -> None:
+    step = _backend("acme", "wide-model")
+    with pytest.raises(ValueError, match="compaction budget"):
+        compaction_budget(step, step, cost_budget=0)
 
 
 def test_without_a_source_the_static_tables_answer() -> None:
@@ -228,7 +328,9 @@ def test_without_a_source_the_static_tables_answer() -> None:
     from persona.backends.metadata import STATIC_MODEL_METADATA
 
     expected = STATIC_MODEL_METADATA["anthropic/claude-sonnet-4-6"].context_length
-    budget = compaction_budget(_backend("anthropic", "claude-sonnet-4-6"), None)
+    step = _backend("anthropic", "claude-sonnet-4-6")
+
+    budget = compaction_budget(step, step, cost_budget=10_000_000)
 
     assert budget == expected - REPLY_RESERVE_TOKENS
 
@@ -253,9 +355,10 @@ def _reasoning_then_final(steps: int, tokens_per_step: int) -> list[ChatResponse
 
 def _loop(
     step: ScriptedBackend,
-    summariser: ScriptedBackend,
+    summariser: object,
     *,
     source: _FakeWindows | None,
+    budget: int | None = None,
 ) -> AgenticLoop:
     registry = TierRegistry(
         {
@@ -268,6 +371,7 @@ def _loop(
     stores: dict[str, FakeStore] = {
         kind: FakeStore() for kind in ("identity", "self_facts", "worldview", "episodic")
     }
+    extra = {} if budget is None else {"compaction_budget_tokens": budget}
     return AgenticLoop(
         persona=Persona(
             persona_id="astrid",
@@ -281,62 +385,107 @@ def _loop(
         router=Router(),
         tier_registry=registry,
         metadata_source=source,
+        **extra,  # type: ignore[arg-type]
     )
 
 
-@pytest.mark.asyncio
-async def test_a_run_on_a_128k_model_does_not_compact_past_3300_tokens() -> None:
-    script = _reasoning_then_final(steps=4, tokens_per_step=1_500)
-    step = _backend("acme", "wide-model", script)
+async def _sizes_and_compactions(
+    model: str, source: _FakeWindows, *, budget: int | None = None, steps: int = 6
+) -> tuple[list[int], int]:
+    script = _reasoning_then_final(steps=steps, tokens_per_step=1_500)
+    step = _backend("acme", model, script)
     summariser = _backend("acme", "small-model")
+    run = await _loop(step, summariser, source=source, budget=budget).run("research it")
+    assert run.status is RunStatus.COMPLETED
+    return [_rendered_tokens(c) for c in step.chat_contexts], summariser.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_with_the_default_budget_a_128k_run_compacts_exactly_as_today() -> None:
+    """The regression guard that the default is cost-neutral: a known 128k window and
+    the default budget produce the same step contexts and the same compactions as the
+    old 4,096 assumption (an unknown model)."""
+    wide = _FakeWindows({"acme/wide-model": _WIDE, "acme/small-model": _WIDE})
+    today = _FakeWindows({})
+
+    known = await _sizes_and_compactions("wide-model", wide)
+    unknown = await _sizes_and_compactions("mystery-model", today)
+
+    assert known == unknown
+    assert known[1] >= 1, "never compacted; this guard measures nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_raised_budget_compacts_near_the_budget() -> None:
     source = _FakeWindows({"acme/wide-model": _WIDE, "acme/small-model": _WIDE})
+    budget = 9_000
 
-    run = await _loop(step, summariser, source=source).run("research it")
+    sizes, compactions = await _sizes_and_compactions("wide-model", source, budget=budget, steps=10)
+    _today_sizes, today_compactions = await _sizes_and_compactions("wide-model", source, steps=10)
 
-    assert run.status is RunStatus.COMPLETED
-    biggest = max(_rendered_tokens(c) for c in step.chat_contexts)
-    assert biggest > _threshold(FALLBACK_CONTEXT_WINDOW), "never passed 3,300; measures nothing"
-    assert summariser.chat_calls == 0  # no compaction, so no charge for one
-
-
-@pytest.mark.asyncio
-async def test_the_same_run_on_an_unknown_model_keeps_the_old_behaviour() -> None:
-    """The control for the test above: the last resort is today's 4,096 window."""
-    script = _reasoning_then_final(steps=4, tokens_per_step=1_500)
-    step = _backend("acme", "mystery-model", script)
-    summariser = _backend("acme", "small-model")
-
-    run = await _loop(step, summariser, source=_FakeWindows({})).run("research it")
-
-    assert run.status is RunStatus.COMPLETED
-    assert summariser.chat_calls >= 1
+    assert compactions >= 1, "never compacted; the budget was not reached"
+    assert compactions < today_compactions  # the knob is what the owner trades cost for
+    assert max(sizes) > _threshold(FALLBACK_CONTEXT_WINDOW) + 2_000  # grew past today
+    assert max(sizes) <= _threshold(budget) + 1_600, sizes  # caught within one step
 
 
 @pytest.mark.asyncio
-async def test_a_run_compacts_near_the_sized_threshold() -> None:
-    script = _reasoning_then_final(steps=8, tokens_per_step=2_500)
-    step = _backend("acme", "narrow-model", script)
-    summariser = _backend("acme", "small-model")
-    source = _FakeWindows({"acme/narrow-model": _NARROW, "acme/small-model": _WIDE})
-    threshold = _threshold(_NARROW - REPLY_RESERVE_TOKENS)
+async def test_a_raised_budget_is_bounded_by_the_window_in_a_run() -> None:
+    source = _FakeWindows({"acme/narrow-model": 8_000, "acme/small-model": _WIDE})
+    bound = _threshold(8_000 - REPLY_RESERVE_TOKENS)
 
-    run = await _loop(step, summariser, source=source).run("research it")
+    sizes, compactions = await _sizes_and_compactions(
+        "narrow-model", source, budget=_RAISED, steps=8
+    )
 
-    assert run.status is RunStatus.COMPLETED
-    assert summariser.chat_calls >= 1, "never compacted; the threshold was not reached"
-    sizes = [_rendered_tokens(c) for c in step.chat_contexts]
-    # Compaction let the context grow well past the old 3,300 trigger...
-    assert max(sizes) > 3 * _threshold(FALLBACK_CONTEXT_WINDOW)
-    # ...and caught it within one step of the sized threshold.
-    assert max(sizes) <= threshold + 2_600, (threshold, sizes)
+    assert compactions >= 1
+    assert max(sizes) <= bound + 1_600, (bound, sizes)
+
+
+@pytest.mark.asyncio
+async def test_a_raised_budget_with_an_unknown_model_keeps_todays_behaviour() -> None:
+    source = _FakeWindows({"acme/small-model": _WIDE})
+
+    raised = await _sizes_and_compactions("mystery-model", source, budget=_RAISED)
+    default = await _sizes_and_compactions("mystery-model", source)
+
+    assert raised == default
+
+
+class _RaisingRegistryCache(dict[str, object]):
+    """A tier cache whose background tier blows up when read."""
+
+    def __getitem__(self, key: str) -> object:
+        if key == "small":
+            raise RuntimeError("background tier exploded")
+        return super().__getitem__(key)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_background_tier_never_fails_the_run(warnings_seen: list[str]) -> None:
+    """The budget's read of the background tier is best-effort. The run stays small, so
+    no compaction (which needs that tier for real) is ever attempted."""
+    for _ in range(2):
+        script = _reasoning_then_final(steps=4, tokens_per_step=300)
+        step = _backend("acme", "wide-model", script)
+        loop = _loop(
+            step,
+            _backend("acme", "small-model"),
+            source=_FakeWindows({"acme/wide-model": _WIDE}),
+            budget=_RAISED,
+        )
+        loop._tiers._cache = _RaisingRegistryCache(loop._tiers._cache)  # type: ignore[assignment]
+        # The step tier is cached under "frontier"; only the summariser lookup fails.
+        run = await loop.run("research it")
+        assert run.status is RunStatus.COMPLETED, run.error
+
+    lines = [line for line in warnings_seen if "background tier" in line]
+    assert len(lines) == 1, warnings_seen
 
 
 @pytest.mark.asyncio
 async def test_the_fallback_logs_once_across_runs(warnings_seen: list[str]) -> None:
     for _ in range(2):
-        script = _reasoning_then_final(steps=4, tokens_per_step=1_500)
-        step = _backend("acme", "mystery-model", script)
-        await _loop(step, _backend("acme", "mystery-model"), source=_FakeWindows({})).run("go")
+        await _sizes_and_compactions("mystery-model", _FakeWindows({}), steps=4)
 
-    fallback_lines = [line for line in warnings_seen if "context window" in line]
-    assert len(fallback_lines) == 1, warnings_seen
+    assert len(_fallback_lines(warnings_seen)) == 1, warnings_seen
