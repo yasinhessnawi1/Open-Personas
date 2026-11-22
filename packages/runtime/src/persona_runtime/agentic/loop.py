@@ -70,6 +70,11 @@ from persona.tools import format_tool_result
 
 from persona_runtime.agentic.call_ledger import CallLedger
 from persona_runtime.agentic.compactor import StepHistoryCompactor
+from persona_runtime.agentic.context_window import (
+    DEFAULT_COMPACTION_BUDGET_TOKENS,
+    compaction_budget,
+    warn_summariser_unavailable,
+)
 from persona_runtime.agentic.events import RunEvent
 from persona_runtime.agentic.pruner import PROTECTED_STEPS, ToolResultPruner
 from persona_runtime.agentic.run import CancelToken, Run, RunStatus, StepUsage, UsageCall
@@ -102,6 +107,7 @@ if TYPE_CHECKING:
     from persona.stores.protocol import MemoryStore
     from persona.tools import Toolbox
 
+    from persona_runtime.cost import CostSource
     from persona_runtime.crisis_encoder import CrisisScorer
     from persona_runtime.prompt import PromptBuilder
 
@@ -184,12 +190,6 @@ def _with_note(step: Step, note: StepNote) -> Step:
     return _with_notes(step, [note])
 
 
-def _backend_max_tokens(backend: ChatBackend) -> int:
-    """Best-effort context budget (mirrors the conversation loop's helper)."""
-    value = getattr(backend, "max_tokens", None)
-    return value if isinstance(value, int) and value > 0 else _DEFAULT_MAX_TOKENS
-
-
 def _failed_tries(response: ChatResponse) -> tuple[BackendAttempt, ...]:
     """The call's failed tries that reported tokens: the pricer charges them (D-ORCH-11-18-s)."""
     served = response.served
@@ -257,6 +257,8 @@ class AgenticLoop:
         audit_logger: AuditLogger | None = None,
         crisis_encoder: CrisisScorer | None = None,
         park_on_question: bool = False,
+        metadata_source: CostSource | None = None,
+        compaction_budget_tokens: int = DEFAULT_COMPACTION_BUDGET_TOKENS,
     ) -> None:
         # Spec W1 (D-W1-34): what to do when the model asks and there is nobody here to
         # answer. The default is the long-standing behaviour: proceed with best judgment,
@@ -294,6 +296,16 @@ class AgenticLoop:
         self._router = router  # reserved for chat-style routing; step-tier is _tier_for_step
         self._tiers = tier_registry
         self._compactor = compactor or StepHistoryCompactor()
+        # R9-314: the compactor's budget is min(this cost knob, the window bound). The
+        # knob's default is the 4,096 every run used before, so the default cost is
+        # unchanged; the window bound, read from the same metadata chain the turn pricer
+        # uses (``None``: the zero-network static tables), caps a raised knob at what
+        # every model that may read the context accepts.
+        if compaction_budget_tokens <= 0:
+            msg = f"compaction_budget_tokens must be positive, got {compaction_budget_tokens}"
+            raise ValueError(msg)
+        self._metadata_source = metadata_source
+        self._compaction_budget_tokens = compaction_budget_tokens
         # Spec W1 (D-W1-13): the cost-keyed pruner, alongside and independent of the
         # window-keyed compactor above. The composition root passes one carrying the
         # configured ceiling; the default is the ruled 12,000 tokens.
@@ -901,7 +913,7 @@ class AgenticLoop:
         string. Never ``asyncio.run()`` in a sync callable. The summary is a paid
         call, so its usage goes to the run's meter like a step's (R9-299).
         """
-        budget = _backend_max_tokens(backend)
+        budget = self._compaction_budget(backend)
         if not self._compactor.should_compact(context, budget):
             return context
         middle = self._compactor.middle_to_summarise(context)
@@ -909,6 +921,27 @@ class AgenticLoop:
             return context
         summary = await self._summarise(middle, step=step, on_step_usage=on_step_usage)
         return self._compactor.compact_if_needed(context, budget, summary=summary)
+
+    def _compaction_budget(self, backend: ChatBackend) -> int:
+        """The budget to compact against: the cost knob, bounded by the windows (R9-314).
+
+        A compaction summarises the middle of the context on the background tier, so
+        that tier's window bounds the budget as much as the step tier's does. Reading
+        that tier is best-effort here: whatever it raises is logged once and counts as
+        an unknown window (the conservative bound), never as a failed run.
+        """
+        summariser: ChatBackend | None
+        try:
+            summariser = self._tiers.get(tier_for("background"))
+        except Exception as exc:  # noqa: BLE001 - sizing a budget must never fail a run
+            warn_summariser_unavailable(exc)
+            summariser = None
+        return compaction_budget(
+            backend,
+            summariser,
+            source=self._metadata_source,
+            cost_budget=self._compaction_budget_tokens,
+        )
 
     async def _maybe_prune(
         self,

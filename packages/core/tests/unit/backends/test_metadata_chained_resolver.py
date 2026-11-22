@@ -150,3 +150,55 @@ class TestResolveWithSource:
         hit = resolver.resolve_with_source("long/tail", allow_fetch=True)
         assert hit is not None
         assert catalog.fetch_calls == 1  # the router arm may fetch
+
+
+class _WarmableResolver(_MapResolver):
+    """A catalog-shaped resolver that reports whether its index is built."""
+
+    def __init__(self, *, warm: bool) -> None:
+        super().__init__({})
+        self.warm = warm
+
+
+def test_catalog_warm_reports_the_catalog_links_index_state() -> None:
+    """R9-314: the agentic window's fallback log says whether the catalog is still cold."""
+    cold = _WarmableResolver(warm=False)
+    chain = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=cold)
+    assert chain.catalog_warm is False
+    cold.warm = True
+    assert chain.catalog_warm is True
+
+
+def test_catalog_warm_is_none_without_a_catalog() -> None:
+    chain = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=None)
+    assert chain.catalog_warm is None
+
+
+def test_catalog_warm_is_none_for_a_catalog_that_cannot_say() -> None:
+    chain = ChainedModelMetadataResolver(static=None, openrouter=_MapResolver({}))
+    assert chain.catalog_warm is None
+
+
+class _FailableResolver(_WarmableResolver):
+    """A catalog-shaped resolver that also reports a failed fetch."""
+
+    def __init__(self, *, warm: bool, fetch_failed: bool) -> None:
+        super().__init__(warm=warm)
+        self.fetch_failed = fetch_failed
+
+
+def test_catalog_fetch_failed_reports_the_catalog_links_failure() -> None:
+    failed = _FailableResolver(warm=True, fetch_failed=True)
+    chain = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=failed)
+    assert chain.catalog_fetch_failed is True
+    failed.fetch_failed = False
+    assert chain.catalog_fetch_failed is False
+
+
+def test_catalog_fetch_failed_is_none_without_a_catalog_that_can_say() -> None:
+    assert (
+        ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=None).catalog_fetch_failed
+        is None
+    )
+    cannot_say = ChainedModelMetadataResolver(static=None, openrouter=_WarmableResolver(warm=True))
+    assert cannot_say.catalog_fetch_failed is None

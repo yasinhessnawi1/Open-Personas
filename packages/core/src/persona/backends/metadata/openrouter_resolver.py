@@ -70,6 +70,10 @@ class OpenRouterModelMetadataResolver:
     def __init__(self, client: OpenRouterCatalogClient) -> None:
         self._client = client
         self._index: dict[str, ModelMetadata] | None = None
+        # R9-314: the last index build failed to fetch, so the index is EMPTY rather than
+        # cold. ``warm`` reads True then (the lifespan task relies on that), so this is
+        # what tells "the catalog never arrived" apart from "the model is not in it".
+        self._fetch_failed = False
 
     def resolve(self, model_id: str) -> ModelMetadata | None:
         """Return catalog metadata for ``model_id``, or ``None`` on a miss/failure.
@@ -110,6 +114,16 @@ class OpenRouterModelMetadataResolver:
         """
         return self._index is not None
 
+    @property
+    def fetch_failed(self) -> bool:
+        """Whether the last index build failed to fetch the catalog (R9-314).
+
+        ``True`` means the index is the fail-open EMPTY one: every lookup misses because
+        the catalog is unavailable, not because the model is absent from it. Cleared by
+        the next index build that fetches successfully.
+        """
+        return self._fetch_failed
+
     def reindex(self) -> None:
         """Rebuild the id→metadata index from the client's CURRENT cache (Spec M2, D-M2-6).
 
@@ -140,6 +154,7 @@ class OpenRouterModelMetadataResolver:
                 reason=exc.context.get("reason", ""),
             )
             self._index = {}
+            self._fetch_failed = True
             return self._index
         index: dict[str, ModelMetadata] = {}
         skipped = 0
@@ -175,6 +190,7 @@ class OpenRouterModelMetadataResolver:
                 indexed=len(index),
             )
         self._index = index
+        self._fetch_failed = False
         return self._index
 
     @staticmethod

@@ -56,6 +56,7 @@ from persona.tools import (
     make_text_summarize_tool,
 )
 from persona.tools.mcp.mirror import load_mirror_catalog
+from persona_runtime.agentic.context_window import DEFAULT_COMPACTION_BUDGET_TOKENS
 from persona_runtime.agentic.loop import AgenticLoop
 from persona_runtime.agentic.pruner import DEFAULT_COST_CEILING_TOKENS, ToolResultPruner
 from persona_runtime.errors import TierNotConfiguredError as RegistryTierNotConfiguredError
@@ -2273,8 +2274,15 @@ class RuntimeFactory:
             # Spec W1 (D-W1-34): a leg's user is reachable, just not synchronously.
             park_on_question=park_on_question,
             # Spec W1 (D-W1-13): the cost-keyed tool-result pruner at the configured
-            # ceiling. Setting the env var to 0 gives back the previous behaviour exactly.
+            # ceiling. Setting the env var to 0 turns pruning off. The context is then
+            # bounded by compaction alone, which never exceeds the window bound below.
             pruner=ToolResultPruner(ceiling_tokens=self._context_cost_ceiling()),
+            # R9-314: compaction fires at 80% of min(the configured budget, the window
+            # bound). The budget's default is today's 4,096 (cost-neutral); the window
+            # bound comes from the same metadata chain the turn pricer reads (no fetch on
+            # the run path) and is the conservative 4,096 when any model is unknown.
+            metadata_source=self._metadata_resolver,
+            compaction_budget_tokens=self._compaction_budget_tokens(),
         )
         loop.deferred_input_files = deferred_holder
         return loop
@@ -2316,6 +2324,16 @@ class RuntimeFactory:
         if self._api_config is None:
             return DEFAULT_COST_CEILING_TOKENS
         return self._api_config.agentic_context_cost_ceiling_tokens
+
+    def _compaction_budget_tokens(self) -> int:
+        """The agentic compaction budget, the owner's cost knob (R9-314).
+
+        A factory built without an api config (tests, the CLI) gets the cost-neutral
+        default, the same 4,096 the loop compacted against before.
+        """
+        if self._api_config is None:
+            return DEFAULT_COMPACTION_BUDGET_TOKENS
+        return self._api_config.agentic_compaction_budget_tokens
 
     def build_action_executor(self, persona_id: str) -> ToolboxActionExecutor:
         """The un-gated single-tool executor for approved-action replay (Spec A6, T-seam).

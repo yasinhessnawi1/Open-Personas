@@ -697,6 +697,16 @@ class APIConfig(BaseSettings):
     # step. 0 disables pruning entirely, which is the whole rollback.
     #   PERSONA_API_AGENTIC_CONTEXT_COST_CEILING_TOKENS
     agentic_context_cost_ceiling_tokens: int = 12_000
+    # R9-314: the token budget the agentic step-history compactor fires at 80% of. The
+    # owner's cost knob: a larger budget keeps more of the run verbatim (fidelity) but
+    # every frontier step then carries the larger context, which costs more per run than
+    # the small-tier compactions it saves. The default is the 4,096 every run compacted
+    # against before, so the default per-run cost is unchanged. Whatever it is set to,
+    # the loop caps it at the smallest context window of the models that may read the
+    # context (the conservative 4,096 when any of them is unknown), so a raised budget
+    # can never exceed what the chain accepts. Must be positive.
+    #   PERSONA_API_AGENTIC_COMPACTION_BUDGET_TOKENS
+    agentic_compaction_budget_tokens: int = Field(default=4096, gt=0)
     # Spec W1 (T12): how many earlier legs a task leg's reconstruction carries as its
     # continuity window. Documented in .env.example since A2 under its own name (no
     # PERSONA_API_ prefix) and never read by anything until now, so the alias keeps the
