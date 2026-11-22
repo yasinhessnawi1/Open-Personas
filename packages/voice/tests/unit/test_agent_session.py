@@ -598,6 +598,23 @@ async def test_warm_starts_the_crisis_encoder_warmup_off_loop() -> None:
     assert stub.warmed == 1  # the real boot path invoked warmup()
 
 
+@pytest.mark.asyncio
+async def test_aclose_releases_the_voice_graph_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R9-323: the voice graph query has its own small pool; the launcher closes it
+    with the process's other shared resources, after every call task has ended."""
+    from persona_voice.agent import launcher as launcher_module
+
+    released: list[int] = []
+    monkeypatch.setattr(
+        launcher_module, "shutdown_graph_executor", lambda: released.append(len(released))
+    )
+    launcher = InProcessAgentLauncher(config=_FakeConfig())  # type: ignore[arg-type]
+
+    await launcher.aclose()
+
+    assert released == [0]
+
+
 # ---------- R9-202: the bill follows the conversation, not the session -------
 
 

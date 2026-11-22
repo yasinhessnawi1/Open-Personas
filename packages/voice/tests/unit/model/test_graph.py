@@ -17,7 +17,8 @@ Plus the voice adaptations (D-V13-1, non-gate): the fixed-caller owner scope and
 the voice profile (traversal OFF, ``VOICE_NODE_BUDGET`` node cap).
 
 The ADVERSARIAL guarantees (a bare-wiring variant must FAIL; a misbehaving
-retriever cannot leak; the ContextVar crosses ``asyncio.to_thread`` live; the
+retriever cannot leak; the ContextVar crosses live, through the context copy
+start_graph_retrieval makes at kick-off; the
 real-Postgres subtract-then-lift) are V13-T2's — this task proves the composition
 is wired correctly, on a fake store, at unit speed.
 """

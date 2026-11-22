@@ -21,6 +21,7 @@ import asyncio
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from persona.logging import get_logger
+from persona_runtime.graph_voice import shutdown_graph_executor
 from persona_runtime.tier import free_tier_registry_from_env, tier_registry_from_env
 
 from persona_voice.agent.openrouter_mode import resolve_voice_openrouter_mode
@@ -202,7 +203,8 @@ class InProcessAgentLauncher:
             self._crisis_warmup = start_crisis_encoder_warmup(self._crisis_encoder)
 
     async def aclose(self) -> None:
-        """Cancel any in-flight sessions + dispose the shared tier registry."""
+        """Cancel any in-flight sessions, dispose the shared tier registry, and
+        release the voice graph pool (R9-323) once no call can use it."""
         for task in list(self._tasks):
             task.cancel()
         for task in list(self._tasks):
@@ -211,6 +213,7 @@ class InProcessAgentLauncher:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         self._tasks.clear()
+        shutdown_graph_executor()
         if self._tier_registry is not None:
             await self._tier_registry.aclose()
             self._tier_registry = None

@@ -440,8 +440,10 @@ class VoiceModelReplyProducer:
         # loop cannot service LiveKit heartbeats or the Deepgram/Cartesia WebSocket
         # handshakes, which is the live voice incident's root cause (three outbound
         # connections timing out simultaneously). Both the graph-on and graph-off
-        # paths offload via ``asyncio.to_thread`` (the codebase's canonical
-        # CPU-offload primitive — D-02-17 / graph_voice precedent).
+        # paths offload this read via ``asyncio.to_thread`` (the codebase's canonical
+        # CPU-offload primitive, D-02-17). The graph query is not on this pool: it
+        # runs on its own (R9-323), carrying the context copy start_graph_retrieval
+        # makes at kick-off, so it never queues ahead of this read.
         context = await asyncio.to_thread(
             self._assembler.retrieve, user_message, history_turns=len(history)
         )
