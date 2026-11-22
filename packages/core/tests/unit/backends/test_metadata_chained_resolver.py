@@ -177,3 +177,28 @@ def test_catalog_warm_is_none_without_a_catalog() -> None:
 def test_catalog_warm_is_none_for_a_catalog_that_cannot_say() -> None:
     chain = ChainedModelMetadataResolver(static=None, openrouter=_MapResolver({}))
     assert chain.catalog_warm is None
+
+
+class _FailableResolver(_WarmableResolver):
+    """A catalog-shaped resolver that also reports a failed fetch."""
+
+    def __init__(self, *, warm: bool, fetch_failed: bool) -> None:
+        super().__init__(warm=warm)
+        self.fetch_failed = fetch_failed
+
+
+def test_catalog_fetch_failed_reports_the_catalog_links_failure() -> None:
+    failed = _FailableResolver(warm=True, fetch_failed=True)
+    chain = ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=failed)
+    assert chain.catalog_fetch_failed is True
+    failed.fetch_failed = False
+    assert chain.catalog_fetch_failed is False
+
+
+def test_catalog_fetch_failed_is_none_without_a_catalog_that_can_say() -> None:
+    assert (
+        ChainedModelMetadataResolver(static=_MapResolver({}), openrouter=None).catalog_fetch_failed
+        is None
+    )
+    cannot_say = ChainedModelMetadataResolver(static=None, openrouter=_WarmableResolver(warm=True))
+    assert cannot_say.catalog_fetch_failed is None

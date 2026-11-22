@@ -201,3 +201,35 @@ def log_records() -> Iterator[list[dict[str, Any]]]:
         yield records
     finally:
         _loguru_logger.remove(sink_id)
+
+
+class TestFetchFailedState:
+    """R9-314: a failed fetch leaves an EMPTY index that reads as warm. ``fetch_failed``
+    tells that apart, so a miss is not reported as "not in any metadata table" when the
+    catalog never arrived."""
+
+    def test_a_fresh_resolver_has_not_failed(self) -> None:
+        resolver = OpenRouterModelMetadataResolver(_client())
+        assert resolver.fetch_failed is False
+        assert resolver.warm is False
+
+    def test_a_failed_fetch_is_reported(self) -> None:
+        resolver = OpenRouterModelMetadataResolver(_client(status=500))
+        resolver.reindex()
+        assert resolver.fetch_failed is True
+        assert resolver.warm is True  # unchanged: the index exists, it is just empty
+
+    def test_a_later_good_fetch_clears_the_failure(self) -> None:
+        status = 500
+
+        def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+            return httpx.Response(status, json=_CATALOG)
+
+        client = OpenRouterCatalogClient("sk-or-test", transport=httpx.MockTransport(handler))
+        resolver = OpenRouterModelMetadataResolver(client)
+        resolver.reindex()
+        assert resolver.fetch_failed is True
+        status = 200
+        resolver.refresh()
+        assert resolver.fetch_failed is False
+        assert resolver.resolve_no_fetch("anthropic/claude-3.5-sonnet") is not None

@@ -77,6 +77,16 @@ class ChainedModelMetadataResolver:
         warm = getattr(self._openrouter, "warm", None)
         return warm if isinstance(warm, bool) else None
 
+    @property
+    def catalog_fetch_failed(self) -> bool | None:
+        """Whether the catalog link's last fetch failed: ``None`` when it cannot say.
+
+        A failed fetch leaves an empty index that reads as warm, so this is what lets a
+        caller report "catalog unavailable" rather than "not in any table" (R9-314).
+        """
+        failed = getattr(self._openrouter, "fetch_failed", None)
+        return failed if isinstance(failed, bool) else None
+
     def resolve(self, model_id: str) -> ModelMetadata | None:
         """Return metadata for ``model_id`` (static first, then OpenRouter), or ``None``."""
         if self._static is not None:

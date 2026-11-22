@@ -60,13 +60,20 @@ _RAISED = 200_000  # a budget far above any window here: the window must bound i
 class _FakeWindows:
     """An in-memory metadata source: model id to context window, nothing else.
 
-    ``catalog_warm`` mirrors the shared chain's report of its OpenRouter index; ``None``
-    means a source with no catalog at all.
+    ``catalog_warm`` and ``catalog_fetch_failed`` mirror the shared chain's report of its
+    OpenRouter index; ``None`` means a source with no catalog at all.
     """
 
-    def __init__(self, windows: dict[str, int], *, catalog_warm: bool | None = None) -> None:
+    def __init__(
+        self,
+        windows: dict[str, int],
+        *,
+        catalog_warm: bool | None = None,
+        catalog_fetch_failed: bool | None = None,
+    ) -> None:
         self._windows = windows
         self.catalog_warm = catalog_warm
+        self.catalog_fetch_failed = catalog_fetch_failed
         self.lookups: list[tuple[str, bool]] = []
 
     def resolve_with_source(
@@ -290,6 +297,32 @@ def test_the_same_miss_logs_again_once_the_catalog_is_warm(warnings_seen: list[s
     assert len(lines) == 2, lines
     assert "catalog not warm yet" in lines[0]
     assert "not in any metadata table" in lines[1]
+
+
+def test_a_failed_catalog_fetch_is_named_as_the_reason(warnings_seen: list[str]) -> None:
+    """A failed fetch leaves an empty, "warm" index: the miss is the catalog's, not the
+    tables', so the operator looks at the catalog instead of adding a table row."""
+    source = _FakeWindows({}, catalog_warm=True, catalog_fetch_failed=True)
+    step = _backend("openrouter", "moonshotai/kimi-k3")
+
+    assert compaction_budget(step, step, source=source, cost_budget=_RAISED) == 4096
+
+    (line,) = _fallback_lines(warnings_seen)
+    assert "catalog unavailable" in line
+    assert "not in any metadata table" not in line
+
+
+def test_below_an_8192_window_the_default_compacts_earlier_than_before() -> None:
+    """The one case where the default is not strictly cost-neutral (review LOW-1).
+
+    The reserve is held back from a known window (never below half of it), so a window
+    under 8,192 bounds the default 4,096 budget below 4,096: a 6,000 window compacts
+    against 3,000. That is the safe direction: at the old 4,096 such a model's context
+    could reach its whole window. From 8,192 up, the default is exactly 4,096."""
+    for window, expected in ((6_000, 3_000), (4_096, 2_048), (8_192, 4_096), (8_193, 4_096)):
+        source = _FakeWindows({"acme/small-window": window})
+        step = _backend("acme", "small-window")
+        assert compaction_budget(step, step, source=source) == expected, window
 
 
 def test_a_failing_source_falls_back_instead_of_failing_the_run(

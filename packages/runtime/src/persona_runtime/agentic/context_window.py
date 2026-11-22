@@ -32,7 +32,15 @@ backends may.)
   2. If ANY member's window is unknown, or the background tier cannot be read, the bound
      is the conservative :data:`FALLBACK_CONTEXT_WINDOW`: an unknown fallback may be the
      small one. One WARNING per model set per process, naming whether the catalog is
-     still cold (wait) or the model is in no table (add it).
+     still cold (wait), its fetch failed (check the catalog), or the model is in no
+     table (add it).
+
+**The one case the default is not strictly cost-neutral:** the reserve is held back
+from a known window, never below half of it, so a model whose window is under 8,192
+tokens bounds the default 4,096 budget lower (a 6,000 window compacts against 3,000).
+Such a run compacts somewhat more often than before. That is kept on purpose: it is the
+safe direction, because at the old 4,096 such a model's context could reach its whole
+window. From 8,192 up the default is exactly 4,096.
 
 The pruner (Spec W1, D-W1-13) trims old tool results on cost, separately. With its
 ceiling at 0 (pruning off) the context is still bounded here, by the window bound.
@@ -71,7 +79,7 @@ REPLY_RESERVE_TOKENS: Final[int] = 4096
 #: Stands in for a background tier that could not be read: an unknown window.
 _UNRESOLVED_SUMMARISER: Final[tuple[str, str]] = ("background-tier", "unresolved")
 
-_MissReason = Literal["catalog not warm yet", "not in any metadata table"]
+_MissReason = Literal["catalog not warm yet", "catalog unavailable", "not in any metadata table"]
 
 #: What has been logged, so each condition is reported once per process.
 _warned_unknown: set[tuple[tuple[tuple[str, str], ...], _MissReason]] = set()
@@ -134,12 +142,12 @@ def _window_of(pair: tuple[str, str], source: CostSource | None) -> int | None:
 
 
 def _miss_reason(source: CostSource | None) -> _MissReason:
-    """Why a lookup missed: a cold catalog index, or a model no table carries."""
-    return (
-        "catalog not warm yet"
-        if getattr(source, "catalog_warm", None) is False
-        else "not in any metadata table"
-    )
+    """Why a lookup missed: a failed or cold catalog, or a model no table carries."""
+    if getattr(source, "catalog_fetch_failed", None) is True:
+        return "catalog unavailable"
+    if getattr(source, "catalog_warm", None) is False:
+        return "catalog not warm yet"
+    return "not in any metadata table"
 
 
 def _warn_unknown(unknown: tuple[tuple[str, str], ...], reason: _MissReason) -> None:
