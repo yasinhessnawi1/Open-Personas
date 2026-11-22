@@ -2,13 +2,15 @@
 
 Runs the real create on the legacy community edition (SQLite and Chroma). The identity index
 writes its chunks and then fails, as it did in the R9-292 smoke test. The request answers 500,
-and by then the persona erasure has removed the row, every chunk and every file: the owner's
-list never shows a half-made persona.
+and by then the row is gone: the owner's list never shows a half-made persona. The rest of the
+persona erasure (every chunk and every file) runs in the background (R9-320); each test waits
+for that run before it looks.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator  # noqa: TC003 - a fixture annotation
+from concurrent.futures import Future
 from pathlib import Path  # noqa: TC003 - a fixture annotation
 from typing import Any
 
@@ -21,6 +23,7 @@ from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig
 from persona_api.db.models import personas as personas_t
 from persona_api.middleware.rate_limit import InMemoryRateLimitStore, RateLimiter
+from persona_api.services import erasure_start
 from persona_api.services.erasure_ledger import ErasureLedger, ErasureState, SubjectKind
 from sqlalchemy import select
 
@@ -43,6 +46,22 @@ worldview: []
 def seeded(tmp_path: Path, embedder: object) -> Iterator[Seeded]:
     with legacy_edition(tmp_path, embedder) as legacy:  # type: ignore[arg-type]
         yield legacy
+
+
+@pytest.fixture
+def undo_runs(monkeypatch: pytest.MonkeyPatch) -> list[Future[None]]:
+    """The background runs the route's undos hand off; a test waits on them before it looks."""
+    runs: list[Future[None]] = []
+    real = erasure_start.undo_failed_create
+
+    def _undo(*args: Any, **kwargs: Any) -> Future[None] | None:  # noqa: ANN401
+        run = real(*args, **kwargs)
+        assert run is not None, "no worker here: the erasure runs in the background"
+        runs.append(run)
+        return run
+
+    monkeypatch.setattr(erasure_start, "undo_failed_create", _undo)
+    return runs
 
 
 def _client(seeded: Seeded, embedder: object) -> TestClient:
@@ -82,6 +101,7 @@ def test_a_failing_identity_index_leaves_no_persona(
     seeded: Seeded,
     embedder: object,
     monkeypatch: pytest.MonkeyPatch,
+    undo_runs: list[Future[None]],
 ) -> None:
     real_load = PersonaRegistry.load_persona
     created: list[str] = []
@@ -103,6 +123,8 @@ def test_a_failing_identity_index_leaves_no_persona(
     assert len(created) == 1
     pid = created[0]
     assert _owned(seeded) == before, "no persona row"
+    (run,) = undo_runs
+    run.result(timeout=60)
     chunks = sum(len(seeded.memory.get_all(persona_id=pid, store_kind=k)) for k in PERSONA_KINDS)
     assert chunks == 0, "no memory chunk"
     assert not (seeded.workspace_root / OWNER / pid).exists(), "no workspace folder"
@@ -129,6 +151,7 @@ def test_an_undo_whose_erasure_fails_still_answers_500_and_leaves_it_to_the_swee
     seeded: Seeded,
     embedder: object,
     monkeypatch: pytest.MonkeyPatch,
+    undo_runs: list[Future[None]],
 ) -> None:
     """Review LOW-5: a later erasure step raises. The create still answers 500; the row is
     gone (the route's half of the erasure ran), and the ledger is left failed for the sweep."""
@@ -164,6 +187,8 @@ def test_an_undo_whose_erasure_fails_still_answers_500_and_leaves_it_to_the_swee
     assert resp.status_code == 500
     pid = created[0]
     assert _owned(seeded) == before, "the row is gone"
+    (run,) = undo_runs
+    run.result(timeout=60)
     erasure = ErasureLedger(seeded.engine).get(SubjectKind.PERSONA, pid)
     assert erasure is not None
     assert erasure.state is ErasureState.FAILED, "left for the sweep to finish"

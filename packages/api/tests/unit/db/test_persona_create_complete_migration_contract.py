@@ -50,8 +50,10 @@ def test_069_fails_fast_on_a_busy_personas_table() -> None:
 
 
 def test_069_downgrade_deletes_unfinished_creates_before_the_column_goes() -> None:
-    """Round 3, Finding 8: older code would list a half-made persona, so it goes first."""
+    """Round 3, Finding 8: older code would list a half-made persona, so it goes first. The
+    steps, and the erasure each deleted create gets (R9-322), are in
+    test_069_downgrade_erasures.py."""
     import inspect  # noqa: PLC0415
 
     body = inspect.getsource(_migration().downgrade)
-    assert body.index("DELETE FROM {_TABLE} WHERE NOT {_COLUMN}") < body.index("drop_column")
+    assert body.index("erase_unfinished_creates(") < body.index("drop_column")

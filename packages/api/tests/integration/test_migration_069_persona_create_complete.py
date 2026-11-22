@@ -5,7 +5,8 @@ no-op there and CI never ran its ``ADD COLUMN`` (Finding 6). Here the schema goe
 to ``068`` (the column dropped), takes a persona written by pre-069 code, and comes up again:
 the real upgrade runs, and that persona is complete, so every owner-facing read still sees it.
 The downgrade deletes unfinished creates before the column goes (Finding 8), so older code never
-lists a half-made persona.
+lists a half-made persona, and opens a persona erasure for each first (R9-322), so what no
+cascade reaches (graph nodes, workspace files) is erased by the sweep.
 
 Each test resets the schema at start and end so the shared integration DB is left clean.
 """
@@ -30,6 +31,7 @@ pytestmark = pytest.mark.integration
 _API_DIR = Path(__file__).resolve().parents[2]  # packages/api
 _BEFORE = "068_forgotten_conversations"
 _OWNER = "u_069"
+_HALF_MINTED = "persona_" + "4" * 32
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -102,7 +104,7 @@ def test_069_downgrade_deletes_unfinished_creates_and_keeps_the_rest(clean_db: s
             conn.execute(
                 text("INSERT INTO users (id, email) VALUES (:u, 'u069@x.test')"), {"u": _OWNER}
             )
-            for pid, complete in (("p_done", True), ("p_half", False)):
+            for pid, complete in (("p_done", True), ("p_half", False), (_HALF_MINTED, False)):
                 conn.execute(
                     text(
                         "INSERT INTO personas (id, owner_id, yaml, create_complete) "
@@ -118,6 +120,25 @@ def test_069_downgrade_deletes_unfinished_creates_and_keeps_the_rest(clean_db: s
                     text("SELECT id FROM personas WHERE owner_id = :u"), {"u": _OWNER}
                 )
             )
+            opened = conn.execute(
+                text(
+                    "SELECT subject_id, owner_id, state, captured FROM erasures "
+                    "WHERE subject_kind = 'persona' ORDER BY subject_id"
+                )
+            ).all()
     finally:
         engine.dispose()
     assert left == ["p_done"], "older code never sees the half-made persona"
+    # p_half is not a minted id, which no erasure acts on; p_done is kept.
+    assert [tuple(r)[:3] for r in opened] == [(_HALF_MINTED, _OWNER, "pending")], (
+        "the half-made persona's erasure is open for the sweep"
+    )
+    # What capture_persona captures, every key of it (PR #56 review LOW-1); nothing hangs off
+    # this persona, so each list is empty.
+    assert opened[0].captured == {
+        "conversations": [],
+        "tasks": [],
+        "runs": [],
+        "schedules": [],
+        "event_triggers": [],
+    }

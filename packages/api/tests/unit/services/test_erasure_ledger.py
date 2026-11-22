@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from _erase_seed import SeedTemplates
@@ -343,3 +344,87 @@ def test_nothing_is_added_to_a_finished_erasure(ledger: ErasureLedger) -> None:
 
     with pytest.raises(ErasureRecordError):
         ledger.add_captured(erasure_id, "conversations", ["c9"])
+
+
+def _stale_first_read(monkeypatch: pytest.MonkeyPatch, subject_id: str) -> None:
+    """The claim's first read of ``subject_id`` sees no open erasure: another claim committed
+    between that read and the insert."""
+    from persona_api.services import erasure_ledger  # noqa: PLC0415
+
+    real = erasure_ledger._get_on  # noqa: SLF001
+    stale = [True]
+
+    def _get_on(conn: Any, kind: SubjectKind, subject: str) -> Any:  # noqa: ANN401
+        if subject == subject_id and stale[0]:
+            stale[0] = False
+            return None
+        return real(conn, kind, subject)
+
+    monkeypatch.setattr(erasure_ledger, "_get_on", _get_on)
+
+
+_FIRST_WRITE = "persona_written_first"
+
+
+def _write_first(conn: Any) -> None:  # noqa: ANN401 - a Connection
+    """The caller's own write, before the claim, as claim_abandoned_create deletes the row first.
+
+    On pysqlite a savepoint that is the transaction's first write starts the transaction and its
+    RELEASE commits it, so a claim alone would prove nothing about the caller's transaction.
+    """
+    conn.execute(
+        insert(erasures_t).values(
+            id="erasure_written_first",
+            owner_id=_OWNER,
+            subject_kind=SubjectKind.PERSONA.value,
+            subject_id=_FIRST_WRITE,
+        )
+    )
+
+
+def _race_in(ledger: ErasureLedger, conn: Any) -> Any:  # noqa: ANN401
+    return ledger.claim_in(
+        conn,
+        owner_id=_OWNER,
+        subject_kind=SubjectKind.PERSONA,
+        subject_id=_PERSONA,
+        captured={"conversations": ["c9"]},
+    )
+
+
+def test_a_claim_in_that_loses_the_race_is_the_open_erasure_and_keeps_its_transaction(
+    ledger: ErasureLedger, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-322: the insert fails on the open-subject index; the claim returns the erasure that
+    won, as :meth:`ErasureLedger.claim` does, and the caller's transaction carries on."""
+    first = _claim(ledger)
+    _stale_first_read(monkeypatch, _PERSONA)
+
+    with engine.begin() as conn:
+        _write_first(conn)
+        raced = _race_in(ledger, conn)
+
+    assert raced.id == first, "the erasure that won"
+    assert raced.captured == _CAPTURED, "with what it captured first"
+    written = ledger.get(SubjectKind.PERSONA, _FIRST_WRITE)
+    assert written is not None, "the caller's write before the claim committed with it"
+    assert [e.id for e in ledger.unfinished() if e.subject_id == _PERSONA] == [first]
+
+
+def test_a_claim_in_that_loses_the_race_rolls_back_with_its_caller(
+    ledger: ErasureLedger, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The savepoint commits nothing on its own: when the caller rolls back, its write before the
+    claim goes too, and the race leaves the ledger as it was."""
+    first = _claim(ledger)
+    _stale_first_read(monkeypatch, _PERSONA)
+
+    with engine.connect() as conn:
+        transaction = conn.begin()
+        _write_first(conn)
+        raced = _race_in(ledger, conn)
+        transaction.rollback()
+
+    assert raced.id == first
+    assert ledger.get(SubjectKind.PERSONA, _FIRST_WRITE) is None, "rolled back with the caller"
+    assert [e.id for e in ledger.unfinished() if e.subject_id == _PERSONA] == [first]
