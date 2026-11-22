@@ -264,6 +264,12 @@ class ErasureLedger:
         subject committed between the read and the insert fails the insert on the open-subject
         index (R9-322). The insert runs in a savepoint, so only it rolls back: that claim is
         this erasure, as in :meth:`claim`, and the caller's transaction carries on.
+
+        On SQLite the caller must write in its transaction before calling this. pysqlite opens
+        a transaction only for a data write, so a savepoint that is the transaction's first
+        write opens the transaction itself, and its RELEASE commits the claim at once, however
+        the caller's transaction then ends (PR #56 review LOW-3). ``claim_abandoned_create``
+        deletes the row first. Postgres is unaffected.
         """
         clean = _require_captured(captured)
         existing = _get_on(conn, subject_kind, subject_id)
