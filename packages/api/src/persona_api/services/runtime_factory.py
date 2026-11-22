@@ -2275,6 +2275,10 @@ class RuntimeFactory:
             # Spec W1 (D-W1-13): the cost-keyed tool-result pruner at the configured
             # ceiling. Setting the env var to 0 gives back the previous behaviour exactly.
             pruner=ToolResultPruner(ceiling_tokens=self._context_cost_ceiling()),
+            # R9-314: compaction is sized from the served models' real context windows,
+            # read from the same metadata chain the turn pricer uses (no fetch on the run
+            # path), instead of the 4,096 token default no production backend overrides.
+            metadata_source=self._metadata_resolver,
         )
         loop.deferred_input_files = deferred_holder
         return loop

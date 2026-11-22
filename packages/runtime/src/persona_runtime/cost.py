@@ -50,6 +50,7 @@ __all__ = [
     "compute_turn_cost",
     "least_certain_basis",
     "price_rounds",
+    "served_model_metadata",
 ]
 
 _logger = get_logger("runtime.cost")
@@ -118,6 +119,26 @@ def _canonical_model_id(provider: str, model: str) -> str:
         return model
     prefix = f"{provider}/"
     return model if model.startswith(prefix) else f"{prefix}{model}"
+
+
+def served_model_metadata(
+    provider: str, model: str, *, source: CostSource | None = None
+) -> ModelMetadata | None:
+    """The metadata of a served ``(provider, model)``, looked up as the pricer does it.
+
+    Same canonical id, same chain, same no-fetch guarantee as :func:`compute_turn_cost`,
+    so every reader of a model's metadata (the agentic compaction window, R9-314) agrees
+    with the price it is charged at. ``None`` is an honest miss; the caller decides what
+    a miss means for it.
+
+    Args:
+        provider: The backend's provider name.
+        model: The backend's model name, in the provider's own shape.
+        source: The resolver chain, or ``None`` for the zero-network static default.
+    """
+    chain = source if source is not None else _default_source()
+    hit = chain.resolve_with_source(_canonical_model_id(provider, model), allow_fetch=False)
+    return None if hit is None else hit[0]
 
 
 def compute_turn_cost(
