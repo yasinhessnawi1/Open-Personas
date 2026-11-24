@@ -12,7 +12,8 @@ out of the graph, by the persona erasure's rules with the conversation as the so
   mirrors, entity links and name (R9-287's give-back, the same functions the Memory page's
   forget uses);
 - a fact another conversation (or the user, or any other source) also supports loses only this
-  conversation's entries; the SELF node keeps dated stubs;
+  conversation's entries; the SELF node keeps dated stubs. Its wording stays as it is, so it
+  may still include words this conversation added (merging appends them, unattributed; R9-311);
 - version snapshots get the same treatment, an edge this conversation asserted goes with its
   mirrors, and an entity it established goes when nothing links to it, else loses the citation.
 
@@ -78,8 +79,10 @@ class ConversationGraphPreview:
     """What forgetting a conversation's memory would do to the facts the user sees in Memory.
 
     ``facts_removed``: facts only this conversation supports. ``facts_kept``: facts another
-    source also supports, which stay without this conversation as a source. Merged duplicates
-    (hidden behind their canonical) and the user's SELF node are not counted.
+    source also supports, which stay without this conversation as a source. Only its entries
+    go: a kept fact's wording may still include words from this conversation, which merging
+    appended and nothing attributes to it (R9-311). Merged duplicates (hidden behind their
+    canonical) and the user's SELF node are not counted.
     """
 
     facts_removed: int

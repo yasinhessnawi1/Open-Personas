@@ -314,12 +314,23 @@ class ConversationForgetPreview(_Output):
 
     ``facts_removed``: facts only this conversation supports, which the delete removes.
     ``facts_kept``: facts another source also supports, which stay without this conversation as
-    a source. Counts only, for the delete dialog; merged duplicates and the user's own node are
-    not counted. Both are 0 where there is no graph.
+    a source; their wording may still include words from this conversation (R9-311). Counts
+    only, for the delete dialog; merged duplicates and the user's own node are not counted.
+    Both are 0 where there is no graph.
     """
 
-    facts_removed: int = Field(ge=0)
-    facts_kept: int = Field(ge=0)
+    facts_removed: int = Field(
+        ge=0, description="Facts only this conversation supports. The delete removes them."
+    )
+    facts_kept: int = Field(
+        ge=0,
+        description=(
+            "Facts that stay because something else in Memory also supports them. This "
+            "conversation is no longer a source, but a kept fact's wording may still include "
+            "words from this conversation: merging appends what each source said, and the "
+            "words are not attributed to it."
+        ),
+    )
 
 
 class ConversationSummary(_Output):

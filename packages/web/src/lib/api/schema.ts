@@ -400,7 +400,11 @@ export interface paths {
      *        ``forget_memory=true``: see :func:`chat_service.delete_conversation`'s
      *        docstring for the exact ∪ content-match cascade. A no-op when the
      *        memory backend isn't composed (community/no-DB edition) — the
-     *        conversation delete itself is unaffected either way.
+     *        conversation delete itself is unaffected either way. Durable (R9-311,
+     *        :mod:`persona_api.services.conversation_memory_forget`): with a worker here
+     *        that runs the forget job, the forget is recorded in the row delete's
+     *        transaction and retried until done; without one it runs before the row, so
+     *        a failure leaves the conversation for a retry.
      *     5. **Knowledge-graph facts** (R9-304), with ``forget_memory=true``: in the
      *        row delete's own transaction, before the delete: see
      *        :mod:`persona_api.services.forget_conversation_graph`. Atomic with the
@@ -1927,7 +1931,9 @@ export interface paths {
      * @description Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
      *
      *     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
-     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
+     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's;
+     *     409 when it kept changing under the write, or the conversation the correction came from
+     *     was forgotten meanwhile.
      */
     patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
     trace?: never;
@@ -3540,13 +3546,20 @@ export interface components {
      *
      *     ``facts_removed``: facts only this conversation supports, which the delete removes.
      *     ``facts_kept``: facts another source also supports, which stay without this conversation as
-     *     a source. Counts only, for the delete dialog; merged duplicates and the user's own node are
-     *     not counted. Both are 0 where there is no graph.
+     *     a source; their wording may still include words from this conversation (R9-311). Counts
+     *     only, for the delete dialog; merged duplicates and the user's own node are not counted.
+     *     Both are 0 where there is no graph.
      */
     ConversationForgetPreview: {
-      /** Facts Removed */
+      /**
+       * Facts Removed
+       * @description Facts only this conversation supports. The delete removes them.
+       */
       facts_removed: number;
-      /** Facts Kept */
+      /**
+       * Facts Kept
+       * @description Facts that stay because something else in Memory also supports them. This conversation is no longer a source, but a kept fact's wording may still include words from this conversation: merging appends what each source said, and the words are not attributed to it.
+       */
       facts_kept: number;
     };
     /**
@@ -6922,7 +6935,7 @@ export interface operations {
   delete_conversation_v1_conversations__conversation_id__delete: {
     parameters: {
       query?: {
-        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source; GET .../forget-preview counts them. 409 while Memory is being reorganised: the conversation, its messages and its memory stay, though its attached documents may already be removed; try again to finish. Off by default: a plain delete leaves the persona's memory intact. */
+        /** @description Also forget the episodic memory this conversation produced (Spec K11, D-K11-9): exact match on chunks stamped with this conversation's id, content-match fallback for legacy (pre-stamp) chunks. Also takes the facts learned from it out of Memory (R9-304): a fact only this conversation supports is removed, one another source also supports loses this conversation as a source but keeps its wording, which may still include words from this conversation (R9-311); GET .../forget-preview counts them. 409 while Memory is being reorganised: the conversation, its messages and its memory stay, though its attached documents may already be removed; try again to finish. A failed episodic forget is never left behind (R9-311): where a background worker runs, it is recorded with the delete and retried until done; elsewhere it runs first, and a failure keeps the conversation for a retry (with the documents, its episodic memory may then be gone already). Off by default: a plain delete leaves the persona's memory intact. */
         forget_memory?: boolean;
       };
       header?: never;

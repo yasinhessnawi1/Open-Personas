@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from persona.graph.errors import GraphStaleWriteError
+from persona.graph.errors import GraphInteractionGoneError, GraphStaleWriteError
 from persona_api.app import create_app
 from persona_api.auth import AuthenticatedUser
 from persona_api.config import APIConfig, Edition
@@ -56,3 +56,30 @@ def test_a_correction_that_keeps_losing_the_race_is_a_409(client: TestClient) ->
     body = resp.json()
     assert "memory_node_changed" in str(body)
     assert "this memory changed, try again" in str(body)
+
+
+class _ConversationForgottenStore:
+    def correct_node(self, *_a: Any, **_k: Any) -> None:  # noqa: ANN401
+        raise GraphInteractionGoneError(
+            "a graph write cites a conversation that no longer exists",
+            context={"interaction_id": "conv-c"},
+        )
+
+
+def test_a_correction_whose_conversation_was_forgotten_is_a_clean_409(
+    client: TestClient,
+) -> None:
+    """R9-311 review LOW-1: a correction made in a conversation forgotten meanwhile is refused
+    by the write guard; the route answers 409, not a 500, and echoes no conversation id."""
+    client.app.state.graph_store = _ConversationForgottenStore()  # type: ignore[attr-defined]
+
+    resp = client.patch(
+        "/v1/memory/nodes/n1",
+        json={"content": "the user's correction"},
+        headers={"Authorization": "Bearer u_a"},
+    )
+
+    assert resp.status_code == 409
+    body = str(resp.json())
+    assert "memory_node_changed" in body
+    assert "conv-c" not in body

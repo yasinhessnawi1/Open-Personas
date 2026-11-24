@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 from persona.audit import MemoryAuditLogger
 from persona.graph._schema import graph_metadata
-from persona.graph.errors import GraphNodeNotFoundError
+from persona.graph.errors import GraphInteractionGoneError, GraphNodeNotFoundError
 from persona.graph.models import LinkType, NodeKind, NodeProvenance, TypedLink, make_edge_id
 from persona.graph.protocol import KnowledgeCandidate
 from persona.graph.store import build_graph_store
@@ -26,6 +26,7 @@ from persona.schema.chunks import WriteSource
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from persona.graph.store import PostgresGraphStore
     from sqlalchemy import Engine
 
 pytestmark = pytest.mark.integration
@@ -209,3 +210,63 @@ def test_correction_is_owner_scoped(store) -> None:  # noqa: ANN001
     with pytest.raises(GraphNodeNotFoundError):
         store.correct_node("u2", a, "alpha revised text")  # u2 doesn't own a
     assert store.get_node("u1", a).content == "alpha original"  # type: ignore[union-attr]
+
+
+# R9-311 review LOW-2: the write guard reads the conversations table; the graph schema alone
+# has none. The api schema's table (from another suite on the same database) serves as well:
+# the case needs only that no row names the forgotten conversation.
+_CONVERSATIONS = "CREATE TABLE conversations (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL)"
+
+
+@pytest.fixture
+def guarded_store(_engine: Engine) -> Iterator[PostgresGraphStore]:
+    """The assembled store with the write guard on, and a conversations table to hold."""
+    from sqlalchemy import text
+
+    with _engine.begin() as conn:
+        graph_metadata.drop_all(conn)
+        graph_metadata.create_all(conn)
+        ours = conn.execute(text("SELECT to_regclass('conversations')")).scalar() is None
+        if ours:
+            conn.execute(text(_CONVERSATIONS))
+    yield build_graph_store(
+        engine=_engine,
+        embedder=_Embedder(),
+        audit_logger=MemoryAuditLogger(),
+        persona_guard=True,
+        node_releaser=None,
+    )
+    with _engine.begin() as conn:
+        graph_metadata.drop_all(conn)
+        if ours:
+            conn.execute(text("DROP TABLE conversations"))
+
+
+def test_a_correction_citing_a_forgotten_conversation_is_refused_once(
+    guarded_store: PostgresGraphStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correction made in a conversation whose row is gone writes nothing and is not retried.
+
+    It records the conversation kind, so the guard holds the conversation's row; with no row
+    the write raises GraphInteractionGoneError, which the correction's retry loop never
+    retries (the conversation does not come back).
+    """
+    backend = guarded_store._backend  # noqa: SLF001 - count the node writes the correction tries
+    a = guarded_store.merge("u1", _cand("alpha original")).node_id
+    tries: list[str] = []
+    write = backend.update_node
+
+    def counted(*args: object, **kwargs: object) -> object:
+        tries.append("update_node")
+        return write(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backend, "update_node", counted)
+
+    with pytest.raises(GraphInteractionGoneError):
+        guarded_store.correct_node("u1", a, "alpha revised text", interaction_id="conv-gone")
+
+    assert tries == ["update_node"], "refused once, never retried"
+    node = guarded_store.get_node("u1", a)
+    assert node is not None
+    assert node.content == "alpha original"
+    assert all(p.interaction_id != "conv-gone" for p in node.provenance)

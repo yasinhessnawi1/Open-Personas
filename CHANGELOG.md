@@ -139,6 +139,14 @@ Per-spec entries are added by the close-out phase of each spec.
   with a clear error instead of being written elsewhere on the machine.
 
 ### Fixed
+- **The conversation forget says what it keeps, and two of its edges are closed (R9-311).**
+  The delete dialog said a fact "also learned elsewhere stays", which read as if nothing of
+  the forgotten conversation stayed. It now says the fact stays because something else in
+  Memory also supports it, and that its wording may still include words from this
+  conversation; the API's descriptions say the same. A correction made in a conversation now
+  records that it came from a conversation, so one landing after that conversation was
+  forgotten is refused like every other write citing it (the correction answers 409). Memory shows as a fact's origin the
+  first entry with its grounding, not a slim "restated" entry a forget left first.
 - **Forgetting a conversation's memory now forgets the facts learned from it (R9-304).**
   Deleting a conversation with "Also forget what ... learned here" removed its episodic
   memory but left the Memory facts synthesis drew from it, until each was forgotten by

@@ -144,3 +144,24 @@ def test_the_preview_of_another_users_conversation_is_not_found(
 
     assert resp.status_code == 404
     assert calls.previews == []
+
+
+def test_the_documented_kept_count_does_not_promise_the_words_go(client: TestClient) -> None:
+    """R9-311: a kept fact stays because another source supports it, and merging appended this
+    conversation's words to its wording, so the API's own description must say they may stay."""
+    schema = client.app.openapi()["components"]["schemas"]["ConversationForgetPreview"]  # type: ignore[attr-defined]
+
+    kept = schema["properties"]["facts_kept"]["description"]
+    # Review MEDIUM: name no supporter. An episodic consolidation entry or a task run's
+    # record_user_fact also counts as support, and neither is "another conversation".
+    assert "something else in Memory also supports" in kept
+    assert "another conversation" not in kept
+    assert "wording may still include words from this conversation" in kept
+
+
+def test_the_documented_forget_does_not_promise_a_kept_facts_words_go(client: TestClient) -> None:
+    """R9-311: the delete's ``forget_memory`` description says a kept fact keeps its wording."""
+    operation = client.app.openapi()["paths"]["/v1/conversations/{conversation_id}"]["delete"]  # type: ignore[attr-defined]
+    forget = next(p for p in operation["parameters"] if p["name"] == "forget_memory")
+
+    assert "may still include words from this conversation" in forget["description"]

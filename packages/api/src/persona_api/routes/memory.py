@@ -16,7 +16,12 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from persona.graph.errors import GraphNodeBusyError, GraphNodeNotFoundError, GraphStaleWriteError
+from persona.graph.errors import (
+    GraphInteractionGoneError,
+    GraphNodeBusyError,
+    GraphNodeNotFoundError,
+    GraphStaleWriteError,
+)
 
 from persona_api.auth import AuthenticatedUser, get_current_user
 from persona_api.errors import MemoryNodeChangedError, MemoryNodeNotFoundError
@@ -147,7 +152,9 @@ async def correct_node(
     """Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
 
     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
-    panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
+    panel shows the user-edited provenance immediately. 404 when the node is not the caller's;
+    409 when it kept changing under the write, or the conversation the correction came from
+    was forgotten meanwhile.
     """
     store = _graph_store(request)
     if store is None:
@@ -161,6 +168,14 @@ async def correct_node(
         # Another writer kept changing the node through every retry (node CAS): 409.
         raise MemoryNodeChangedError(
             "this memory changed, try again", context={"node_id": node_id}
+        ) from exc
+    except GraphInteractionGoneError as exc:
+        # R9-311: the conversation the correction was made in was forgotten meanwhile, so the
+        # write guard refused it. A 409, like any write the node's state refused; the
+        # conversation id is not echoed back.
+        raise MemoryNodeChangedError(
+            "this memory changed: the conversation it came from was forgotten",
+            context={"node_id": node_id},
         ) from exc
 
 
