@@ -191,8 +191,25 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("1 fact also learned elsewhere stays."),
+      screen.getByText(
+        "1 fact stays because another conversation or your own edit also supports it. Its wording may still include words from this conversation.",
+      ),
     ).toBeInTheDocument();
+  });
+
+  // R9-311: a kept fact can still carry this conversation's words (merging
+  // appends them to its wording), so the dialog must not promise they go.
+  it("says kept facts may still hold this conversation's words", async () => {
+    h.preview.mockResolvedValue({ data: { facts_removed: 0, facts_kept: 2 } });
+    renderList();
+    await openDeleteDialog();
+
+    expect(
+      await screen.findByText(
+        "2 facts stay because another conversation or your own edits also support them. Their wording may still include words from this conversation.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/learned elsewhere/)).not.toBeInTheDocument();
   });
 
   it("says nothing is removed when no fact comes only from here", async () => {
@@ -203,7 +220,7 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
     expect(
       await screen.findByText("No facts in Memory were learned only here."),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/learned elsewhere/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/facts? stays?/)).not.toBeInTheDocument();
   });
 
   it("shows no count when the preview fails, and the delete still works", async () => {
