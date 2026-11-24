@@ -265,7 +265,9 @@ class EpisodicConsolidationEngine:
                 continue
 
             try:
-                candidate = self._candidate_for(persona_id, text, window_end)
+                candidate = self._candidate_for(
+                    persona_id, text, window_end, _window_conversations(window)
+                )
                 # merge is sync + LLM-free (contract §1); off the loop so a slow
                 # DB never stalls the worker's other jobs (the K7 discipline).
                 await asyncio.to_thread(self._graph.merge, owner_id, candidate)
@@ -419,9 +421,18 @@ class EpisodicConsolidationEngine:
         return parts
 
     def _candidate_for(
-        self, persona_id: str, gist_text: str, window_end: datetime
+        self,
+        persona_id: str,
+        gist_text: str,
+        window_end: datetime,
+        conversation_ids: tuple[str, ...] | None,
     ) -> KnowledgeCandidate:
-        """One minimal, contract-conformant candidate per cluster (K8-D-9)."""
+        """One minimal, contract-conformant candidate per cluster (K8-D-9).
+
+        ``conversation_ids`` are the conversations the window's chunks came from (R9-325):
+        forgetting one of them removes the gist, and with them on the entry the forget finds
+        and removes the graph entry made from it too.
+        """
         return KnowledgeCandidate(
             concept_name=_episode_label(gist_text, window_end),
             content=gist_text,
@@ -435,6 +446,7 @@ class EpisodicConsolidationEngine:
                 written_at=window_end,
                 grounding="episodic cluster gist (from originals)",
                 reason="sleep-time episodic consolidation",
+                conversation_ids=conversation_ids,
             ),
             valid_at=window_end,
         )
@@ -459,6 +471,17 @@ def _episode_label(gist_text: str, window_end: datetime) -> str:
     if len(head) > 60:  # noqa: PLR2004 — a label cap, not a domain constant
         head = head[:59].rstrip() + "…"
     return head or f"episode {window_end:%Y-%m-%d %H:%M}"
+
+
+def _window_conversations(window: Sequence[PersonaChunk]) -> tuple[str, ...] | None:
+    """The conversations a window's chunks are stamped with, once each and sorted (R9-325).
+
+    A legacy chunk with no stamp adds nothing (whose it was is not known, and is not guessed);
+    ``None`` when no chunk is stamped.
+    """
+    stamped = {c.metadata.get("conversation_id") for c in window}
+    found = sorted(s for s in stamped if s)
+    return tuple(found) or None
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:

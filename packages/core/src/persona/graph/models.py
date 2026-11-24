@@ -25,7 +25,15 @@ import hashlib
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from persona.schema.chunks import WriteSource  # noqa: TC001 — Pydantic needs runtime access
 
@@ -169,6 +177,13 @@ class NodeProvenance(BaseModel):
             V13. ``source`` stays ``system`` for all synthesis; ``channel`` is the
             finer provenance marker. ``None`` for pre-V13 nodes + non-synthesis
             writes (a direct persona/user write carries no channel).
+        conversation_ids: On an episodic consolidation entry, the conversations whose
+            chunks the gist was made from (R9-325). A window is formed by time gaps, not
+            by conversation, so it can span several; it is not one interaction, so
+            ``interaction_id`` stays ``None``. Forgetting any of them removes the gist, and
+            the conversation forget removes this entry with it. ``None`` everywhere else,
+            and on consolidation entries written before R9-325. Stored only when set, so
+            no other entry changes shape.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -182,11 +197,22 @@ class NodeProvenance(BaseModel):
     reason: str | None = None
     superseded_content: str | None = None
     channel: str | None = None
+    conversation_ids: tuple[str, ...] | None = None
 
     @field_validator("written_at", mode="after")
     @classmethod
     def _written_at_must_be_tz_aware(cls, value: datetime) -> datetime:
         return _ensure_utc(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_conversation_ids(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """Every entry but a consolidation one dumps (and is stored) exactly as before R9-325."""
+        dumped: dict[str, object] = handler(self)
+        if dumped.get("conversation_ids") is None:
+            dumped.pop("conversation_ids", None)
+        return dumped
 
 
 class ConceptNode(BaseModel):

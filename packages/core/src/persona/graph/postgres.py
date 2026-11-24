@@ -150,6 +150,11 @@ _HOLD_PERSONA = text("SELECT 1 FROM personas WHERE id = :p AND owner_id = :o FOR
 _HOLD_CONVERSATION = text(
     "SELECT 1 FROM conversations WHERE id = :c AND owner_id = :o FOR KEY SHARE"
 )
+# R9-325: whether a conversation whose row is gone was forgotten (migration 068), not deleted
+# with its memory kept.
+_WAS_FORGOTTEN = text(
+    "SELECT 1 FROM forgotten_conversations WHERE conversation_id = :c AND owner_id = :o"
+)
 # The kind an entry's interaction id must have to name a ``conversations`` row. A run's or a
 # task leg's id names no conversation; an entry with no kind predates the field (R-K5-OPEN-CONV)
 # and is only ever on a node already, never added by a current writer.
@@ -165,6 +170,11 @@ def cited_conversations(entries: Iterable[NodeProvenance | None]) -> list[str]:
             if p is not None and p.interaction_id and p.interaction_kind == _CONVERSATION_KIND
         }
     )
+
+
+def window_conversations(entries: Iterable[NodeProvenance | None]) -> list[str]:
+    """The conversations episodic gists in ``entries`` were made from, once each (R9-325)."""
+    return sorted({c for p in entries if p is not None for c in p.conversation_ids or () if c})
 
 
 #: Postgres' "foreign key violation": a row the write references is gone.
@@ -339,6 +349,12 @@ class PostgresGraphBackend:
         model call either lands first and is removed, or finds no row and raises
         :class:`GraphInteractionGoneError`. Only added entries: an older entry may name a
         conversation deleted without forgetting it, and that must not lock the node.
+
+        An episodic gist's entry lists the conversations of its window (R9-325). Each is held
+        the same way, but one whose row is gone refuses the write only when it was forgotten
+        (``forgotten_conversations``, as the memory chunk guard decides, migration 068): a
+        window over a conversation deleted with its memory kept still reaches the graph, and a
+        gist whose graph entry lands after its conversation's forget is refused, not left behind.
         """
         if not self._persona_guard:
             return
@@ -349,9 +365,17 @@ class PostgresGraphBackend:
                     "a graph write names a persona that no longer exists",
                     context={"persona_id": persona_id[:80]},
                 )
-        for conversation_id in cited_conversations(cites):
+        cites = list(cites)
+        cited = set(cited_conversations(cites))
+        # One pass in one order, so every write takes these row locks in the same order.
+        for conversation_id in sorted(cited.union(window_conversations(cites))):
             held = conn.execute(_HOLD_CONVERSATION, {"c": conversation_id, "o": owner_id}).first()
-            if held is None:
+            if held is not None:
+                continue
+            if (
+                conversation_id in cited
+                or conn.execute(_WAS_FORGOTTEN, {"c": conversation_id, "o": owner_id}).first()
+            ):
                 raise GraphInteractionGoneError(
                     "a graph write cites a conversation that no longer exists",
                     context={"interaction_id": conversation_id[:80]},

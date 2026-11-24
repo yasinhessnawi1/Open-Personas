@@ -123,6 +123,10 @@ class _Conn:
             return _Result(None if params["c"] in self._engine.gone else (1,))
         if "FOR KEY SHARE" in sql and "FROM personas" in sql:
             return _Result()
+        if "FROM forgotten_conversations" in sql:
+            assert params is not None
+            self._engine.log.append((self._txn, f"forgotten? {params['c']}"))
+            return _Result((1,) if params["c"] in self._engine.forgotten else None)
         verb = sql.split()[0].lower()
         self._engine.log.append((self._txn, verb))
         if verb == "select":
@@ -132,9 +136,13 @@ class _Conn:
 
 class _Engine:
     def __init__(
-        self, gone: frozenset[str] = frozenset(), stored: tuple[NodeProvenance, ...] = ()
+        self,
+        gone: frozenset[str] = frozenset(),
+        stored: tuple[NodeProvenance, ...] = (),
+        forgotten: frozenset[str] = frozenset(),
     ) -> None:
         self.gone = set(gone)
+        self.forgotten = set(forgotten)
         self.stored = stored
         self.log: list[tuple[int, str]] = []
         self._next = 0
@@ -366,3 +374,49 @@ def test_append_provenance_writes_the_trail_only_under_the_node_cas() -> None:
     assert "SET provenance=(graph_nodes.provenance || jsonb_build_array(" in sql, "appended in SQL"
     assert "graph_nodes.content_hash = %(content_hash_1)s" in sql, "the hash the merge read"
     assert "jsonb_strip_nulls(graph_nodes.provenance) = jsonb_strip_nulls(" in sql, "and trail"
+
+
+# --- R9-325: an episodic consolidation entry names the conversations of its window -------
+
+
+def _gist_of(*conversations: str) -> NodeProvenance:
+    return NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id="p1",
+        written_at=_NOW,
+        reason="sleep-time episodic consolidation",
+        conversation_ids=conversations,
+    )
+
+
+def test_a_gist_entry_holds_each_conversation_of_its_window() -> None:
+    """So a forget waits for a consolidation write in flight, then removes what it wrote."""
+    engine = _Engine()
+
+    _backend(engine).insert_node("u1", _node(_gist_of(_D, _C)), _VECTOR)
+
+    assert engine.holds() == [f"hold {_C}", f"hold {_D}"]
+    assert "insert" in engine.entries()
+
+
+def test_a_gist_entry_from_a_forgotten_conversation_writes_nothing() -> None:
+    """The gist was written before the forget, its graph entry after: refused, not left behind."""
+    engine = _Engine(gone=frozenset({_C}), forgotten=frozenset({_C}))
+
+    with pytest.raises(GraphInteractionGoneError) as raised:
+        _backend(engine).append_provenance(
+            "u1", "n1", _gist_of(_C, _D), expected_content_hash="h", expected_provenance=()
+        )
+
+    assert [e for e in engine.entries() if e in {"insert", "update"}] == []
+    assert raised.value.context == {"interaction_id": _C}
+
+
+def test_a_gist_entry_from_a_conversation_deleted_without_forgetting_is_written() -> None:
+    """A plain delete keeps the memory by contract: its windows still reach the graph."""
+    engine = _Engine(gone=frozenset({_C}))
+
+    _backend(engine).insert_node("u1", _node(_gist_of(_C)), _VECTOR)
+
+    assert f"forgotten? {_C}" in engine.entries()
+    assert "insert" in engine.entries()

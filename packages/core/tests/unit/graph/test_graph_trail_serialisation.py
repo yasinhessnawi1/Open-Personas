@@ -115,3 +115,30 @@ def test_trails_already_stored_still_compare_equal_after_a_read(name: str) -> No
     )
     assert read[0].written_at == _INPUTS[name]
     assert _stored(read) == stored
+
+
+def test_an_entry_without_window_conversations_is_stored_as_before() -> None:
+    """R9-325: the new field is only written when set, so no other entry changes shape."""
+    entry = NodeProvenance(
+        source=WriteSource.PERSONA_SELF, persona_id="p1", written_at=_INPUTS["utc"]
+    )
+
+    assert "conversation_ids" not in entry.model_dump(mode="json")
+    assert "conversation_ids" not in entry.model_dump()
+
+
+def test_a_consolidation_entry_keeps_its_window_conversations_through_a_round_trip() -> None:
+    """R9-325: the conversations a gist was made from are stored, read back and compared."""
+    entry = NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id="p1",
+        written_at=_INPUTS["utc"],
+        reason="sleep-time episodic consolidation",
+        conversation_ids=("conv-c", "conv-d"),
+    )
+    stored = _stored([entry])
+
+    assert stored[0]["conversation_ids"] == ["conv-c", "conv-d"]
+    read = [NodeProvenance.model_validate(p) for p in stored]
+    assert read == [entry]
+    assert trail_matches(stored, read)

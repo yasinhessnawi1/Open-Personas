@@ -15,7 +15,11 @@ out of the graph, by the persona erasure's rules with the conversation as the so
   conversation's entries; the SELF node keeps dated stubs. Its wording stays as it is, so it
   may still include words this conversation added (merging appends them, unattributed; R9-311);
 - version snapshots get the same treatment, an edge this conversation asserted goes with its
-  mirrors, and an entity it established goes when nothing links to it, else loses the citation.
+  mirrors, and an entity it established goes when nothing links to it, else loses the citation;
+- an episodic consolidation entry whose window lists this conversation (``conversation_ids``)
+  is this conversation's too (R9-325): its gist is removed when any of the window's chunks is
+  forgotten, and the other conversations' chunks are gisted again on the next pass. A
+  consolidation entry written before R9-325 lists no conversations and is left as it is.
 
 Why not the Memory page's per-fact delete, node by node: that delete takes every duplicate
 merged into the fact with it (D-R9-287-forget-canonical, right when the user says "this fact is

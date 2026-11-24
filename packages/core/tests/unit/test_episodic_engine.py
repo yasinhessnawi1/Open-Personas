@@ -500,3 +500,38 @@ def test_a_mixed_window_with_any_durable_chunk_still_graduates() -> None:
     assert report.candidates_emitted == 1
     assert report.candidates_excluded_transient == 0
     assert len(graph.candidates) == 1
+
+
+# --- R9-325: a consolidation entry names the conversations its window came from ---------
+
+
+def _seed_window(backend: _SpyBackend, *stamps: str | None) -> None:
+    """One closed window (3h ago, a minute apart), a chunk per stamp (``None``: legacy)."""
+    for i, stamp in enumerate(stamps):
+        metadata = {"conversation_id": stamp} if stamp is not None else {}
+        backend.seed_raw("p1", _chunk(hours_ago=3.0 - i / 60, metadata=metadata))
+
+
+def _the_candidate(backend: _SpyBackend) -> Any:  # noqa: ANN401
+    engine, _, graph = _engine(backend)
+    asyncio.run(engine.run("u1", "p1", now=_NOW))
+    ((_, candidate),) = graph.candidates
+    return candidate
+
+
+def test_the_candidate_names_every_conversation_its_window_came_from() -> None:
+    """Forgetting any of them removes the gist, so the graph entry made from it must go too."""
+    backend = _SpyBackend()
+    _seed_window(backend, "conv-d", "conv-c", "conv-d", None)
+
+    assert _the_candidate(backend).provenance.conversation_ids == ("conv-c", "conv-d")
+
+
+def test_a_window_of_unstamped_chunks_names_no_conversation() -> None:
+    """A legacy chunk carries no conversation id, and the engine does not guess one."""
+    backend = _SpyBackend()
+    _seed_window(backend, None, None)
+
+    candidate = _the_candidate(backend)
+    assert candidate.provenance.conversation_ids is None
+    assert candidate.provenance.interaction_id is None, "a window is not one interaction"

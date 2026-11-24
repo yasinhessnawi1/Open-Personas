@@ -406,3 +406,89 @@ def test_a_fact_restated_in_another_conversation_stays(
     nodes = _rows(migrated_engine, "SELECT id, provenance FROM graph_nodes WHERE owner_id = :o")
     assert first.node_id in nodes
     assert _cited(nodes[first.node_id]) == [_D]
+
+
+# --- R9-325: a fact made from the conversation's gist goes with the conversation ---------
+
+
+def _gist(*conversations: str) -> NodeProvenance:
+    """An episodic consolidation entry, as the engine writes it: its window's conversations."""
+    return NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id=_PERSONA,
+        written_at=_NOW,
+        grounding="episodic cluster gist (from originals)",
+        reason="sleep-time episodic consolidation",
+        conversation_ids=conversations,
+    )
+
+
+def _made(node_id: str, *entries: NodeProvenance) -> ConceptNode:
+    return ConceptNode(
+        id=node_id,
+        node_kind=NodeKind.CONCEPT,
+        concept_name=node_id,
+        content=f"about {node_id}",
+        provenance=entries,
+        created_at=_NOW,
+    )
+
+
+def test_a_fact_made_from_the_conversations_gist_goes_with_it(
+    app_engine: Engine,
+    migrated_engine: Engine,
+    graph: PostgresGraphBackend,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """Counted and removed like a fact learned in it; another conversation's gist is support."""
+    vector = embedder.encode(["gist"])[0]
+    for node in (
+        _made("gist_only", _gist(_C)),
+        _made("gist_restated", _from(_C), _gist(_C)),
+        _made("gist_mixed", _gist(_C, _D)),
+        _made("gist_of_d", _from(_C), _gist(_D)),
+    ):
+        graph.insert_node(_OWNER, node, vector)
+
+    preview = fcg.preview(app_engine, owner_id=_OWNER, conversation_id=_C)
+    # The seeded graph's 2 removed and 1 kept (test_the_preview_counts_what_the_forget_then_does),
+    # plus the three gist-made facts C fed alone, and gist_of_d kept by D's gist.
+    assert preview == fcg.ConversationGraphPreview(facts_removed=5, facts_kept=2)
+
+    counts = _forget(app_engine)
+
+    nodes = _rows(migrated_engine, "SELECT id, provenance FROM graph_nodes WHERE owner_id = :o")
+    assert not {"gist_only", "gist_restated", "gist_mixed"} & set(nodes)
+    assert [entry.get("conversation_ids") for entry in nodes["gist_of_d"]] == [[_D]]
+    assert _C not in str(nodes), "no trail cites the conversation, nor lists it"
+    assert counts["nodes_deleted"] == 6  # noqa: PLR2004 - the seeded 3 and the gist-made 3
+
+
+def test_a_gist_entry_landing_after_the_forget_is_refused(
+    app_engine: Engine,
+    migrated_engine: Engine,
+    graph: PostgresGraphBackend,
+    embedder: Any,  # noqa: ANN401
+) -> None:
+    """The gist was written before the forget and its graph entry after: refused, not left.
+
+    A window over a conversation deleted without forgetting its memory is still written: a
+    plain delete keeps the memory by contract.
+    """
+    plain = "conv_plain_deleted_000000000000000000"
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO conversations (id, owner_id, persona_id) VALUES (:c, :o, :p)"),
+            {"c": plain, "o": _OWNER, "p": _PERSONA},
+        )
+        conn.execute(text("DELETE FROM conversations WHERE id = :c"), {"c": plain})
+    _forget(app_engine)
+    vector = embedder.encode(["late gist"])[0]
+
+    with pytest.raises(GraphInteractionGoneError):
+        graph.insert_node(_OWNER, _made("late_gist", _gist(_C, _D)), vector)
+    graph.insert_node(_OWNER, _made("kept_memory", _gist(plain, _D)), vector)
+
+    nodes = _rows(migrated_engine, "SELECT id, 1 FROM graph_nodes WHERE owner_id = :o")
+    assert "late_gist" not in nodes
+    assert "kept_memory" in nodes

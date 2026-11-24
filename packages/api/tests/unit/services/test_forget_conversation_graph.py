@@ -206,3 +206,84 @@ def test_a_lock_timeout_or_deadlock_is_busy_and_nothing_else_is() -> None:
     assert fcg.is_busy(_error("55P03"))
     assert fcg.is_busy(_error("40P01"))
     assert not fcg.is_busy(_error("08006"))
+
+
+# --- R9-325: a fact made from a conversation's gist goes with that conversation ----------
+
+
+def _gist_of(*conversations: str) -> dict[str, object]:
+    """An episodic consolidation entry: no interaction id, its window's conversations."""
+    entry: dict[str, object] = {
+        "source": "persona_self",
+        "persona_id": "persona_a",
+        "written_at": _AT,
+        "grounding": "episodic cluster gist (from originals)",
+        "reason": "sleep-time episodic consolidation",
+    }
+    if conversations:
+        entry["conversation_ids"] = list(conversations)
+    return entry
+
+
+def test_a_fact_made_only_from_this_conversations_gist_is_removed() -> None:
+    plan = _plan(("gist_only", [_gist_of(_C)]), ("restated", [_from(_C), _gist_of(_C)]))
+
+    assert plan.doomed == ["gist_only", "restated"], "the gist restating C is C's, not support"
+    assert plan.rewrites == {}
+
+
+def test_a_gist_of_a_window_with_another_conversation_goes_whole() -> None:
+    """The gist itself goes when any of its members is forgotten, so its entry does too.
+
+    The other conversation's chunks are gisted again on the next consolidation pass.
+    """
+    plan = _plan(("mixed", [_gist_of(_C, _D)]), ("supported", [_gist_of(_C, _D), _from(_D)]))
+
+    assert plan.doomed == ["mixed"]
+    assert plan.rewrites == {"supported": [_from(_D)]}
+
+
+def test_another_conversations_gist_is_support() -> None:
+    kept = _gist_of(_D)
+    plan = _plan(("n1", [_from(_C), kept]))
+
+    assert plan.doomed == []
+    assert plan.rewrites == {"n1": [kept]}
+
+
+def test_a_legacy_gist_entry_names_no_conversation_and_is_left_as_it_is() -> None:
+    """Written before R9-325: whose window it was is not known, and the forget does not guess."""
+    legacy = _gist_of()
+    plan = _plan(("n1", [_from(_C), legacy]), ("legacy_only", [legacy]))
+
+    assert plan.doomed == []
+    assert plan.rewrites == {"n1": [legacy]}
+
+
+def test_the_preview_counts_gist_made_facts() -> None:
+    rows = [
+        ("gist_only", [_gist_of(_C)], None),
+        ("restated", [_from(_C), _gist_of(_C)], None),
+        ("kept", [_gist_of(_C), _from(_D)], None),
+        ("elsewhere", [_gist_of(_D)], None),
+    ]
+
+    preview = fcg.preview_counts(rows, conversation_id=_C, self_node_id=_SELF)
+
+    assert preview == fcg.ConversationGraphPreview(facts_removed=2, facts_kept=1)
+
+
+def test_the_trails_are_found_by_either_shape_in_sql() -> None:
+    """The node and snapshot reads match an entry citing C, or a gist entry listing C."""
+    from persona_api.db.models import graph_nodes  # noqa: PLC0415
+    from persona_api.services.erasure_graph import _naming  # noqa: PLC0415
+    from sqlalchemy.dialects import postgresql  # noqa: PLC0415
+
+    compiled = _naming(graph_nodes.c.provenance, fcg.conversation_source(_C)).compile(
+        dialect=postgresql.dialect()
+    )
+
+    assert str(compiled).count("@>") == 2  # noqa: PLR2004 - one per shape
+    assert sorted(map(str, compiled.params.values())) == sorted(
+        [str([{"interaction_id": _C}]), str([{"conversation_ids": [_C]}])]
+    )
