@@ -20,6 +20,7 @@ from persona.graph.config import GraphSettings
 from persona.graph.errors import GraphPersonaGoneError, GraphStaleWriteError, NodeMergeError
 from persona.graph.merge import MergeEngine, accumulate
 from persona.graph.models import ConceptNode, LinkType, NodeKind, NodeProvenance, TypedLink
+from persona.graph.postgres import cited_conversations
 from persona.graph.protocol import KnowledgeCandidate, MergeAction, UpdateIntent
 from persona.schema.chunks import WriteSource
 
@@ -689,6 +690,38 @@ def test_a_write_that_keeps_losing_gives_up_after_three_tries() -> None:
         _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
 
     assert b.writes == 3
+
+
+def test_a_correction_made_in_a_conversation_is_held_by_the_conversation_guard() -> None:
+    """R9-311: a correction naming a conversation records its kind, so the write guard holds it.
+
+    The guard holds only the added entries whose ``interaction_kind`` is ``conversation``. A
+    correction used to record the id with no kind, so one that landed after its conversation
+    was forgotten was not refused.
+    """
+    b = _RacedBackend(races=0)
+    node_id = _created(b)
+
+    _engine(b, {"likes tea": vec(1)}).correct_node(
+        "u1", node_id, "likes tea", interaction_id="conv-c"
+    )
+
+    entry = b.nodes[node_id][0].provenance[-1]
+    assert entry.reason == "user correction"
+    assert entry.interaction_kind == "conversation"
+    assert cited_conversations([entry]) == ["conv-c"]
+
+
+def test_a_correction_made_outside_a_conversation_names_no_kind() -> None:
+    b = _RacedBackend(races=0)
+    node_id = _created(b)
+
+    _engine(b, {"likes tea": vec(1)}).correct_node("u1", node_id, "likes tea")
+
+    entry = b.nodes[node_id][0].provenance[-1]
+    assert entry.interaction_id is None
+    assert entry.interaction_kind is None
+    assert cited_conversations([entry]) == []
 
 
 class _RacedSupersede(_FakeBackend):

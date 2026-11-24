@@ -96,6 +96,11 @@ def _read_again(exc: Exception, own_persona: str | None) -> bool:
 #: The reason on a support entry: the fact was said again, and nothing about it changed.
 RESTATED_REASON = "restated"
 
+#: The kind a user correction's ``interaction_id`` names: the conversation the user corrected
+#: the fact in (``persona.extraction.InteractionKind.CONVERSATION``, not imported: extraction
+#: imports the graph). Recorded so the write guard holds that conversation (R9-311).
+_CORRECTION_INTERACTION_KIND = "conversation"
+
 
 def accumulate(existing: str, addition: str) -> str:
     """Append ``addition`` to ``existing`` unless it is empty or already present.
@@ -280,9 +285,13 @@ class MergeEngine:
         correction must never silently drop a stated relationship. The index sync +
         audit are the store's (T8), mirroring ``merge``.
 
+        ``interaction_id``, when given, is the conversation the user corrected the fact in.
+
         Raises:
             GraphNodeNotFoundError: the node is not the owner's (no silent no-op /
                 create — the user is correcting *this* node, K5-D-7).
+            GraphInteractionGoneError: ``interaction_id`` names a conversation that is gone
+                (with the backend's write guard on).
         """
         for attempt in range(STALE_WRITE_ATTEMPTS):
             try:
@@ -306,6 +315,10 @@ class MergeEngine:
         entry = NodeProvenance(
             source=WriteSource.USER,
             interaction_id=interaction_id,
+            # R9-311: with its kind, the write guard holds the conversation the correction was
+            # made in, so a correction landing after that conversation is forgotten is refused
+            # (GraphInteractionGoneError, never retried) like every other entry citing one.
+            interaction_kind=_CORRECTION_INTERACTION_KIND if interaction_id else None,
             written_at=datetime.now(UTC),
             superseded_content=target.content,
             reason="user correction",
