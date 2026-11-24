@@ -169,6 +169,7 @@ const DEMO_DETAIL: MemoryNodeDetail = {
     persona_id: "persona_astrid",
     persona_name: "Astrid",
     interaction_id: "conv_deposit_01",
+    conversation_id: "conv_deposit_01",
     written_at: "2026-03-12T10:00:00Z",
     reason: "Came up when you and Astrid worked through the deposit dispute",
     grounding: null,
