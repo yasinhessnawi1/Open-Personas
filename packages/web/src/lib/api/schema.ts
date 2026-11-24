@@ -3544,7 +3544,9 @@ export interface components {
      * ConversationForgetPreview
      * @description What forgetting a conversation's memory would do to the facts in Memory (R9-304).
      *
-     *     ``facts_removed``: facts only this conversation supports, which the delete removes.
+     *     ``facts_removed``: facts only this conversation supports, which the delete removes. That
+     *     includes a fact made only from a memory summary that covered this conversation and another
+     *     one: the summary goes when either is forgotten (R9-325).
      *     ``facts_kept``: facts another source also supports, which stay without this conversation as
      *     a source; their wording may still include words from this conversation (R9-311). Counts
      *     only, for the delete dialog; merged duplicates and the user's own node are not counted.
@@ -3553,7 +3555,7 @@ export interface components {
     ConversationForgetPreview: {
       /**
        * Facts Removed
-       * @description Facts only this conversation supports. The delete removes them.
+       * @description Facts only this conversation supports, including a fact made only from a memory summary that covered this conversation and another one. The delete removes them.
        */
       facts_removed: number;
       /**

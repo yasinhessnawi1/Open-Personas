@@ -142,7 +142,11 @@ def _shapes(source: Source) -> list[dict[str, Any]]:
     The source's own fields; and for a conversation, an episodic consolidation entry whose
     window lists it (R9-325). The gist such an entry was made from is removed when any chunk
     of its window is forgotten, so the entry is that conversation's too, whatever else the
-    window held: the other conversations' chunks are gisted again on the next pass. A legacy
+    window held. The other conversations' chunks are gisted again, and reach the graph again,
+    only when a consolidation pass runs after the forget's memory job has removed the old
+    gist, they are still among the persona's newest ``engine_max_batch`` episodic chunks
+    (500 by default; the engine looks no further back), and the new window is not a transient
+    action log. Otherwise what they contributed stays in their raw chunks only. A legacy
     consolidation entry lists no conversations and matches no conversation.
     """
     shapes: list[dict[str, Any]] = [dict(source)]

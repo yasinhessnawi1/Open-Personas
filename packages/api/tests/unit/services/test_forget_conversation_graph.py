@@ -235,7 +235,9 @@ def test_a_fact_made_only_from_this_conversations_gist_is_removed() -> None:
 def test_a_gist_of_a_window_with_another_conversation_goes_whole() -> None:
     """The gist itself goes when any of its members is forgotten, so its entry does too.
 
-    The other conversation's chunks are gisted again on the next consolidation pass.
+    The other conversation's chunks are gisted again by a later consolidation pass, but only
+    while they are among the persona's newest ``engine_max_batch`` chunks and the new window
+    is not a transient action log.
     """
     plan = _plan(("mixed", [_gist_of(_C, _D)]), ("supported", [_gist_of(_C, _D), _from(_D)]))
 

@@ -40,7 +40,7 @@ from persona.graph.postgres import PostgresGraphBackend
 from persona.schema.chunks import WriteSource
 from persona_api.errors import ConversationNotFoundError
 from persona_api.middleware.rls_context import current_user_id, make_rls_engine
-from persona_api.services import chat_service
+from persona_api.services import chat_service, conversation_memory_forget
 from persona_api.services import forget_conversation_graph as fcg
 from persona_api.services.forget_graph import ForgetReleaser
 from sqlalchemy import event, text
@@ -191,14 +191,33 @@ def graph(app_engine: Engine, migrated_engine: Engine, embedder: Any) -> Postgre
     return backend
 
 
+class _NoChunks:
+    """An episodic store with nothing in it: the forget's memory half has no chunks to remove."""
+
+    def get_all(self, persona_id: str) -> list[Any]:  # noqa: ARG002
+        return []
+
+    def remove_documents(self, persona_id: str, doc_ids: list[str]) -> None:  # noqa: ARG002
+        return
+
+
 def _forget(engine: Engine, conversation: str = _C) -> dict[str, int]:
+    """The route's forget: the graph step, and the memory plan that marks it forgotten (R9-311).
+
+    The plan is the inline one (no worker here), so the conversation is marked in
+    ``forgotten_conversations`` in the row delete's transaction, as on the request path.
+    """
     return chat_service.delete_conversation(
         rls_engine=engine,
         conversation_id=conversation,
         forget_memory=True,
         persona_id=_PERSONA,
+        episodic_store=_NoChunks(),
         graph_forget=functools.partial(
             fcg.forget_conversation_graph, owner_id=_OWNER, conversation_id=conversation
+        ),
+        memory_plan=conversation_memory_forget.plan(
+            owner_id=_OWNER, conversation_id=conversation, durable=False
         ),
     )
 
@@ -483,6 +502,11 @@ def test_a_gist_entry_landing_after_the_forget_is_refused(
         )
         conn.execute(text("DELETE FROM conversations WHERE id = :c"), {"c": plain})
     _forget(app_engine)
+    marked = _rows(
+        migrated_engine,
+        "SELECT conversation_id, 1 FROM forgotten_conversations WHERE owner_id = :o",
+    )
+    assert set(marked) == {_C}, "the forget marked C forgotten; the plain delete marked nothing"
     vector = embedder.encode(["late gist"])[0]
 
     with pytest.raises(GraphInteractionGoneError):
