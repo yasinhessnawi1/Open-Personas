@@ -742,12 +742,17 @@ class ConversationLoop:
         # Spec M2 (D-M2-5): the LAST completed turn's recorded cost + basis —
         # loop-owned state (the ``_session_spent_cents`` / ``budget_snapshot``
         # precedent) the api's detached chat-turn worker reads post-turn to
-        # compute the proportional credits charge. Set by ``_write_turn_log``;
+        # compute the proportional credits charge. Set by ``_build_turn_log``;
         # RESET at every turn start so a turn that legitimately writes no
         # TurnLog (e.g. the R1 safety bypass — no model ran) can never leak a
         # PREVIOUS turn's cost into billing.
         self._last_turn_cost_cents: float | None = None
         self._last_turn_cost_basis: str | None = None
+        # R9-316: True once this turn's answer was served and priced, just before its
+        # write-back. A write-back that then fails (the conversation was deleted while
+        # the turn streamed) is a failure to record the turn, not to produce it, so the
+        # chat worker still charges ``last_turn_cost_cents``. Reset at every turn start.
+        self._last_turn_served = False
         # Spec M1 (M1-T3): the persona's chosen model preempts the Spec 23 scorer.
         # ``None`` (the default) is the pre-M1 path — every existing caller stays
         # byte-identical (the hook short-circuits before touching routing). The
@@ -859,6 +864,7 @@ class ConversationLoop:
         # (flat-floor billing), never a stale previous turn's number.
         self._last_turn_cost_cents = None
         self._last_turn_cost_basis = None
+        self._last_turn_served = False
 
         # R1 turn-time safety gate (Spec V11, V11-D-5). Classify the user message
         # ONCE per turn (sub-ms, no model call). R1-hard (acute, explicit W1) is the
@@ -885,6 +891,9 @@ class ConversationLoop:
             )
             # Persist to episodic so history + recall reflect the exchange. No
             # TurnLog: no model ran, so there is no usage/tier telemetry to record.
+            # R9-316: the completion was shown, so the turn is served (charged the flat
+            # floor, as always) even if this write is refused for a forgotten conversation.
+            self._last_turn_served = True
             self._write_episodic(
                 persona_id, user_message, completion_text, conversation.conversation_id
             )
@@ -1824,8 +1833,13 @@ class ConversationLoop:
         #    (D-05-12). An early consumer-exit mid-stream never reaches here
         #    because the generator stays suspended at an earlier yield.
         latency_ms = (time.perf_counter() - started) * 1000.0
-        self._write_episodic(persona_id, user_message, assistant_text, conversation.conversation_id)
-        self._write_turn_log(
+        # R9-316: price the turn BEFORE either write. The answer has streamed and the
+        # provider is paid, so the figure the chat worker charges must exist even when
+        # the conversation was deleted mid-stream and a write below fails: the episodic
+        # write is refused for a forgotten conversation (migration 068), and the TurnLog
+        # insert hits its foreign key to ``conversations``. Either failure ends the turn
+        # as an error that is still charged once, from this figure.
+        turn_log = self._build_turn_log(
             conversation=conversation,
             tier=tier,
             backend=backend,
@@ -1850,6 +1864,9 @@ class ConversationLoop:
             mcp_invocations=mcp_invocations,
             mcp_unavailable_requested=mcp_unavailable_requested,
         )
+        self._last_turn_served = True
+        self._write_episodic(persona_id, user_message, assistant_text, conversation.conversation_id)
+        self._turn_log_writer.write(turn_log)
         now = datetime.now(UTC)
         # Persist the multimodal content when the turn carried images (so the
         # stored turn matches what the model saw); the API persistence boundary
@@ -2310,7 +2327,7 @@ class ConversationLoop:
         """Total estimated cost (cents) accrued this session, incl. the last turn.
 
         Read-only (CQS): the per-turn cost is folded into the running tally in
-        :meth:`_write_turn_log` (after generation), so by the time a caller has
+        :meth:`_build_turn_log` (after generation), so by the time a caller has
         finished draining :meth:`turn` this reflects the just-completed turn.
         The API reads it at ``done``-build time for the Spec 31 budget indicator
         (D-31-X-session-spend-property) so the meter includes the current turn.
@@ -2322,8 +2339,8 @@ class ConversationLoop:
         """The LAST completed turn's recorded ``cost_cents`` (Spec M2, D-M2-5).
 
         Read post-turn by the api's detached chat-turn worker to compute the
-        proportional credits charge — the SAME number ``_write_turn_log``
-        persisted, so the bill and the telemetry row always agree. ``None``
+        proportional credits charge, the SAME number ``_build_turn_log``
+        puts on the TurnLog row, so the bill and the telemetry row always agree. ``None``
         when the current/last turn wrote no TurnLog (reset at turn start —
         e.g. the R1 safety bypass) ⇒ the worker charges the flat floor.
         Read-only (CQS); the ``budget_snapshot`` loop-owned-state precedent.
@@ -2338,6 +2355,20 @@ class ConversationLoop:
         proportional billing only ever rides a PRICED record. Read-only.
         """
         return self._last_turn_cost_basis
+
+    @property
+    def last_turn_served(self) -> bool:
+        """Whether the LAST turn's answer was served and priced (R9-316).
+
+        Set just before the turn's write-back, once ``last_turn_cost_cents`` holds
+        the served answer's cost (and on the R1 bypass, whose completion is shown).
+        The chat worker reads it when a turn ends in an error: ``True`` means the
+        user already saw the answer and only recording it failed (for example the
+        conversation was deleted while the turn streamed), so the turn is still
+        charged once. ``False`` means the turn failed before producing anything
+        billable. Reset at every turn start. Read-only.
+        """
+        return self._last_turn_served
 
     def budget_snapshot(self) -> dict[str, float] | None:
         """Per-session budget snapshot for the Spec 31 budget indicator (D-31-2).
@@ -2675,7 +2706,7 @@ class ConversationLoop:
             written_by="runtime.loop",
         )
 
-    def _write_turn_log(
+    def _build_turn_log(
         self,
         *,
         conversation: Conversation,
@@ -2701,7 +2732,13 @@ class ConversationLoop:
         served: ServedCall | None = None,
         priced_rounds: Sequence[PricedRound] = (),
         compaction_rounds: Sequence[PricedRound] = (),
-    ) -> None:
+    ) -> TurnLog:
+        """Price the turn and build its TurnLog row, without writing it (R9-316).
+
+        Sets ``last_turn_cost_cents`` / ``last_turn_cost_basis`` and folds the cost
+        into the session tally. The caller writes the returned row, after the
+        episodic write, so a turn whose write-back fails is already priced.
+        """
         # M2 review (I2): ``usage`` arrives ALREADY summed across every round
         # of the turn (``_aggregate_round_usage`` in ``turn()``) — a 5-round
         # agentic turn's ``prompt_tokens`` / ``completion_tokens`` below are
@@ -2807,42 +2844,40 @@ class ConversationLoop:
             provider=served_provider,
             model=served_model,
         )
-        self._turn_log_writer.write(
-            TurnLog(
-                conversation_id=conversation.conversation_id,
-                turn_index=conversation.turn_count,
-                tier_used=tier,
-                # D-M2-2: the SERVED model names the turn (semantic correction —
-                # pre-M2 these carried the wrapper's primary on fallback turns).
-                model_name=served_model,
-                provider=served_provider,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms,
-                cost_cents=cost,
-                cost_basis=cost_basis,
-                tool_calls=tool_calls,
-                skill_used=skill_used,
-                skills_invoked=skills_invoked,
-                skill_budget_exceeded=skill_budget_exceeded,
-                history_compacted=compacted,
-                timestamp=datetime.now(UTC),
-                routing_decision=decision,
-                routing_latency_ms=routing_latency_ms,
-                routing_fallback_triggered=decision.fallback_triggered,
-                routing_fallback_reason=decision.fallback_reason,
-                reasoning_total_tokens=reasoning_total_tokens,
-                reasoning_text_hash=reasoning_text_hash,
-                tool_refusal_detected=tool_refusal_detected,
-                fallback_rate_alert=fallback_rate_alert,
-                refusal_retry_engaged=refusal_retry_engaged,
-                sandbox_session_recreated=session_recreated,
-                tool_gap_detected=tool_gap_detected or [],
-                tool_consent_granted=tool_consent_granted or [],
-                mcp_invocations=mcp_invocations or [],
-                mcp_unavailable_requested=mcp_unavailable_requested or [],
-                **fallback_kwargs,
-            )
+        return TurnLog(
+            conversation_id=conversation.conversation_id,
+            turn_index=conversation.turn_count,
+            tier_used=tier,
+            # D-M2-2: the SERVED model names the turn (semantic correction —
+            # pre-M2 these carried the wrapper's primary on fallback turns).
+            model_name=served_model,
+            provider=served_provider,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=latency_ms,
+            cost_cents=cost,
+            cost_basis=cost_basis,
+            tool_calls=tool_calls,
+            skill_used=skill_used,
+            skills_invoked=skills_invoked,
+            skill_budget_exceeded=skill_budget_exceeded,
+            history_compacted=compacted,
+            timestamp=datetime.now(UTC),
+            routing_decision=decision,
+            routing_latency_ms=routing_latency_ms,
+            routing_fallback_triggered=decision.fallback_triggered,
+            routing_fallback_reason=decision.fallback_reason,
+            reasoning_total_tokens=reasoning_total_tokens,
+            reasoning_text_hash=reasoning_text_hash,
+            tool_refusal_detected=tool_refusal_detected,
+            fallback_rate_alert=fallback_rate_alert,
+            refusal_retry_engaged=refusal_retry_engaged,
+            sandbox_session_recreated=session_recreated,
+            tool_gap_detected=tool_gap_detected or [],
+            tool_consent_granted=tool_consent_granted or [],
+            mcp_invocations=mcp_invocations or [],
+            mcp_unavailable_requested=mcp_unavailable_requested or [],
+            **fallback_kwargs,
         )
 
     def _update_fallback_window(

@@ -22,7 +22,10 @@ flushes immediately; text deltas debounce by char-count / wall-time (never
 per-token). On CLEAN completion the worker finalizes, **deducts credits** (the
 D-08-6 revision — bill regardless of client presence, D-P1-billing-contract),
 runs the best-effort ``on_complete`` hook (auto-title), and emits ``done``;
-cancel/error finalize the partial WITHOUT billing. In-process + single-worker
+cancel/error finalize the partial WITHOUT billing, except an error raised after the
+loop served and priced the answer (R9-316: the conversation was deleted while the
+turn streamed, so its write-back failed), which is charged once under a key rooted
+on the turn's assistant message id. In-process + single-worker
 (D-08-5); a restart loses the task — the checkpointed partial remains, reconciled
 to ``interrupted`` by the startup sweep (D-P1-restart-sweep).
 """
@@ -78,7 +81,7 @@ if TYPE_CHECKING:
 
 _log = get_logger("api.chat_turn_worker")
 
-__all__ = ["ChatTurnHandle", "ChatTurnRegistry", "ChatTurnSink"]
+__all__ = ["ChatTurnHandle", "ChatTurnRegistry", "ChatTurnSink", "served_turn_billing_key"]
 
 # Throttle knobs (D-P1-cadence): flush a text checkpoint at most this often.
 # Never per-token; a tool event always flushes immediately regardless.
@@ -95,6 +98,17 @@ _CHECKPOINT_INTERVAL_S = 1.0
 # balance) and never changes the flat-floor path's classic all-or-nothing
 # behaviour (pinned: kill-switch OFF never partial-captures).
 _FLAT_CHARGE_REASON = "chat_turn"
+
+
+def served_turn_billing_key(assistant_message_id: str) -> str:
+    """The idempotency key for a turn charged after its write-back failed (R9-316).
+
+    Rooted on the turn's assistant message id, which is minted per turn
+    (``msg_<uuid4>``) and never reused (a regenerate mints a new one), so the key is
+    unique across the whole ledger as R9-196 requires, and the same turn can never
+    be charged twice.
+    """
+    return f"{_FLAT_CHARGE_REASON}:{assistant_message_id}"
 
 
 class ChatTurnSink(Protocol):
@@ -336,6 +350,9 @@ class ChatTurnRegistry:
         last_chunk: StreamChunk | None = None
         error_message: str | None = None
         error_is_user_facing = False
+        # R9-316: the loop raised AFTER it served and priced the answer (its write-back
+        # failed, e.g. the conversation was deleted mid-stream). Charged once below.
+        served_before_failure = False
         originated: Mapping[str, Any] | None = None
         steered: Mapping[str, Any] | None = None
         rescheduled: Mapping[str, Any] | None = None
@@ -420,6 +437,9 @@ class ChatTurnRegistry:
                     "chat turn {cid} failed: {err}", cid=handle.conversation_id, err=str(exc)
                 )
                 status = "error"
+                # ``is True``: a loop shape without the R9-316 surface (or a mock whose
+                # attribute is merely truthy) keeps the old uncharged error.
+                served_before_failure = getattr(loop, "last_turn_served", False) is True
                 # R9-097: the FULL exception is logged above and stays the
                 # diagnostic record; what reaches the user is sanitised. A tier
                 # exhaustion stringifies to the provider names, model ids, tier
@@ -493,6 +513,8 @@ class ChatTurnRegistry:
                     ("done", self._done_payload(loop, last_chunk, tier, routing))
                 )
             elif status == "error":
+                if served_before_failure:
+                    self._bill_served_failure(handle, loop)
                 await handle.events.put(
                     (
                         "error",
@@ -668,8 +690,19 @@ class ChatTurnRegistry:
         # unclamped provider cost (D-M3-12 — basis honesty never traded for the wallet).
         return charge, f"chat_turn:{priced_basis}", priced_cost, priced_basis
 
-    def _deduct(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
+    def _deduct(
+        self,
+        handle: ChatTurnHandle,
+        loop: ConversationLoop,
+        *,
+        billing_key: str | None = None,
+    ) -> None:
         """Bill one turn on clean completion (D-P1-billing-contract; D-08-6 revision).
+
+        R9-316: with ``billing_key`` the same charge goes through the idempotent
+        deduct and capture (one ledger row per key), which is how a turn whose
+        write-back failed after serving is billed (:meth:`_bill_served_failure`).
+        Without it (a clean completion) the plain deduct runs, unchanged.
 
         Fires regardless of client presence (the turn ran), via the owner's bound
         RLS scope. ``None`` policy/engine → no billing (unit / community-unmetered).
@@ -718,14 +751,25 @@ class ChatTurnRegistry:
         engine = self._engine
         amount, reason, cost_cents, cost_basis = self._turn_charge(loop)
         try:
-            new_balance = policy.deduct(
-                rls_engine=engine,
-                user_id=handle.owner_id,
-                amount=amount,
-                reason=reason,
-                cost_cents=cost_cents,
-                cost_basis=cost_basis,
-            )
+            if billing_key is None:
+                new_balance = policy.deduct(
+                    rls_engine=engine,
+                    user_id=handle.owner_id,
+                    amount=amount,
+                    reason=reason,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
+                )
+            else:
+                new_balance = policy.deduct_idempotent(
+                    rls_engine=engine,
+                    user_id=handle.owner_id,
+                    amount=amount,
+                    reason=reason,
+                    billing_key=billing_key,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
+                )
             # Spec M4 T7b: a successful deduct may have CROSSED the $2 floor — fire the Pro
             # auto-top-up OFF the hot path (the turn's side effects below never wait on Stripe).
             # ``old_balance = new_balance + amount`` (the pre-deduct total); the crossing guard
@@ -743,6 +787,7 @@ class ChatTurnRegistry:
                     reason=reason,
                     cost_cents=cost_cents,
                     cost_basis=cost_basis,
+                    billing_key=billing_key,
                 )
             else:
                 _log.warning(
@@ -759,6 +804,45 @@ class ChatTurnRegistry:
                 owner=handle.owner_id,
                 conv=handle.conversation_id,
                 amount=amount,
+            )
+
+    def _bill_served_failure(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
+        """Charge a turn that failed AFTER its answer was served and priced (R9-316).
+
+        The usual cause: the conversation was deleted while the turn streamed, so
+        the loop's write-back failed (the episodic write is refused for a forgotten
+        conversation, or the TurnLog insert hits its foreign key). The user has
+        already seen the answer and the provider is paid (D-M3-1), so the turn is
+        charged from the loop's priced figure, the same amount a clean completion
+        would pay, through the idempotent deduct keyed on the turn's assistant
+        message id (:func:`served_turn_billing_key`), so it is charged exactly once.
+
+        The turn still ends as an error and nothing else of the completion path runs
+        (no synthesis, no title, no origination): the conversation is gone. A
+        failure here (the owner's account erased in the same moment, the database
+        unreachable) is logged and never stops the error event reaching the stream.
+        """
+        _log.warning(
+            "chat turn failed after its answer was served; charging its served usage "
+            "once; owner={owner} conversation={conv} message={mid}",
+            owner=handle.owner_id,
+            conv=handle.conversation_id,
+            mid=handle.assistant_message_id,
+        )
+        try:
+            self._deduct(
+                handle,
+                loop,
+                billing_key=served_turn_billing_key(handle.assistant_message_id),
+            )
+        except Exception as exc:  # noqa: BLE001  # billing must never swallow the error event
+            _log.opt(exception=True).error(
+                "charging a served turn that failed at write-back did not complete: "
+                "{err_type}; owner={owner} conversation={conv} message={mid}",
+                err_type=type(exc).__name__,
+                owner=handle.owner_id,
+                conv=handle.conversation_id,
+                mid=handle.assistant_message_id,
             )
 
     def _schedule_auto_topup(self, *, user_id: str, old_balance: int, new_balance: int) -> None:
@@ -808,6 +892,7 @@ class ChatTurnRegistry:
         reason: str,
         cost_cents: float | None = None,
         cost_basis: str | None = None,
+        billing_key: str | None = None,
     ) -> None:
         """Spec M2 review (C1): capture whatever balance remains instead of nothing.
 
@@ -817,16 +902,31 @@ class ChatTurnRegistry:
         amount, the same fail-closed discipline ``deduct`` already uses) —
         caught here per I3 so a maxed-out day-cap still lets the turn's side
         effects land rather than crashing the completion branch.
+
+        R9-316: with ``billing_key`` the capture is the idempotent one, under the
+        same key the rejected deduct used (that deduct rolled back, so the key is
+        still free).
         """
         try:
-            captured, _new_balance = policy.capture_up_to(
-                rls_engine=engine,
-                user_id=handle.owner_id,
-                amount=amount,
-                reason=reason,
-                cost_cents=cost_cents,
-                cost_basis=cost_basis,
-            )
+            if billing_key is None:
+                captured, _new_balance = policy.capture_up_to(
+                    rls_engine=engine,
+                    user_id=handle.owner_id,
+                    amount=amount,
+                    reason=reason,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
+                )
+            else:
+                captured, _new_balance = policy.capture_up_to_idempotent(
+                    rls_engine=engine,
+                    user_id=handle.owner_id,
+                    amount=amount,
+                    reason=reason,
+                    billing_key=billing_key,
+                    cost_cents=cost_cents,
+                    cost_basis=cost_basis,
+                )
         except DailySpendCapExceededError:
             _log.warning(
                 "post-turn billing skipped: daily spend cap reached while capturing a "
