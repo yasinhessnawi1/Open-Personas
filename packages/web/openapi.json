@@ -3651,7 +3651,7 @@
       "patch": {
         "tags": ["memory"],
         "summary": "Correct Node",
-        "description": "Correct a node's content (criterion 6) \u2014 re-embed, re-index, provenance \u2192 user-edited.\n\nThe most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the\npanel shows the user-edited provenance immediately. 404 when the node is not the caller's.",
+        "description": "Correct a node's content (criterion 6) \u2014 re-embed, re-index, provenance \u2192 user-edited.\n\nThe most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the\npanel shows the user-edited provenance immediately. 404 when the node is not the caller's;\n409 when it kept changing under the write, or the conversation the correction came from\nwas forgotten meanwhile.",
         "operationId": "correct_node_v1_memory_nodes__node_id__patch",
         "parameters": [
           {
@@ -6363,7 +6363,7 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Facts Kept",
-            "description": "Facts that stay because another conversation (or the user's own edit) also supports them. This conversation is no longer a source, but a kept fact's wording may still include words from this conversation: merging appends what each conversation said, and the words are not attributed to it."
+            "description": "Facts that stay because something else in Memory also supports them. This conversation is no longer a source, but a kept fact's wording may still include words from this conversation: merging appends what each source said, and the words are not attributed to it."
           }
         },
         "additionalProperties": false,

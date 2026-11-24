@@ -325,10 +325,10 @@ class ConversationForgetPreview(_Output):
     facts_kept: int = Field(
         ge=0,
         description=(
-            "Facts that stay because another conversation (or the user's own edit) also "
-            "supports them. This conversation is no longer a source, but a kept fact's "
-            "wording may still include words from this conversation: merging appends what "
-            "each conversation said, and the words are not attributed to it."
+            "Facts that stay because something else in Memory also supports them. This "
+            "conversation is no longer a source, but a kept fact's wording may still include "
+            "words from this conversation: merging appends what each source said, and the "
+            "words are not attributed to it."
         ),
     )
 

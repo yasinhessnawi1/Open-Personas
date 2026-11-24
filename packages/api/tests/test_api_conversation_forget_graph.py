@@ -152,7 +152,10 @@ def test_the_documented_kept_count_does_not_promise_the_words_go(client: TestCli
     schema = client.app.openapi()["components"]["schemas"]["ConversationForgetPreview"]  # type: ignore[attr-defined]
 
     kept = schema["properties"]["facts_kept"]["description"]
-    assert "another conversation" in kept
+    # Review MEDIUM: name no supporter. An episodic consolidation entry or a task run's
+    # record_user_fact also counts as support, and neither is "another conversation".
+    assert "something else in Memory also supports" in kept
+    assert "another conversation" not in kept
     assert "wording may still include words from this conversation" in kept
 
 

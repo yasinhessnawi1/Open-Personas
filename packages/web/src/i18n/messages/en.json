@@ -295,7 +295,7 @@
     "newMessage": "New message",
     "forgetMemoryCheckbox": "Also forget what {name} learned here",
     "forgetMemoryFacts": "{count, plural, =0 {No facts in Memory were learned only here.} one {This also removes # fact from Memory that was learned only here.} other {This also removes # facts from Memory that were learned only here.}}",
-    "forgetMemoryFactsKept": "{count, plural, one {# fact stays because another conversation or your own edit also supports it. Its wording may still include words from this conversation.} other {# facts stay because another conversation or your own edits also support them. Their wording may still include words from this conversation.}}",
+    "forgetMemoryFactsKept": "{count, plural, one {# fact stays because something else in Memory also supports it. Its wording may still include words from this conversation.} other {# facts stay because something else in Memory also supports them. Their wording may still include words from this conversation.}}",
     "deleteFailed": "Couldn't delete {name}. Try again in a moment.",
     "releaseItem": "Let {name} bring this up again",
     "holdItem": "Keep this out of {name}'s suggestions",

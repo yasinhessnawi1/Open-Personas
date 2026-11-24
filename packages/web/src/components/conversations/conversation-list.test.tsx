@@ -192,7 +192,7 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "1 fact stays because another conversation or your own edit also supports it. Its wording may still include words from this conversation.",
+        "1 fact stays because something else in Memory also supports it. Its wording may still include words from this conversation.",
       ),
     ).toBeInTheDocument();
   });
@@ -206,7 +206,7 @@ describe("ConversationList: the forget's Memory fact count (R9-304)", () => {
 
     expect(
       await screen.findByText(
-        "2 facts stay because another conversation or your own edits also support them. Their wording may still include words from this conversation.",
+        "2 facts stay because something else in Memory also supports them. Their wording may still include words from this conversation.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/learned elsewhere/)).not.toBeInTheDocument();

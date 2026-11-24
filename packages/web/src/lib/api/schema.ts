@@ -1931,7 +1931,9 @@ export interface paths {
      * @description Correct a node's content (criterion 6) — re-embed, re-index, provenance → user-edited.
      *
      *     The most trustworthy write the graph gets (K5-D-7). Returns the fresh detail so the
-     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's.
+     *     panel shows the user-edited provenance immediately. 404 when the node is not the caller's;
+     *     409 when it kept changing under the write, or the conversation the correction came from
+     *     was forgotten meanwhile.
      */
     patch: operations["correct_node_v1_memory_nodes__node_id__patch"];
     trace?: never;
@@ -3556,7 +3558,7 @@ export interface components {
       facts_removed: number;
       /**
        * Facts Kept
-       * @description Facts that stay because another conversation (or the user's own edit) also supports them. This conversation is no longer a source, but a kept fact's wording may still include words from this conversation: merging appends what each conversation said, and the words are not attributed to it.
+       * @description Facts that stay because something else in Memory also supports them. This conversation is no longer a source, but a kept fact's wording may still include words from this conversation: merging appends what each source said, and the words are not attributed to it.
        */
       facts_kept: number;
     };
