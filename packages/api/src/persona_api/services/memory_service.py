@@ -44,7 +44,7 @@ from persona_api.services import persona_service
 from persona_api.services.persona_service import persona_name_from_yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from persona.audit import AuditLogger
     from persona.graph.models import ConceptNode, NodeProvenance
@@ -103,6 +103,17 @@ def _conversation_id(origin: NodeProvenance) -> str | None:
     if origin.interaction_kind not in (None, InteractionKind.CONVERSATION.value):
         return None
     return origin.interaction_id
+
+
+def _origin(trail: Sequence[NodeProvenance]) -> NodeProvenance:
+    """The entry Memory shows as where a fact came from: the first one with grounding.
+
+    Usually the first entry. A conversation forget can strip the entry that created the fact
+    and leave a slim restatement (no grounding, so none of its words are stored) first; showing
+    that would show no reason the fact is believed (R9-311). With no grounded entry at all (the
+    SELF node's bookkeeping, say), the first entry.
+    """
+    return next((p for p in trail if p.grounding), trail[0])
 
 
 def _summary(node: ConceptNode, *, degree: int = 0) -> MemoryNodeSummary:
@@ -361,9 +372,10 @@ def node_detail(
     """The node's full detail — content, provenance-as-story, evolution, typed links.
 
     Returns ``None`` when the node is not the owner's (the route 404s). The evolution
-    is the node's full accumulation trail (D-K0-4); ``origin`` is its first
-    contribution (where it came from). Typed links come from ``neighbors`` so the four
-    relationships — including on-the-fly ENTITY threads — are all traversable.
+    is the node's full accumulation trail (D-K0-4); ``origin`` is its first grounded
+    contribution (where it came from, :func:`_origin`). Typed links come from
+    ``neighbors`` so the four relationships, including on-the-fly ENTITY threads, are all
+    traversable.
 
     ``persona_name_resolver`` resolves the origin's ``persona_id`` to a display name so
     the panel reads "learned by <persona>" instead of a bare "system" (R-K5-PROV-PERSONA);
@@ -375,7 +387,7 @@ def node_detail(
     if node is None:
         return None
     trail = node.provenance  # at least one entry (ConceptNode invariant)
-    origin = trail[0]
+    origin = _origin(trail)
     persona_name = (
         persona_name_resolver(origin.persona_id)
         if persona_name_resolver is not None and origin.persona_id is not None

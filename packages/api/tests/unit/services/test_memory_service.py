@@ -376,6 +376,52 @@ def test_a_restatement_is_not_a_step_in_the_timeline() -> None:
     assert [e.reason for e in detail.evolution] == ["first learned"]
 
 
+def test_the_origin_is_the_first_grounded_entry_once_a_forget_stripped_the_original() -> None:
+    """R9-311: a forget can strip the entry that created a fact and leave a slim restatement
+    first. The origin is the first entry with grounding, so Memory still shows why it is
+    believed."""
+    from persona.graph.merge import RESTATED_REASON  # noqa: PLC0415
+
+    trail = [
+        NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            interaction_id="conv-d",
+            interaction_kind="conversation",
+            written_at=NOW,
+            reason=RESTATED_REASON,
+        ),
+        NodeProvenance(
+            source=WriteSource.PERSONA_SELF,
+            interaction_id="conv-e",
+            interaction_kind="conversation",
+            written_at=NOW,
+            grounding="I walk Balto every morning",
+            reason="extended",
+        ),
+    ]
+    store = _FakeStore([_node("hub", provenance=trail)], [])
+
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+
+    assert detail is not None
+    assert detail.origin.grounding == "I walk Balto every morning"
+    assert detail.origin.conversation_id == "conv-e"
+
+
+def test_the_origin_falls_back_to_the_first_entry_when_none_is_grounded() -> None:
+    trail = [
+        NodeProvenance(source=WriteSource.SYSTEM, written_at=NOW, reason="self node created"),
+        NodeProvenance(source=WriteSource.USER, written_at=NOW, reason="name updated"),
+    ]
+    store = _FakeStore([_node("hub", provenance=trail)], [])
+
+    detail = memory_service.node_detail(store, "u1", "hub")  # type: ignore[arg-type]
+
+    assert detail is not None
+    assert detail.origin.source == "system"
+    assert detail.origin.reason == "self node created"
+
+
 def test_node_detail_carries_wellbeing_mark() -> None:
     store = _FakeStore([_node("grief_node", wellbeing="grief")], [])
     detail = memory_service.node_detail(store, "u1", "grief_node")  # type: ignore[arg-type]
