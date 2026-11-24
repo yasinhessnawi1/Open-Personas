@@ -80,6 +80,7 @@ async def test_chat_entry_over_cap_raises_before_persist(seeded_engine: Engine) 
 
     with pytest.raises(ConcurrencyCappedError) as ei:
         await chat_service.start_chat_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,

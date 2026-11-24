@@ -137,6 +137,7 @@ async def test_stream_turn_reattach_delivers_buffered_backlog_then_live_tail(
 
     registry = ChatTurnRegistry(sink=MessagesTurnSink(engine), rls_engine=engine)
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=MessagesTurnSink(engine),
         registry=registry,

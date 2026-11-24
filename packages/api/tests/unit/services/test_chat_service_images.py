@@ -180,6 +180,7 @@ async def test_start_chat_turn_forwards_resolved_images_to_loop(
         return captured
 
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=_FakeEngine(),  # type: ignore[arg-type]
         sink=_FakeSink(),  # type: ignore[arg-type]
         registry=ChatTurnRegistry(sink=_FakeSink()),  # type: ignore[arg-type]

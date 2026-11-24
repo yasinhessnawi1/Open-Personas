@@ -1089,7 +1089,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # between-restarts half is the lazy self-heal in chat_service.start_chat_turn.
     _sweep_engine = admin_engine if admin_engine is not None else rls_engine
     if _sweep_engine is not None:
-        reconcile_in_flight_on_startup(engine=_sweep_engine)
+        # R9-318: it also frees the long-op slots this instance's previous process held.
+        reconcile_in_flight_on_startup(engine=_sweep_engine, long_op_instance=config.instance_id)
 
     # Spec V14 (D-V14-13 trigger, T5a): the AUTO-REMAP reconciliation the T4b/T4c
     # batch report flagged as unwired — an API-startup pass that re-picks (or,
@@ -1305,6 +1306,8 @@ def create_app(config: APIConfig | None = None) -> FastAPI:
     # (chat/agentic long-op admission; imagegen/voice bounded slots).
     _cloud = config.edition is Edition.cloud
     app.state.max_concurrent_long_ops = config.max_concurrent_long_ops_per_user if _cloud else 0
+    # R9-318: the instance every long-op slot is stamped with, for the next boot's sweep.
+    app.state.long_op_instance = config.instance_id
     app.state.max_concurrent_bounded_ops = (
         config.max_concurrent_bounded_ops_per_user if _cloud else 0
     )

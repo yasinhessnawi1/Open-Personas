@@ -154,6 +154,7 @@ async def test_start_chat_turn_binds_scope_during_build_and_resets_after(engine:
     sink = MessagesTurnSink(engine)
     registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -178,6 +179,7 @@ async def test_start_persists_user_and_in_progress_assistant_immediately(engine:
     sink = MessagesTurnSink(engine)
     registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -199,6 +201,7 @@ async def test_stream_turn_emits_chunks_then_done_and_finalizes_complete(engine:
     sink = MessagesTurnSink(engine)
     registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -230,6 +233,7 @@ async def test_second_concurrent_turn_is_blocked_409(engine: Engine) -> None:
 
     async def _start_one(loop: object) -> object:
         return await chat_service.start_chat_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,
@@ -276,6 +280,7 @@ async def test_orphaned_running_row_is_healed_then_new_turn_opens(engine: Engine
 
     registry = ChatTurnRegistry(sink=sink, rls_engine=engine)  # fresh — nothing registered
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -310,6 +315,7 @@ async def test_registry_active_turn_blocks_409_without_touching_the_running_row(
 
     async def _start_one(loop: object) -> object:
         return await chat_service.start_chat_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,
@@ -372,6 +378,7 @@ async def test_toctou_race_on_open_turn_maps_to_409_not_a_raw_500(engine: Engine
 
     with pytest.raises(TurnAlreadyActiveError):
         await chat_service.start_chat_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,
@@ -400,6 +407,7 @@ async def test_error_turn_persists_partial_emits_error_no_done_no_bill(engine: E
         credits_per_turn=7,  # type: ignore[arg-type]
     )
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -433,6 +441,7 @@ async def test_clean_completion_bills_once(engine: Engine) -> None:
         credits_per_turn=7,  # type: ignore[arg-type]
     )
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,
@@ -458,6 +467,7 @@ async def test_first_turn_auto_titles_on_completion(engine: Engine) -> None:
     sink = MessagesTurnSink(engine)
     registry = ChatTurnRegistry(sink=sink, rls_engine=engine)
     handle = await chat_service.start_chat_turn(
+        long_op_instance="api",
         rls_engine=engine,
         sink=sink,
         registry=registry,

@@ -19,7 +19,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
-from persona.concurrency import acquire_user_concurrency, admit_long_op, release_long_op
+from persona.concurrency import (
+    PROCESS_BOOT_ID,
+    acquire_user_concurrency,
+    admit_long_op,
+    release_long_op,
+    release_previous_boot_long_ops,
+)
 from sqlalchemy import text
 
 if TYPE_CHECKING:
@@ -31,7 +37,16 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def seeded_engine(pg_engine: Engine) -> Engine:
     with pg_engine.begin() as conn:
-        for uid in ("u_bounded", "u_bounded1", "u_unl", "u_long", "u_rel", "u_crash", "u_uncap"):
+        for uid in (
+            "u_bounded",
+            "u_bounded1",
+            "u_unl",
+            "u_long",
+            "u_rel",
+            "u_crash",
+            "u_uncap",
+            "u_boot",
+        ):
             conn.execute(
                 text("INSERT INTO users (id, email) VALUES (:i, :e) ON CONFLICT DO NOTHING"),
                 {"i": uid, "e": f"{uid}@x.test"},
@@ -158,7 +173,11 @@ def test_long_op_n_plus_one_starts_admit_exactly_n(seeded_engine: Engine) -> Non
 
     def _start(_: int) -> str | None:
         return admit_long_op(
-            rls_engine=engine, user_id="u_long", op_class="chat", max_concurrent=cap
+            rls_engine=engine,
+            user_id="u_long",
+            op_class="chat",
+            instance_id="api",
+            max_concurrent=cap,
         )
 
     with ThreadPoolExecutor(max_workers=n_threads) as pool:
@@ -173,18 +192,40 @@ def test_long_op_release_frees_a_slot(seeded_engine: Engine) -> None:
     """The release path: completion deletes the row → the next admit succeeds."""
     engine = seeded_engine
     cap = 2
-    t1 = admit_long_op(rls_engine=engine, user_id="u_rel", op_class="agentic", max_concurrent=cap)
-    t2 = admit_long_op(rls_engine=engine, user_id="u_rel", op_class="agentic", max_concurrent=cap)
+    t1 = admit_long_op(
+        rls_engine=engine,
+        user_id="u_rel",
+        op_class="agentic",
+        instance_id="api",
+        max_concurrent=cap,
+    )
+    t2 = admit_long_op(
+        rls_engine=engine,
+        user_id="u_rel",
+        op_class="agentic",
+        instance_id="api",
+        max_concurrent=cap,
+    )
     assert t1 is not None
     assert t2 is not None
     # Cap full → refused.
     refused = admit_long_op(
-        rls_engine=engine, user_id="u_rel", op_class="agentic", max_concurrent=cap
+        rls_engine=engine,
+        user_id="u_rel",
+        op_class="agentic",
+        instance_id="api",
+        max_concurrent=cap,
     )
     assert refused is None
     # Release one → a slot frees → next admit succeeds.
     release_long_op(rls_engine=engine, user_id="u_rel", op_id=t1)
-    t3 = admit_long_op(rls_engine=engine, user_id="u_rel", op_class="agentic", max_concurrent=cap)
+    t3 = admit_long_op(
+        rls_engine=engine,
+        user_id="u_rel",
+        op_class="agentic",
+        instance_id="api",
+        max_concurrent=cap,
+    )
     assert t3 is not None, "releasing a slot must let the next long op start"
     assert _inflight_count(engine, "u_rel", "agentic") == cap
 
@@ -203,7 +244,12 @@ def test_long_op_crash_safety_stale_row_reclaimed(seeded_engine: Engine) -> None
         )
     # Cap 1, TTL 60s: the 2h-old leaked row is stale → swept → admit succeeds.
     token = admit_long_op(
-        rls_engine=engine, user_id="u_crash", op_class="chat", max_concurrent=1, ttl_seconds=60
+        rls_engine=engine,
+        user_id="u_crash",
+        op_class="chat",
+        instance_id="api",
+        max_concurrent=1,
+        ttl_seconds=60,
     )
     assert token is not None, "a stale (crashed) row must be reclaimed, not eat the slot forever"
     # The leaked row is gone; only the fresh admit remains.
@@ -211,7 +257,12 @@ def test_long_op_crash_safety_stale_row_reclaimed(seeded_engine: Engine) -> None
 
     # A FRESH row (not stale) is NOT reclaimed — the cap still holds.
     fresh_refused = admit_long_op(
-        rls_engine=engine, user_id="u_crash", op_class="chat", max_concurrent=1, ttl_seconds=60
+        rls_engine=engine,
+        user_id="u_crash",
+        op_class="chat",
+        instance_id="api",
+        max_concurrent=1,
+        ttl_seconds=60,
     )
     assert fresh_refused is None, "a live (fresh) row must still count against the cap"
 
@@ -221,9 +272,78 @@ def test_long_op_uncapped_is_no_op(seeded_engine: Engine) -> None:
     engine = seeded_engine
     for _ in range(5):
         token = admit_long_op(
-            rls_engine=engine, user_id="u_uncap", op_class="chat", max_concurrent=0
+            rls_engine=engine,
+            user_id="u_uncap",
+            op_class="chat",
+            instance_id="api",
+            max_concurrent=0,
         )
         assert token is not None
     assert _inflight_count(engine, "u_uncap", "chat") == 0, "uncapped admission writes no row"
     # Releasing the sentinel is a harmless no-op.
     release_long_op(rls_engine=engine, user_id="u_uncap", op_id="unlimited")
+
+
+def test_a_slot_held_at_shutdown_is_freed_by_the_next_boot(seeded_engine: Engine) -> None:
+    """R9-318: a turn abandoned at the shutdown deadline never releases its slot. The next
+    boot's sweep frees it at once instead of after the hour-long TTL, while a slot this
+    process holds and a slot another instance holds stay booked."""
+    engine = seeded_engine
+    mine = admit_long_op(
+        rls_engine=engine, user_id="u_boot", op_class="chat", max_concurrent=2, instance_id="api"
+    )
+    theirs = admit_long_op(
+        rls_engine=engine, user_id="u_boot", op_class="chat", max_concurrent=2, instance_id="api-2"
+    )
+    assert mine is not None
+    assert theirs is not None
+    with engine.begin() as conn:
+        stamped = dict(
+            conn.execute(
+                text("SELECT id, boot_id FROM inflight_ops WHERE user_id = 'u_boot'")
+            ).all()
+        )
+    assert stamped == {mine: PROCESS_BOOT_ID, theirs: PROCESS_BOOT_ID}
+    # The user is at the cap of 2.
+    assert (
+        admit_long_op(
+            rls_engine=engine,
+            user_id="u_boot",
+            op_class="chat",
+            instance_id="api",
+            max_concurrent=2,
+        )
+        is None
+    )
+
+    # This process's own sweep keeps both: they are live ops.
+    with engine.begin() as conn:
+        assert release_previous_boot_long_ops(conn=conn, instance_id="api") == 0
+    assert _inflight_count(engine, "u_boot", "chat") == 2
+
+    # The next boot of instance "api" frees its predecessor's slot, not api-2's.
+    with engine.begin() as conn:
+        assert (
+            release_previous_boot_long_ops(conn=conn, instance_id="api", boot_id="next_boot") == 1
+        )
+    with engine.begin() as conn:
+        left = set(
+            conn.execute(text("SELECT id FROM inflight_ops WHERE user_id = 'u_boot'")).scalars()
+        )
+    assert left == {theirs}
+    # Idempotent: a second pass of the same boot finds nothing.
+    with engine.begin() as conn:
+        assert (
+            release_previous_boot_long_ops(conn=conn, instance_id="api", boot_id="next_boot") == 0
+        )
+    # The user can start a turn again without waiting out the TTL.
+    assert (
+        admit_long_op(
+            rls_engine=engine,
+            user_id="u_boot",
+            op_class="chat",
+            instance_id="api",
+            max_concurrent=2,
+        )
+        is not None
+    )

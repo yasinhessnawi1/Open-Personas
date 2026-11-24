@@ -932,6 +932,11 @@ inflight_ops = Table(
     Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("op_class", Text, nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    # R9-318 (migration 070): the api instance and the process boot that took the slot, so
+    # the next boot frees the slots a dead process left (``release_previous_boot_long_ops``)
+    # instead of leaving them for the TTL. NULL on a slot written before 070.
+    Column("instance_id", Text),
+    Column("boot_id", Text),
     # The count-filter admission (``WHERE count(inflight) < :max``) reads this index.
     Index("idx_inflight_by_owner", "user_id", "op_class"),
 )

@@ -645,6 +645,7 @@ async def test_regenerate_409_when_a_turn_is_active_supersedes_nothing(
 
     with pytest.raises(TurnAlreadyActiveError):
         await chat_service.regenerate_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,
@@ -709,6 +710,7 @@ async def test_edit_409_when_a_turn_is_active_supersedes_nothing(
 
     with pytest.raises(TurnAlreadyActiveError):
         await chat_service.edit_and_rerun_turn(
+            long_op_instance="api",
             rls_engine=engine,
             sink=sink,
             registry=registry,
