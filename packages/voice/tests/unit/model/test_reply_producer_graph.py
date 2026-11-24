@@ -262,9 +262,10 @@ class TestK4WindowReachesTheGate:
     Voice especially: an uncanny topic-evasion mid-call is the worst failure, and voice
     threads context differently (the graph query runs off-thread). The window is published
     by the reply producer in the turn coroutine BEFORE the off-thread query, and must
-    propagate THROUGH ``asyncio.to_thread`` into the gate. Proven by driving a real
-    producer turn and asserting the gate observed the prior conversation — NOT by priming
-    the ContextVar (which would prove the gate reads it, not that the producer sets it).
+    propagate into the gate through the context copy start_graph_retrieval makes at
+    kick-off. Proven by driving a real producer turn and asserting the gate observed the
+    prior conversation, NOT by priming the ContextVar (which would prove the gate reads it,
+    not that the producer sets it).
     """
 
     @pytest.mark.asyncio

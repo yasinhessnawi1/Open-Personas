@@ -179,8 +179,9 @@ def build_voice_graph_retrieval(
     # The recent-window source: the per-turn ContextVar the reply producer
     # publishes (``set_recent_window_from_messages``) BEFORE the off-thread query,
     # so the gate reads the conversation, not the bare query (no uncanny
-    # re-closing). ``asyncio.to_thread`` copies the ContextVar into the worker
-    # thread — pinned live in T2. Unset ⇒ empty ⇒ query-only (fail-safe).
+    # re-closing). The context copy start_graph_retrieval makes at kick-off carries
+    # the ContextVar into the worker thread (pinned live in T2). Unset means empty,
+    # which means query-only (fail-safe).
     retrieval = make_graph_retrieval(
         retriever=retriever,
         owner_provider=lambda: owner_id,

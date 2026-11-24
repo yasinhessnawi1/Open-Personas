@@ -46,9 +46,11 @@ _FREE_ONLY = (("openrouter", "acme/first:free"), ("openrouter", "acme/second:fre
 
 
 class _CloudConfig:
-    """The launcher reads only ``is_cloud``; cloud builds the free registry too."""
+    """The launcher reads ``is_cloud`` and the graph pool size; cloud builds the free
+    registry too."""
 
     is_cloud = True
+    graph_query_workers = 2
 
 
 class _BuildStoppedError(Exception):

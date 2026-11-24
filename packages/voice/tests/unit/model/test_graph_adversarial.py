@@ -11,10 +11,11 @@ Three guarantees, proven not asserted (the chat analog is
 2. **A misbehaving retrieval degrades to a clean memoryless turn.** A store that
    throws never breaks the call: ``take_graph_if_ready`` returns an empty bundle,
    the turn proceeds graph-off. (Graph is additive presence, never a failure path.)
-3. **The recent-window ContextVar crosses ``asyncio.to_thread`` with retrieval
-   LIVE.** K4 wired ``set_recent_window_from_messages`` on the producer; now that
-   the query actually runs off-thread, the gate must still read the window
-   in-thread — proven by a window-only lift surviving the thread hop.
+3. **The recent-window ContextVar crosses into the worker thread with retrieval
+   LIVE**, through the context copy start_graph_retrieval makes at kick-off. K4 wired
+   ``set_recent_window_from_messages`` on the producer; now that the query actually
+   runs off-thread, the gate must still read the window in-thread, proven by a
+   window-only lift surviving the thread hop.
 """
 
 from __future__ import annotations
@@ -160,12 +161,13 @@ async def test_throwing_retrieval_degrades_to_a_clean_memoryless_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recent_window_contextvar_crosses_to_thread_with_retrieval_live() -> None:
+async def test_recent_window_contextvar_crosses_the_kick_off_copy_with_retrieval_live() -> None:
     # The live thread-boundary pin: the crisis node is UNRELATED to the query, so a
     # query-only gate would subtract it; it lifts ONLY via the recent-window
     # (set on this context before the off-thread query). If the ContextVar did not
-    # cross asyncio.to_thread, the window would be empty in-thread and the node
-    # would be subtracted — so its SURVIVAL proves the crossing.
+    # cross through the context copy start_graph_retrieval makes at kick-off, the
+    # window would be empty in-thread and the node would be subtracted, so its
+    # SURVIVAL proves the crossing.
     comp = build_voice_graph_retrieval(_LeakyStore(), owner_id=_OWNER)  # type: ignore[arg-type]
     set_recent_window_from_messages(
         [

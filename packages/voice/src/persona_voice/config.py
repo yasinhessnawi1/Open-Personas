@@ -66,6 +66,14 @@ class VoiceConfig(BaseSettings):
     # that a stuck session costs a couple of dollars. ``0`` disables the ceiling.
     max_billable_call_minutes: int = Field(default=120, ge=0)
 
+    # --- Voice graph query pool (R9-323) ---
+    # Workers in the small pool the per-turn graph query runs on, kept apart from
+    # the default executor so it never queues ahead of the turn's store read. A
+    # query not ready by prompt assembly is dropped and, if still queued,
+    # cancelled; a sustained run of late drops is logged at warning. Raise this
+    # only if those warnings show up with a healthy graph backend.
+    graph_query_workers: int = Field(default=2, ge=1, le=64)
+
     @property
     def is_cloud(self) -> bool:
         """Whether this process runs the commercial cloud edition."""
