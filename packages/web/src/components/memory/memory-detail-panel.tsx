@@ -268,10 +268,13 @@ export function MemoryDetailPanel({
   };
 
   // The source conversation this memory was learned in (provenance-as-story lets
-  // the user trace it back). Enabled only when the provenance carries a reference.
-  const conversationRef = detail?.origin.interaction_id ?? null;
+  // the user trace it back). Linked by `conversation_id`, never `interaction_id`:
+  // a run or task leg origin carries a run id there, and `/chat/{run_id}` is a 404
+  // (R-K5-OPEN-CONV). The API sets `conversation_id` only for a conversation, so
+  // the link is shown only when there is one.
+  const conversationId = detail?.origin.conversation_id ?? null;
   const openConversation = () => {
-    if (conversationRef) router.push(`/chat/${conversationRef}`);
+    if (conversationId) router.push(`/chat/${conversationId}`);
   };
 
   const sortedLinks = detail
@@ -495,15 +498,17 @@ export function MemoryDetailPanel({
             </div>
 
             {/* footer — trace back to the source, and the deletion lever */}
-            <div className="flex gap-2.5 border-t px-5 py-4">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={openConversation}
-                disabled={!conversationRef || busy}
-              >
-                <MessageSquare className="size-4" /> {t("openConversation")}
-              </Button>
+            <div className="flex justify-end gap-2.5 border-t px-5 py-4">
+              {conversationId ? (
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  onClick={openConversation}
+                  disabled={busy}
+                >
+                  <MessageSquare className="size-4" /> {t("openConversation")}
+                </Button>
+              ) : null}
               <Button
                 variant="ghost"
                 onClick={remove}

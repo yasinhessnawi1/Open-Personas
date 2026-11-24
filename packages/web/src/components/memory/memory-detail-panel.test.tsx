@@ -73,7 +73,7 @@ const CANDIDATES: ForgetCandidate[] = [
   },
 ];
 
-function renderPanel() {
+function renderPanel(detail: MemoryNodeDetail = DETAIL) {
   const onDeleted = vi.fn();
   render(
     <NextIntlClientProvider locale="en" messages={en}>
@@ -82,7 +82,7 @@ function renderPanel() {
         onClose={vi.fn()}
         onTraverse={vi.fn()}
         onDeleted={onDeleted}
-        initialDetail={DETAIL}
+        initialDetail={detail}
       />
     </NextIntlClientProvider>,
   );
@@ -195,5 +195,55 @@ describe("MemoryDetailPanel — cross-layer forget (K11-T5)", () => {
     await waitFor(() => expect(h.confirm).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(h.del).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith("n1"));
+  });
+});
+
+/** A detail whose origin is the given provenance (the rest is DETAIL). */
+function withOrigin(
+  origin: Partial<MemoryNodeDetail["origin"]>,
+): MemoryNodeDetail {
+  return { ...DETAIL, origin: { ...DETAIL.origin, ...origin } };
+}
+
+describe("MemoryDetailPanel: open the source conversation (R-K5-OPEN-CONV)", () => {
+  it("a chat origin opens /chat/{conversation_id}", () => {
+    renderPanel(
+      withOrigin({ interaction_id: "conv-1", conversation_id: "conv-1" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Open conversation/ }));
+
+    expect(h.push).toHaveBeenCalledWith("/chat/conv-1");
+  });
+
+  it("links by conversation_id, never by the interaction id", () => {
+    renderPanel(
+      withOrigin({
+        interaction_id: "interaction-9",
+        conversation_id: "conv-2",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Open conversation/ }));
+
+    expect(h.push).toHaveBeenCalledWith("/chat/conv-2");
+    expect(h.push).not.toHaveBeenCalledWith("/chat/interaction-9");
+  });
+
+  it("a run-sourced origin shows no conversation link", () => {
+    renderPanel(withOrigin({ interaction_id: "run-1", conversation_id: null }));
+
+    expect(
+      screen.queryByRole("button", { name: /Open conversation/ }),
+    ).not.toBeInTheDocument();
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it("an origin with no source reference shows no conversation link", () => {
+    renderPanel();
+
+    expect(
+      screen.queryByRole("button", { name: /Open conversation/ }),
+    ).not.toBeInTheDocument();
   });
 });
