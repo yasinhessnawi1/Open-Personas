@@ -23,9 +23,10 @@ per-token). On CLEAN completion the worker finalizes, **deducts credits** (the
 D-08-6 revision — bill regardless of client presence, D-P1-billing-contract),
 runs the best-effort ``on_complete`` hook (auto-title), and emits ``done``;
 cancel/error finalize the partial WITHOUT billing, except an error raised after the
-loop served and priced the answer (R9-316: the conversation was deleted while the
-turn streamed, so its write-back failed), which is charged once under a key rooted
-on the turn's assistant message id. In-process + single-worker
+loop served and priced the answer (R9-316: its write-back was refused), which is
+charged once under a key rooted on the turn's assistant message id, and only on a
+surface that keeps the streamed text on an error (the web chat, not the connectors).
+In-process + single-worker
 (D-08-5); a restart loses the task — the checkpointed partial remains, reconciled
 to ``interrupted`` by the startup sweep (D-P1-restart-sweep).
 """
@@ -201,6 +202,7 @@ class ChatTurnRegistry:
         task_reschedule_service: TaskRescheduleService | None = None,
         initiative_verb_service: InitiativeVerbService | None = None,
         delivers_images: bool = True,
+        delivers_streamed_text_on_error: bool = False,
         shutdown_timeout_s: float = DEFAULT_CHAT_TURN_SHUTDOWN_TIMEOUT_S,
     ) -> None:
         if shutdown_timeout_s <= 0:
@@ -213,6 +215,12 @@ class ChatTurnRegistry:
         # each turn's request context, where the chat image charge reads it; the connector
         # registry passes False, so a persona's image on Telegram is made and not charged.
         self._delivers_images = delivers_images
+        # R9-316: whether the user still has the streamed text when a turn ends on an error
+        # frame. The web chat keeps what streamed on screen, so a turn that failed only at
+        # its write-back was delivered and is charged (``_bill_served_failure``). A connector
+        # sends only the failure message (``_collect_reply`` drops the text), so nothing
+        # was delivered and nothing is charged (D-ORCH-11-18-y). Off unless a surface says.
+        self._delivers_streamed_text_on_error = delivers_streamed_text_on_error
         self._engine = rls_engine
         self._credits_policy = credits_policy
         # Spec M4 T7b: the Stripe gateway drives Pro auto-top-up off the hot path (fired
@@ -261,6 +269,11 @@ class ChatTurnRegistry:
     def delivers_images(self) -> bool:
         """Whether turns run here can show a generated image (R9-308)."""
         return self._delivers_images
+
+    @property
+    def delivers_streamed_text_on_error(self) -> bool:
+        """Whether an errored turn's streamed text still reaches the user (R9-316)."""
+        return self._delivers_streamed_text_on_error
 
     def get(self, conversation_id: str) -> ChatTurnHandle | None:
         return self._handles.get(conversation_id)
@@ -351,7 +364,7 @@ class ChatTurnRegistry:
         error_message: str | None = None
         error_is_user_facing = False
         # R9-316: the loop raised AFTER it served and priced the answer (its write-back
-        # failed, e.g. the conversation was deleted mid-stream). Charged once below.
+        # was refused). Charged once below on a surface that delivered the streamed text.
         served_before_failure = False
         originated: Mapping[str, Any] | None = None
         steered: Mapping[str, Any] | None = None
@@ -809,19 +822,35 @@ class ChatTurnRegistry:
     def _bill_served_failure(self, handle: ChatTurnHandle, loop: ConversationLoop) -> None:
         """Charge a turn that failed AFTER its answer was served and priced (R9-316).
 
-        The usual cause: the conversation was deleted while the turn streamed, so
-        the loop's write-back failed (the episodic write is refused for a forgotten
-        conversation, or the TurnLog insert hits its foreign key). The user has
-        already seen the answer and the provider is paid (D-M3-1), so the turn is
-        charged from the loop's priced figure, the same amount a clean completion
-        would pay, through the idempotent deduct keyed on the turn's assistant
-        message id (:func:`served_turn_billing_key`), so it is charged exactly once.
+        The loop's write-back failed after the answer streamed: the episodic write
+        was refused (a forgotten conversation), or the TurnLog insert was refused
+        (RLS WITH CHECK under ``persona_app``, or the foreign key, once the
+        conversation row is gone; or a database fault). A conversation DELETE in
+        this process cancels its live turn first, so that turn ends ``cancelled``
+        and free; this covers the rest. On a surface that keeps the streamed text
+        on screen (``delivers_streamed_text_on_error``, the web chat) the user has
+        the answer and the provider is paid (D-M3-1), so the turn is charged from
+        the loop's priced figure, the same amount a clean completion would pay,
+        through the idempotent deduct keyed on the turn's assistant message id
+        (:func:`served_turn_billing_key`), so it is charged exactly once. A surface
+        that drops the text on an error frame (the connectors) delivered nothing and
+        charges nothing (D-ORCH-11-18-y).
 
         The turn still ends as an error and nothing else of the completion path runs
-        (no synthesis, no title, no origination): the conversation is gone. A
-        failure here (the owner's account erased in the same moment, the database
-        unreachable) is logged and never stops the error event reaching the stream.
+        (no synthesis, no title, no origination). A failure here (the owner's account
+        erased in the same moment, the database unreachable) is logged and never
+        stops the error event reaching the stream.
         """
+        if not self._delivers_streamed_text_on_error:
+            _log.info(
+                "chat turn failed after its answer was served, but this surface drops the "
+                "text on an error, so it is not charged; owner={owner} conversation={conv} "
+                "message={mid}",
+                owner=handle.owner_id,
+                conv=handle.conversation_id,
+                mid=handle.assistant_message_id,
+            )
+            return
         _log.warning(
             "chat turn failed after its answer was served; charging its served usage "
             "once; owner={owner} conversation={conv} message={mid}",

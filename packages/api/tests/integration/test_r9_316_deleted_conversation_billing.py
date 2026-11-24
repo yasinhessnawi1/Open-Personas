@@ -1,19 +1,26 @@
-"""R9-316: a conversation deleted while a turn streams no longer makes that turn free.
+"""R9-316: a web turn whose write-back is refused after it streamed is charged once.
+
+The conversation DELETE route now cancels a live turn in this process first, so that
+turn ends ``cancelled`` and free. This file covers what is left: the row deleted from
+elsewhere (another api process, an operator), which this process cannot cancel, so the
+turn streams its whole answer and then its write-back is refused.
 
 Drives the REAL chain the M2 billing tests use (``test_m2_i2_multiround_billing.py``):
 a persona seeded in Postgres, ``RuntimeFactory.build_conversation_loop`` building a
 real :class:`ConversationLoop` that writes through the REAL Postgres episodic store
 and :class:`PostgresTurnLogWriter`, the REAL detached worker, and the REAL
 :class:`MeteredCreditsPolicy` ledger. The only fake is the scripted backend, which
-deletes the conversation row while it streams the answer (no network).
+deletes the conversation row while it streams the answer (no network). The registry
+is the web chat's shape (``delivers_streamed_text_on_error=True``).
 
 Two ways the write-back fails once the row is gone, and both must end in exactly one
 charge for the served answer:
 
-* a plain delete: the episodic write is allowed (a plain delete keeps memory), then
-  the ``turn_logs`` insert fails on its foreign key to ``conversations``;
+* a plain delete: the episodic write is allowed (a plain delete keeps memory, so one
+  stamped chunk is left), then the ``turn_logs`` insert is refused (RLS WITH CHECK
+  under ``persona_app``, or the foreign key to ``conversations``);
 * a delete that forgets the memory (PR #51, migration 068): the conversation is
-  marked forgotten and the episodic write is refused first.
+  marked forgotten and the episodic write is refused first (no chunk is left).
 
 Integration-marked (real Postgres, RLS-scoped); skips when APP_DATABASE_URL is unset.
 """
@@ -203,11 +210,29 @@ def _delete_conversation(
     su.dispose()
 
 
-def _cleanup(su_url: str, owner: str) -> None:
+def _cleanup(su_url: str, owner: str, persona_id: str) -> None:
     su = make_rls_engine(su_url)
     with su.begin() as conn:
+        conn.execute(text("DELETE FROM memory_chunks WHERE persona_id = :p"), {"p": persona_id})
         conn.execute(text("DELETE FROM users WHERE id = :i"), {"i": owner})
     su.dispose()
+
+
+def _stamped_episodic_chunks(su_url: str, persona_id: str, conv_id: str) -> int:
+    """Episodic chunks this turn left, stamped with the conversation (via the superuser)."""
+    su = make_rls_engine(su_url)
+    with su.begin() as conn:
+        count = int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM memory_chunks WHERE persona_id = :p "
+                    "AND kind = 'episodic' AND metadata ->> 'conversation_id' = :c"
+                ),
+                {"p": persona_id, "c": conv_id},
+            ).scalar_one()
+        )
+    su.dispose()
+    return count
 
 
 def _ledger(
@@ -269,6 +294,7 @@ async def _drive_and_bill_twice(
         credits_policy=MeteredCreditsPolicy(),
         credits_per_turn=1,
         proportional_credits=True,
+        delivers_streamed_text_on_error=True,
     )
     token = current_user_id.set(owner)
     items: list[tuple[str, object]] = []
@@ -316,8 +342,9 @@ async def test_a_turn_whose_conversation_is_deleted_mid_stream_is_charged_once(
             forget=forget,
         )
         ledger, balance, logs = _ledger(su_url, owner, conv)
+        chunks = _stamped_episodic_chunks(su_url, persona_id, conv)
     finally:
-        _cleanup(su_url, owner)
+        _cleanup(su_url, owner, persona_id)
 
     assert backend.calls == 1
     # The user saw the answer; the turn still ends as an error (nothing to keep it in).
@@ -325,6 +352,10 @@ async def test_a_turn_whose_conversation_is_deleted_mid_stream_is_charged_once(
     assert items[-1][0] == "error"
     assert sink.statuses == ["error"]
     assert logs == 0  # the turn could not be logged
+    # The two cases fail at different steps: a plain delete keeps memory, so the episodic
+    # write landed and the turn_logs insert was refused; a forget-memory delete refused
+    # the episodic write itself, so nothing was written.
+    assert chunks == (0 if forget else 1)
     # Charged exactly once, from the served usage: 0.03 USD actual = 3.0 cents = 3 credits.
     charges = [row for row in ledger if row[0] < 0]
     assert charges == [(-3, "chat_turn:actual_openrouter", served_turn_billing_key(f"msg_{conv}"))]

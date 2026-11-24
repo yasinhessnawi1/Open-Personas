@@ -297,7 +297,7 @@ def _aggregate_round_usage(round_usages: list[TokenUsage]) -> _AggregatedUsage:
     reproduces that lone round's own token counts and ``cost_usd`` exactly.
     Attribution — WHICH model/provider names the turn — is a SEPARATE axis
     untouched by this function; it stays last-round-served (see
-    ``_write_turn_log``'s ``served_model`` / ``served_provider``).
+    ``_build_turn_log``'s ``served_model`` / ``served_provider``).
 
     Args:
         round_usages: Every round's :class:`TokenUsage` this turn produced,
@@ -749,9 +749,9 @@ class ConversationLoop:
         self._last_turn_cost_cents: float | None = None
         self._last_turn_cost_basis: str | None = None
         # R9-316: True once this turn's answer was served and priced, just before its
-        # write-back. A write-back that then fails (the conversation was deleted while
-        # the turn streamed) is a failure to record the turn, not to produce it, so the
-        # chat worker still charges ``last_turn_cost_cents``. Reset at every turn start.
+        # write-back. A write-back that then fails (the insert is refused) is a failure to
+        # record the turn, not to produce it, so the chat worker can still charge
+        # ``last_turn_cost_cents`` where the user kept the text. Reset at every turn start.
         self._last_turn_served = False
         # Spec M1 (M1-T3): the persona's chosen model preempts the Spec 23 scorer.
         # ``None`` (the default) is the pre-M1 path — every existing caller stays
@@ -1834,11 +1834,13 @@ class ConversationLoop:
         #    because the generator stays suspended at an earlier yield.
         latency_ms = (time.perf_counter() - started) * 1000.0
         # R9-316: price the turn BEFORE either write. The answer has streamed and the
-        # provider is paid, so the figure the chat worker charges must exist even when
-        # the conversation was deleted mid-stream and a write below fails: the episodic
+        # provider is paid, so the figure the chat worker charges must exist even when a
+        # write below fails, for example once the conversation row is gone: the episodic
         # write is refused for a forgotten conversation (migration 068), and the TurnLog
-        # insert hits its foreign key to ``conversations``. Either failure ends the turn
-        # as an error that is still charged once, from this figure.
+        # insert is refused (RLS WITH CHECK under ``persona_app``, or the foreign key to
+        # ``conversations``). Either failure ends the turn as an error; on a surface that
+        # kept the streamed text (the web chat) it is still charged once, from this figure.
+        # The flag is set only after pricing, so a fault while pricing is never charged.
         turn_log = self._build_turn_log(
             conversation=conversation,
             tier=tier,
@@ -2363,10 +2365,10 @@ class ConversationLoop:
         Set just before the turn's write-back, once ``last_turn_cost_cents`` holds
         the served answer's cost (and on the R1 bypass, whose completion is shown).
         The chat worker reads it when a turn ends in an error: ``True`` means the
-        user already saw the answer and only recording it failed (for example the
-        conversation was deleted while the turn streamed), so the turn is still
-        charged once. ``False`` means the turn failed before producing anything
-        billable. Reset at every turn start. Read-only.
+        answer streamed and only recording it failed (its write-back was refused), so
+        a surface that kept the streamed text charges the turn once. ``False`` means
+        the turn failed before producing anything billable. Reset at every turn
+        start. Read-only.
         """
         return self._last_turn_served
 

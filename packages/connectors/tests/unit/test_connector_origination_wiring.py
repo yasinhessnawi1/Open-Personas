@@ -291,3 +291,36 @@ async def test_the_real_root_composes_a_registry_that_does_not_charge_for_images
     assert len(captured) == 1, captured
     assert captured[0]["delivers_images"] is False
     assert built[0].delivers_images is False  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_the_real_root_composes_a_registry_that_does_not_charge_an_undelivered_error(
+    tmp_path: Path,
+) -> None:
+    """R9-316: on an error frame ``_collect_reply`` sends only the failure message.
+
+    A turn whose answer streamed but whose write-back was refused is charged on the web,
+    where the text stays on screen. Here the user never receives that text, so the
+    registry states it and the worker charges nothing (D-ORCH-11-18-y).
+    """
+    captured: list[dict[str, object]] = []
+    built: list[object] = []
+    real = build_chat_turn_registry
+
+    def _recording(**kwargs: object) -> object:
+        captured.append(kwargs)
+        registry = real(**kwargs)  # type: ignore[arg-type]
+        built.append(registry)
+        return registry
+
+    config = _connector_config(telegram_bot_token="tg-token")  # noqa: S106 - test literal
+    monkeypatched = pytest.MonkeyPatch()
+    try:
+        monkeypatched.setattr(composition, "build_chat_turn_registry", _recording, raising=True)
+        await _build(config, _api_config(tmp_path))
+    finally:
+        monkeypatched.undo()
+
+    assert len(captured) == 1, captured
+    assert captured[0]["delivers_streamed_text_on_error"] is False
+    assert built[0].delivers_streamed_text_on_error is False  # type: ignore[attr-defined]

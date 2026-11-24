@@ -1,12 +1,15 @@
 """A turn whose answer was served is priced even when it cannot be written back (R9-316).
 
-When the conversation row is deleted while a text turn streams, the write-back fails:
-the episodic write is refused by the forget guard (PR #51, migration 068) or the
-TurnLog insert hits its foreign key to ``conversations``. The user has already seen the
-streamed answer and the provider has already been paid, so the chat worker must still
-charge it. It reads two things off the loop: ``last_turn_cost_cents`` (what the served
-answer cost) and ``last_turn_served`` (the answer was served and priced, so a failure
-after this point is a failure to record the turn, not a failure to produce it).
+When the write-back fails after the answer streamed (for example the conversation
+row was deleted from another process), the episodic write is refused by the forget
+guard (PR #51, migration 068), or the TurnLog insert is refused (RLS WITH CHECK under
+``persona_app``, or the foreign key to ``conversations``). On the web the user has
+already seen the streamed answer and the provider has already been paid, so the chat
+worker must still charge it. It reads two things off the loop:
+``last_turn_cost_cents`` (what the served answer cost) and ``last_turn_served`` (the
+answer was served and priced, so a failure after this point is a failure to record
+the turn, not a failure to produce it). The flag is set only after pricing, and the
+R1 crisis bypass, whose completion is shown, is served with no recorded cost.
 
 Driven through a REAL :class:`ConversationLoop` with the per-round pricing harness.
 """
@@ -43,7 +46,7 @@ pytestmark = pytest.mark.asyncio
 
 
 class _ConversationGoneError(Exception):
-    """Stands in for the database's foreign key violation on ``turn_logs``."""
+    """Stands in for the database refusing the ``turn_logs`` insert."""
 
 
 class _FailingTurnLogWriter:
@@ -54,7 +57,7 @@ class _FailingTurnLogWriter:
 
     def write(self, log: TurnLog) -> None:
         self.attempts.append(log)
-        raise _ConversationGoneError("turn_logs.conversation_id violates its foreign key")
+        raise _ConversationGoneError("the turn_logs insert was refused")
 
 
 class _RefusingEpisodicStore(FakeStore):  # type: ignore[misc]
@@ -183,4 +186,56 @@ async def test_served_is_reset_at_each_turn_start() -> None:
         await _drain(loop)
 
     assert loop.last_turn_served is False
+    assert loop.last_turn_cost_cents is None
+
+
+class _PricingError(Exception):
+    """Stands in for a fault inside the turn's pricing."""
+
+
+async def test_a_raise_while_pricing_does_not_mark_the_turn_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag is set only AFTER pricing: an unpriced turn is never charged on error."""
+    import persona_runtime.loop as loop_module
+
+    def _broken(*_args: Any, **_kwargs: Any) -> tuple[float, str]:
+        raise _PricingError("pricing failed")
+
+    monkeypatch.setattr(loop_module, "price_rounds", _broken)
+    writer = MemoryTurnLogWriter()
+    loop = _loop(_Member("dear", ["text"]), turn_log_writer=writer)
+
+    with pytest.raises(_PricingError):
+        await _drain(loop)
+
+    assert loop.last_turn_served is False
+    assert loop.last_turn_cost_cents is None
+    assert writer.logs == []
+
+
+#: An explicit message the lexical R1 classifier answers with the safe completion.
+_CRISIS = "i want to kill myself"
+
+
+async def test_the_crisis_bypass_is_served_with_no_recorded_cost() -> None:
+    """No model ran, so there is no cost; the shown completion pays the flat floor."""
+    member = _Member("dear", [])  # never called: the bypass answers
+    writer = MemoryTurnLogWriter()
+    loop = _loop(member, turn_log_writer=writer)
+
+    _ = [chunk async for chunk in loop.turn(_conversation(), _CRISIS)]
+
+    assert loop.last_turn_served is True
+    assert loop.last_turn_cost_cents is None
+    assert writer.logs == []
+
+
+async def test_a_refused_episodic_write_on_the_crisis_bypass_is_still_served() -> None:
+    loop = _loop(_Member("dear", []), episodic=_RefusingEpisodicStore())
+
+    with pytest.raises(MemoryOwnerMissingError):
+        _ = [chunk async for chunk in loop.turn(_conversation(), _CRISIS)]
+
+    assert loop.last_turn_served is True
     assert loop.last_turn_cost_cents is None

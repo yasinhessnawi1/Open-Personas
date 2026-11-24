@@ -212,6 +212,11 @@ async def delete_conversation(
        the conversation, its messages and its memory in place, and the delete
        can be retried. The documents (step 2) run first and are not rolled back.
 
+    A turn still streaming in this conversation is cancelled first (R9-316), the way
+    persona erasure cancels its live work: it ends ``cancelled``, stops calling the
+    model, and is not charged, like any user cancel. Without this it ran on, failed
+    at its write-back once the row was gone, and ended as an error.
+
     404 if not the caller's conversation (RLS-scoped).
     """
     # Pre-fetch persona_id BEFORE the DB delete — chat_service.delete_conversation
@@ -221,6 +226,12 @@ async def delete_conversation(
         rls_engine=request.app.state.rls_engine, conversation_id=conversation_id
     )
     persona_id = str(conv["persona_id"])
+
+    # R9-316: after the ownership check (so a foreign id cancels nothing) and before anything
+    # is removed. Best effort and this process only, as ``_cancel_live_work`` is for a persona.
+    turns = getattr(request.app.state, "chat_turn_registry", None)
+    if turns is not None:
+        turns.request_cancel(conversation_id)
 
     # K11-T3: wire the forget cascade's collaborators only when actually asked for
     # AND the memory backend is composed — a keyless/community boot without a
