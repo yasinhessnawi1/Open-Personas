@@ -15,7 +15,14 @@ out of the graph, by the persona erasure's rules with the conversation as the so
   conversation's entries; the SELF node keeps dated stubs. Its wording stays as it is, so it
   may still include words this conversation added (merging appends them, unattributed; R9-311);
 - version snapshots get the same treatment, an edge this conversation asserted goes with its
-  mirrors, and an entity it established goes when nothing links to it, else loses the citation.
+  mirrors, and an entity it established goes when nothing links to it, else loses the citation;
+- an episodic consolidation entry whose window lists this conversation (``conversation_ids``)
+  is this conversation's too (R9-325): its gist is removed when any of the window's chunks is
+  forgotten. The other conversations' chunks are gisted again (and reach the graph again) only
+  if a consolidation pass runs after the forget's memory job has removed the old gist, the
+  chunks are still among the persona's newest ``engine_max_batch`` episodic chunks (the
+  engine's batch, 500 by default), and the new window is not a transient action log. A
+  consolidation entry written before R9-325 lists no conversations and is left as it is.
 
 Why not the Memory page's per-fact delete, node by node: that delete takes every duplicate
 merged into the fact with it (D-R9-287-forget-canonical, right when the user says "this fact is
@@ -78,7 +85,9 @@ _BUSY_SQLSTATES = frozenset({"55P03", "40P01"})
 class ConversationGraphPreview:
     """What forgetting a conversation's memory would do to the facts the user sees in Memory.
 
-    ``facts_removed``: facts only this conversation supports. ``facts_kept``: facts another
+    ``facts_removed``: facts only this conversation supports, including one made only from an
+    episodic gist whose window also covered another conversation (R9-325: the gist goes when
+    either is forgotten). ``facts_kept``: facts another
     source also supports, which stay without this conversation as a source. Only its entries
     go: a kept fact's wording may still include words from this conversation, which merging
     appended and nothing attributes to it (R9-311). Merged duplicates (hidden behind their

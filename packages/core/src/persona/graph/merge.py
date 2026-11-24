@@ -470,8 +470,13 @@ class MergeEngine:
         idempotent (K2 crit 8).
         """
         said = candidate.provenance
-        key = (said.interaction_id, said.persona_id, said.source)
-        if any((p.interaction_id, p.persona_id, p.source) == key for p in target.provenance):
+        # An episodic gist has no interaction id; the conversations of its window tell two
+        # windows apart, and the conversation forget finds the entry by them (R9-325).
+        key = (said.interaction_id, said.persona_id, said.source, said.conversation_ids)
+        if any(
+            (p.interaction_id, p.persona_id, p.source, p.conversation_ids) == key
+            for p in target.provenance
+        ):
             return
         entry = NodeProvenance(
             source=said.source,
@@ -481,6 +486,7 @@ class MergeEngine:
             written_at=said.written_at,
             reason=RESTATED_REASON,
             channel=said.channel,
+            conversation_ids=said.conversation_ids,
         )
         written = self._backend.append_provenance(
             owner_id,

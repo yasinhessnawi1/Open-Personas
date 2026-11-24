@@ -106,7 +106,11 @@ Trail = list[dict[str, Any]]
 #: What is taken out of the graph: the provenance fields an entry from it carries. A persona
 #: (``{"persona_id": ...}``, the erasure) or one conversation (``{"interaction_id": ...}``,
 #: R9-304's conversation forget). Matched by JSONB containment in SQL and field by field here.
+#: A conversation also has the episodic gists made from it (R9-325, see :func:`_shapes`).
 Source = Mapping[str, str]
+
+# Where an episodic consolidation entry lists the conversations its window came from (R9-325).
+_WINDOW_KEY = "conversation_ids"
 
 # What a stub keeps of an entry: when it was written and by what kind of source.
 _STUB_KEYS = ("source", "written_at")
@@ -132,9 +136,41 @@ def persona_source(persona_id: str) -> Source:
     return {"persona_id": persona_id}
 
 
+def _shapes(source: Source) -> list[dict[str, Any]]:
+    """The shapes of an entry from ``source``, each matched by JSONB containment.
+
+    The source's own fields; and for a conversation, an episodic consolidation entry whose
+    window lists it (R9-325). The gist such an entry was made from is removed when any chunk
+    of its window is forgotten, so the entry is that conversation's too, whatever else the
+    window held. The other conversations' chunks are gisted again, and reach the graph again,
+    only when a consolidation pass runs after the forget's memory job has removed the old
+    gist, they are still among the persona's newest ``engine_max_batch`` episodic chunks
+    (500 by default; the engine looks no further back), and the new window is not a transient
+    action log. Otherwise what they contributed stays in their raw chunks only. A legacy
+    consolidation entry lists no conversations and matches no conversation.
+    """
+    shapes: list[dict[str, Any]] = [dict(source)]
+    conversation = source.get("interaction_id")
+    if conversation is not None:
+        shapes.append({_WINDOW_KEY: [conversation]})
+    return shapes
+
+
+def _contains(entry: Mapping[str, Any], shape: Mapping[str, Any]) -> bool:
+    """JSONB ``@>`` for one entry: each field equal, and a list field holding every value."""
+    for key, wanted in shape.items():
+        value = entry.get(key)
+        if isinstance(wanted, list):
+            if not isinstance(value, list | tuple) or any(w not in value for w in wanted):
+                return False
+        elif value != wanted:
+            return False
+    return True
+
+
 def _is_from(entry: object, source: Source) -> bool:
-    """Whether a provenance entry came from ``source``: it carries every one of its fields."""
-    return isinstance(entry, Mapping) and all(entry.get(k) == v for k, v in source.items())
+    """Whether a provenance entry came from ``source``: it has one of the source's shapes."""
+    return isinstance(entry, Mapping) and any(_contains(entry, s) for s in _shapes(source))
 
 
 def _is_consolidation(entry: object) -> bool:
@@ -339,7 +375,7 @@ def _any_of(column: Any, values: Iterable[Any], element: Any) -> Any:  # noqa: A
 
 def _naming(column: Any, source: Source) -> Any:  # noqa: ANN401 - SQL expressions
     """A JSONB trail (a list of entries) with an entry from this source."""
-    return cast(column, JSONB).contains([dict(source)])
+    return or_(*(cast(column, JSONB).contains([shape]) for shape in _shapes(source)))
 
 
 def _set_metadata(conn: Connection, owner_id: str, node: Any, metadata: dict[str, Any]) -> None:  # noqa: ANN401 - a Row
@@ -745,7 +781,7 @@ def _versions(conn: Connection, owner_id: str, source: Source) -> dict[str, int]
 
 def _asserted(column: Any, source: Source) -> Any:  # noqa: ANN401 - SQL expressions
     """A single JSONB entry (an edge's or an entity's) from this source."""
-    return cast(column, JSONB).contains(dict(source))
+    return or_(*(cast(column, JSONB).contains(shape) for shape in _shapes(source)))
 
 
 def mirror_id_for(

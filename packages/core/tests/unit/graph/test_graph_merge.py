@@ -430,6 +430,41 @@ def test_restating_a_fact_through_another_persona_records_that_persona() -> None
     assert [p.persona_id for p in node.provenance] == ["persona-a", "persona-b"]
 
 
+def _gist_of(*conversations: str) -> NodeProvenance:
+    """An episodic consolidation entry: no interaction, the window's conversations (R9-325)."""
+    return NodeProvenance(
+        source=WriteSource.PERSONA_SELF,
+        persona_id="persona-a",
+        written_at=NOW,
+        reason="sleep-time episodic consolidation",
+        conversation_ids=conversations,
+    )
+
+
+def test_a_gist_restating_a_fact_records_the_conversations_it_came_from() -> None:
+    """R9-325: the support entry keeps the window's conversations, so their forget finds it."""
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_said_in("conv-c")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_gist_of("conv-c")))
+
+    (entry,) = b.appended
+    assert entry.conversation_ids == ("conv-c",)
+    assert entry.reason == merge_module.RESTATED_REASON
+
+
+def test_a_gist_of_another_window_restating_a_fact_is_recorded_too() -> None:
+    """Two windows, same persona, no interaction id: told apart by their conversations."""
+    b = _FakeBackend()
+    eng = _engine(b, {"works as a nurse": vec(0)})
+    eng.merge("u1", _cand("works as a nurse", provenance=_gist_of("conv-c")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_gist_of("conv-d")))
+    eng.merge("u1", _cand("works as a nurse", provenance=_gist_of("conv-d")))
+
+    node, _ = b.nodes["u1::node::00000000"]
+    assert [p.conversation_ids for p in node.provenance] == [("conv-c",), ("conv-d",)]
+
+
 # ----- accumulate + provenance --------------------------------------------
 
 
