@@ -712,6 +712,14 @@ def test_a_correction_made_in_a_conversation_is_held_by_the_conversation_guard()
     assert cited_conversations([entry]) == ["conv-c"]
 
 
+def test_the_correction_kind_is_the_conversation_interaction_kind() -> None:
+    """R9-311 review LOW-3: merge.py spells the kind out (extraction imports the graph); it must
+    stay the value the guard and every other writer use."""
+    from persona.extraction import InteractionKind  # noqa: PLC0415
+
+    assert InteractionKind.CONVERSATION.value == merge_module._CORRECTION_INTERACTION_KIND
+
+
 def test_a_correction_made_outside_a_conversation_names_no_kind() -> None:
     b = _RacedBackend(races=0)
     node_id = _created(b)
