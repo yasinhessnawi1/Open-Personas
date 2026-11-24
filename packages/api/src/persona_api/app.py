@@ -533,6 +533,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             task_steering_service=task_steering_service,
             task_reschedule_service=task_reschedule_service,
             initiative_verb_service=initiative_verb_service,
+            # R9-316: the web chat keeps the streamed text on screen when a turn ends on
+            # an error, so an answer that streamed before its write-back was refused was
+            # delivered, and is charged once.
+            delivers_streamed_text_on_error=True,
         )
         if chat_turn_sink is not None and rls_engine is not None
         else None

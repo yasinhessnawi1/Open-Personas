@@ -51,6 +51,7 @@ def build_chat_turn_registry(
     task_reschedule_service: TaskRescheduleService | None = None,
     initiative_verb_service: InitiativeVerbService | None = None,
     delivers_images: bool = True,
+    delivers_streamed_text_on_error: bool,
 ) -> ChatTurnRegistry:
     """Build the detached chat-turn registry with the edition's full billing set.
 
@@ -80,6 +81,12 @@ def build_chat_turn_registry(
             surface that cannot show images MUST pass ``False``, or its users are charged
             for images they never receive. The connectors pass ``False``: they send only
             text, so an image a persona makes there is not charged.
+        delivers_streamed_text_on_error: Whether the user still has the streamed text
+            when a turn ends on an error frame (R9-316). Required, so every surface
+            states it. The web chat passes ``True``: what streamed stays on screen, so
+            a turn whose answer streamed but whose write-back was refused is charged
+            once. The connectors pass ``False``: on an error they send only the failure
+            message, so that turn delivered nothing and is not charged.
 
     Returns:
         The composed :class:`~persona_api.background.chat_turn_worker.ChatTurnRegistry`.
@@ -106,6 +113,7 @@ def build_chat_turn_registry(
         task_reschedule_service=task_reschedule_service,
         initiative_verb_service=initiative_verb_service,
         delivers_images=delivers_images,
+        delivers_streamed_text_on_error=delivers_streamed_text_on_error,
         # R9-313: shutdown gives up on a turn that will not end
         # (PERSONA_API_CHAT_TURN_SHUTDOWN_TIMEOUT_SECONDS).
         shutdown_timeout_s=config.chat_turn_shutdown_timeout_seconds,

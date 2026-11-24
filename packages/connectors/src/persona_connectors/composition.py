@@ -535,6 +535,10 @@ def build_reply_runner(
         # a persona makes here reaches nobody. The owner ruled it is not charged; the
         # house pays until a channel can deliver images. Stated here, not inferred.
         delivers_images=False,
+        # R9-316: on an error frame ``_collect_reply`` raises and the user gets only the
+        # failure message, never the text that streamed. A turn whose write-back failed
+        # after serving delivered nothing here, so it is not charged (D-ORCH-11-18-y).
+        delivers_streamed_text_on_error=False,
     )
     locks = _ConversationLocks()
 
